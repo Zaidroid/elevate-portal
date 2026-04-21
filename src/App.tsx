@@ -120,7 +120,7 @@ function ToolSelectionPage({ toggleTheme, isDarkMode }: { toggleTheme: () => voi
           <div className="flex items-center gap-3">
             <div className="text-right hidden sm:block">
               <p className="text-sm font-semibold text-slate-900 dark:text-white">{user?.name}</p>
-              <p className="text-xs text-indigo-600 dark:text-indigo-300 font-medium">{user?.title || user?.role}</p>
+              <p className="text-xs text-indigo-600 dark:text-indigo-300 font-medium uppercase tracking-wider">{user?.role === 'admin' ? 'Administrator' : 'Team Member'}</p>
             </div>
             <div className="relative">
               <div className="absolute inset-0 bg-indigo-500 rounded-full blur-md opacity-20 dark:opacity-40"></div>
