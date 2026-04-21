@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from './services/auth';
-import { RefreshCw, Users, Calendar, ClipboardCheck, ArrowRight, LogOut } from 'lucide-react';
+import { RefreshCw, Users, Calendar, ClipboardCheck, ArrowRight, LogOut, Lock, Rocket, ShieldCheck } from 'lucide-react';
 
 const TOOLS = [
   {
@@ -87,12 +87,10 @@ function ToolSelectionPage() {
       {/* Header */}
       <header className={`relative z-10 p-6 flex justify-between items-center transition-all duration-1000 ease-out ${isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4'}`}>
         <div className="flex items-center gap-4">
-          <div className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-md flex items-center justify-center border border-white/20">
-            <img src="/elevate-logo.png" alt="Logo" className="h-6 object-contain" />
-          </div>
-          <div>
-            <h1 className="text-white font-semibold tracking-tight">Elevate Portal</h1>
-            <p className="text-slate-400 text-xs">Command Center</p>
+          <img src="/elevate-logo.png" alt="Logo" className="h-12 object-contain drop-shadow-md" />
+          <div className="hidden sm:block border-l border-white/20 pl-4">
+            <h1 className="text-white font-bold tracking-tight text-lg">Elevate Portal</h1>
+            <p className="text-indigo-300 text-xs font-medium tracking-wide uppercase">Command Center</p>
           </div>
         </div>
         
@@ -207,16 +205,16 @@ function AuthGate() {
               <img
                 src="/elevate-logo.png"
                 alt="Elevate Logo"
-                className="relative h-40 w-auto object-contain mx-auto mb-6 drop-shadow-2xl animate-fade-in-up"
+                className="relative h-48 w-auto object-contain mx-auto mb-6 drop-shadow-2xl animate-fade-in-up"
                 style={{ animationDelay: '0.2s' }}
               />
             </div>
-            <p
-              className="text-xl font-semibold text-white tracking-tight animate-fade-in-up"
+            <h1
+              className="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-white to-indigo-300 tracking-tight animate-fade-in-up"
               style={{ animationDelay: '0.4s' }}
             >
               Command Center
-            </p>
+            </h1>
           </div>
 
           {/* Login Card */}
@@ -257,15 +255,15 @@ function AuthGate() {
               {/* Features */}
               <div className="space-y-3">
                 {[
-                  { icon: '🔒', title: 'Unified Access', desc: 'One login for all Elevate apps' },
-                  { icon: '🚀', title: 'Quick Launch', desc: 'Seamlessly switch between tools' },
-                  { icon: '🛡️', title: 'Secure Gateway', desc: 'Authorized team members only' },
+                  { icon: <Lock className="w-5 h-5 text-indigo-400" />, title: 'Unified Access', desc: 'One login for all Elevate apps' },
+                  { icon: <Rocket className="w-5 h-5 text-purple-400" />, title: 'Quick Launch', desc: 'Seamlessly switch between tools' },
+                  { icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />, title: 'Secure Gateway', desc: 'Authorized team members only' },
                 ].map((feature, i) => (
                   <div
                     key={i}
                     className="flex items-center gap-4 p-3 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition-colors duration-300"
                   >
-                    <span className="text-xl">{feature.icon}</span>
+                    {feature.icon}
                     <div>
                       <p className="text-sm font-medium text-white">{feature.title}</p>
                       <p className="text-xs text-slate-300">{feature.desc}</p>
