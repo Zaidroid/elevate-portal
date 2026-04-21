@@ -75,57 +75,67 @@ function FloatingBackground() {
 function ToolSelectionPage() {
   const { user, signOut } = useAuth();
   const [isLoaded, setIsLoaded] = useState(false);
+  const [greeting, setGreeting] = useState('');
 
   useEffect(() => {
     setIsLoaded(true);
+    const hour = new Date().getHours();
+    if (hour < 12) setGreeting('Good morning');
+    else if (hour < 18) setGreeting('Good afternoon');
+    else setGreeting('Good evening');
   }, []);
 
+  const firstName = user?.name?.split(' ')[0] || 'Team';
+
   return (
-    <div className="min-h-screen bg-slate-900 flex flex-col relative overflow-hidden">
+    <div className="min-h-screen bg-[#0B0F19] flex flex-col relative overflow-hidden">
       <FloatingBackground />
       
       {/* Header */}
-      <header className={`relative z-10 p-6 flex justify-between items-center transition-all duration-1000 ease-out ${isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4'}`}>
-        <div className="flex items-center gap-4">
-          <img src="/elevate-logo.png" alt="Logo" className="h-12 object-contain drop-shadow-md" />
-          <div className="hidden sm:block border-l border-white/20 pl-4">
-            <h1 className="text-white font-bold tracking-tight text-lg">Elevate Portal</h1>
-            <p className="text-indigo-300 text-xs font-medium tracking-wide uppercase">Command Center</p>
+      <header className={`relative z-20 px-8 py-6 flex justify-between items-center transition-all duration-1000 ease-out ${isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4'}`}>
+        <div className="flex items-center gap-6">
+          <img src="/elevate-logo.png" alt="Logo" className="h-16 object-contain drop-shadow-2xl" />
+          <div className="hidden sm:block border-l border-white/10 pl-6 py-1">
+            <h1 className="text-white font-semibold tracking-wide text-lg">Elevate</h1>
+            <p className="text-indigo-400 text-xs font-bold tracking-widest uppercase mt-0.5">Workspace</p>
           </div>
         </div>
         
-        <div className="flex items-center gap-4 bg-white/5 backdrop-blur-md px-4 py-2 rounded-full border border-white/10">
+        <div className="flex items-center gap-5 bg-white/5 backdrop-blur-xl px-5 py-2.5 rounded-2xl border border-white/10 shadow-lg">
           <div className="flex items-center gap-3">
-            <img src={user?.picture || `https://ui-avatars.com/api/?name=${user?.name}&background=6366f1&color=fff`} alt={user?.name} className="w-8 h-8 rounded-full border border-white/20" />
-            <div className="hidden sm:block">
-              <p className="text-sm font-medium text-white">{user?.name}</p>
-              <p className="text-xs text-slate-400">{user?.role}</p>
+            <div className="text-right hidden sm:block">
+              <p className="text-sm font-semibold text-white">{user?.name}</p>
+              <p className="text-xs text-indigo-300 font-medium">{user?.title || user?.role}</p>
+            </div>
+            <div className="relative">
+              <div className="absolute inset-0 bg-indigo-500 rounded-full blur-md opacity-40"></div>
+              <img src={user?.picture || `https://ui-avatars.com/api/?name=${user?.name}&background=4f46e5&color=fff&bold=true`} alt={user?.name} className="relative w-10 h-10 rounded-full border-2 border-white/10 object-cover" />
             </div>
           </div>
-          <div className="w-px h-6 bg-white/10 mx-2" />
+          <div className="w-px h-8 bg-white/10" />
           <button 
             onClick={signOut}
-            className="text-slate-300 hover:text-white p-1 transition-colors"
+            className="text-slate-400 hover:text-white p-2 hover:bg-white/10 rounded-xl transition-all duration-300 group"
             title="Sign out"
           >
-            <LogOut className="w-4 h-4" />
+            <LogOut className="w-5 h-5 group-hover:scale-110 transition-transform" />
           </button>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 relative z-10 flex flex-col items-center justify-center p-6 sm:p-12">
-        <div className={`max-w-5xl w-full transition-all duration-1000 delay-150 ease-out ${isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
-          <div className="text-center mb-16">
-            <h2 className="text-4xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400 tracking-tight mb-4">
-              Where to today?
+      <main className="flex-1 relative z-10 flex flex-col items-center justify-center p-6 sm:p-12 mb-10">
+        <div className={`max-w-6xl w-full transition-all duration-1000 delay-150 ease-out ${isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-12'}`}>
+          <div className="text-center mb-20">
+            <h2 className="text-5xl md:text-6xl font-extrabold text-transparent bg-clip-text bg-gradient-to-br from-white via-indigo-50 to-slate-400 tracking-tight mb-6">
+              {greeting}, {firstName}.
             </h2>
-            <p className="text-slate-400 text-lg max-w-2xl mx-auto">
-              Select an application to launch. You are securely signed in across all Elevate platforms.
+            <p className="text-slate-400 text-xl max-w-2xl mx-auto font-medium">
+              Select a workspace to begin. You are securely authenticated across all Elevate tools.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
             {TOOLS.map((tool, idx) => {
               const Icon = tool.icon;
               // Pass SSO tokens in hash
@@ -143,22 +153,23 @@ function ToolSelectionPage() {
                   href={toolUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className={`group relative flex flex-col p-8 rounded-3xl bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 backdrop-blur-xl transition-all duration-500 ease-out hover:-translate-y-2 hover:shadow-[0_20px_40px_-15px_rgba(0,0,0,0.5)] animate-fade-in-up`}
+                  className={`group relative flex flex-col p-10 rounded-[2.5rem] bg-gradient-to-b from-white/[0.08] to-white/[0.02] hover:from-white/[0.12] hover:to-white/[0.05] border border-white/10 backdrop-blur-2xl transition-all duration-500 ease-out hover:-translate-y-3 shadow-2xl hover:shadow-[0_0_80px_-20px_rgba(79,70,229,0.3)] animate-fade-in-up`}
                   style={{ animationDelay: `${idx * 0.15 + 0.3}s` }}
                 >
-                  <div className={`absolute inset-0 rounded-3xl bg-gradient-to-br ${tool.color} opacity-0 group-hover:opacity-10 transition-opacity duration-500`} />
+                  {/* Subtle color glow based on tool */}
+                  <div className={`absolute inset-0 rounded-[2.5rem] bg-gradient-to-br ${tool.color} opacity-0 group-hover:opacity-5 transition-opacity duration-700`} />
                   
-                  <div className="mb-6 flex justify-between items-start">
-                    <div className={`w-14 h-14 rounded-2xl bg-white/10 flex items-center justify-center border border-white/5 transition-transform duration-500 group-hover:scale-110 group-hover:rotate-3`}>
-                      <Icon className={`w-7 h-7 text-slate-300 ${tool.hoverColor} transition-colors duration-300`} />
+                  <div className="mb-8 flex justify-between items-start">
+                    <div className={`w-16 h-16 rounded-2xl bg-gradient-to-br from-white/10 to-white/5 flex items-center justify-center border border-white/10 shadow-inner transition-all duration-500 group-hover:scale-110 group-hover:rotate-6 group-hover:shadow-[0_0_30px_-5px_rgba(255,255,255,0.2)]`}>
+                      <Icon className={`w-8 h-8 text-slate-300 ${tool.hoverColor} transition-colors duration-500`} />
                     </div>
-                    <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center group-hover:bg-white/10 transition-colors duration-300">
-                      <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-white transition-all duration-300 group-hover:translate-x-0.5" />
+                    <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center group-hover:bg-white/10 transition-all duration-500 group-hover:scale-110">
+                      <ArrowRight className="w-5 h-5 text-slate-400 group-hover:text-white transition-all duration-500 group-hover:translate-x-1" />
                     </div>
                   </div>
 
-                  <h3 className="text-2xl font-semibold text-white mb-3">{tool.name}</h3>
-                  <p className="text-slate-400 leading-relaxed flex-1">{tool.description}</p>
+                  <h3 className="text-2xl font-bold text-white mb-4 tracking-tight group-hover:text-transparent group-hover:bg-clip-text group-hover:bg-gradient-to-r group-hover:from-white group-hover:to-slate-300 transition-all duration-300">{tool.name}</h3>
+                  <p className="text-slate-400 text-base leading-relaxed flex-1 font-medium group-hover:text-slate-300 transition-colors duration-300">{tool.description}</p>
                 </a>
               );
             })}
