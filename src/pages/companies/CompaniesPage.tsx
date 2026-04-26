@@ -35,7 +35,8 @@ import { displayName, getProfileManagers, isAdmin } from '../../config/team';
 import { pillarFor } from '../../config/interventions';
 import { INTERVIEWED_NAMES, INTERVIEWED_RAW, isInterviewed } from './interviewedSource';
 import { ReviewView } from './ReviewView';
-import type { ReviewableCompany } from './ReviewView';
+import type { ReviewableCompany, SelectionContext } from './ReviewView';
+import { indexByCompanyName, lookupByName } from './selectionContext';
 import { ExpandableCompanyCard } from './ExpandableCompanyCard';
 import type { CardCompany } from './ExpandableCompanyCard';
 import {
@@ -170,6 +171,19 @@ export function CompaniesPage() {
     'id',
     { userEmail: user?.email }
   );
+
+  // Prior team evaluation context — every relevant tab from the Selection
+  // workbook surfaces inline in the Review view so the reviewer sees what
+  // the team has already concluded (scoring, doc review notes, interview
+  // assessment, interview discussion, committee votes) without having to
+  // open the workbook. Read-only here; the Selection tool owns CRUD.
+  const scoring = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'scoringMatrix'), 'id', { userEmail: user?.email });
+  const docReviews = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'docReviews'), 'id', { userEmail: user?.email });
+  const companyNeeds = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'companyNeeds'), 'id', { userEmail: user?.email });
+  const interviewAssessments = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'interviewAssessments'), 'id', { userEmail: user?.email });
+  const interviewDiscussion = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'interviewDiscussion'), 'id', { userEmail: user?.email });
+  const committeeVotes = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'committeeVotes'), 'id', { userEmail: user?.email });
+  const selectionVotes = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'selectionVotes'), 'id', { userEmail: user?.email });
 
   // Intervention Assignments tab — drives the per-card pillar dots and the
   // "(N interventions)" badges on the kanban + roster. The detail page owns
@@ -745,25 +759,46 @@ export function CompaniesPage() {
     return m;
   }, [masterE3]);
 
+  // Index every Selection tab once, so per-company context lookups are O(1).
+  const scoringIdx = useMemo(() => indexByCompanyName(scoring.rows), [scoring.rows]);
+  const docReviewIdx = useMemo(() => indexByCompanyName(docReviews.rows), [docReviews.rows]);
+  const needsIdx = useMemo(() => indexByCompanyName(companyNeeds.rows), [companyNeeds.rows]);
+  const interviewAssessIdx = useMemo(() => indexByCompanyName(interviewAssessments.rows), [interviewAssessments.rows]);
+  const interviewDiscIdx = useMemo(() => indexByCompanyName(interviewDiscussion.rows), [interviewDiscussion.rows]);
+  const committeeIdx = useMemo(() => indexByCompanyName(committeeVotes.rows), [committeeVotes.rows]);
+  const selectionVotesIdx = useMemo(() => indexByCompanyName(selectionVotes.rows), [selectionVotes.rows]);
+
   const reviewableForView: ReviewableCompany[] = useMemo(() => {
-    return reviewableCompanies.map(r => ({
-      route_id: r.route_id,
-      applicant_id: r.applicant_id,
-      company_id: r.company_id,
-      company_name: r.company_name,
-      sector: r.sector,
-      city: r.city,
-      governorate: r.governorate,
-      employee_count: r.employee_count,
-      readiness_score: r.readiness_score,
-      fund_code: r.fund_code,
-      status: r.status,
-      profile_manager_email: r.profile_manager_email,
-      contact_email: r.contact_email,
-      applicantRaw: applicantByName.get(norm(r.company_name)) || null,
-      masterRaw: (masterById.get(r.company_id) as unknown as Record<string, string>) || null,
-    }));
-  }, [reviewableCompanies, applicantByName, masterById]);
+    return reviewableCompanies.map(r => {
+      const selection: SelectionContext = {
+        scoring: lookupByName(scoringIdx, r.company_name),
+        docReview: lookupByName(docReviewIdx, r.company_name),
+        needs: lookupByName(needsIdx, r.company_name),
+        interviewAssessment: lookupByName(interviewAssessIdx, r.company_name),
+        interviewDiscussion: lookupByName(interviewDiscIdx, r.company_name),
+        committeeVotes: lookupByName(committeeIdx, r.company_name),
+        selectionVotes: lookupByName(selectionVotesIdx, r.company_name),
+      };
+      return {
+        route_id: r.route_id,
+        applicant_id: r.applicant_id,
+        company_id: r.company_id,
+        company_name: r.company_name,
+        sector: r.sector,
+        city: r.city,
+        governorate: r.governorate,
+        employee_count: r.employee_count,
+        readiness_score: r.readiness_score,
+        fund_code: r.fund_code,
+        status: r.status,
+        profile_manager_email: r.profile_manager_email,
+        contact_email: r.contact_email,
+        applicantRaw: applicantByName.get(norm(r.company_name)) || null,
+        masterRaw: (masterById.get(r.company_id) as unknown as Record<string, string>) || null,
+        selection,
+      };
+    });
+  }, [reviewableCompanies, applicantByName, masterById, scoringIdx, docReviewIdx, needsIdx, interviewAssessIdx, interviewDiscIdx, committeeIdx, selectionVotesIdx]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
