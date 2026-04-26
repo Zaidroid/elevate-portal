@@ -14,7 +14,7 @@ import { CATEGORY_META, NEXT_ACTION, PIPELINE_COLUMNS } from '../../lib/advisor-
 import type { AdvisorPipelineId } from '../../lib/advisor-scoring';
 import type { FollowUp } from '../../types/advisor';
 import type { CompanyLite, EnrichedAdvisor } from './utils';
-import { renderTemplate, suggestedTemplate, templateMailto, templateOutlookWebUrl, TEMPLATE_LABELS, type TemplateKey } from './emailTemplates';
+import { ALL_TEMPLATE_KEYS, renderTemplate, suggestedTemplate, templateMailto, templateOutlookWebUrl, TEMPLATE_LABELS, type TemplateKey } from './emailTemplates';
 import { advisorToMarkdown, downloadMarkdown, googleCalendarUrl, suggestMatches } from './smartMatch';
 
 const inputClass =
@@ -230,15 +230,21 @@ function NextActionCard({
   const action = NEXT_ACTION[currentId];
   if (!action) return null;
   const nextLabel = action.nextStatus ? ID_TO_LABEL[action.nextStatus] : null;
-  const tplKey: TemplateKey = suggestedTemplate(advisor.pipeline_status || 'New');
+  const suggested: TemplateKey = suggestedTemplate(advisor.pipeline_status || 'New');
+  const [tplKey, setTplKey] = useState<TemplateKey>(suggested);
+  // Reset selection when the suggested template changes (e.g. after a status
+  // move within the open drawer).
+  useEffect(() => { setTplKey(suggested); }, [suggested]);
+
   const matchedCompany = advisor.assignment_company_id
     ? companies.find(c => c.company_id === advisor.assignment_company_id)
     : undefined;
-  const rendered = renderTemplate(tplKey, {
+  const renderFor = (k: TemplateKey) => renderTemplate(k, {
     advisor: { full_name: advisor.full_name, email: advisor.email, position: advisor.position, employer: advisor.employer, country: advisor.country },
     sender: { name: userName, email: userEmail, title: userTitle },
     company: matchedCompany ? { company_name: matchedCompany.company_name } : undefined,
   });
+  const rendered = renderFor(tplKey);
   const mailto = templateMailto(rendered);
   const outlookWeb = templateOutlookWebUrl(rendered);
 
@@ -313,6 +319,28 @@ function NextActionCard({
           )}
         </div>
       </div>
+      {advisor.email && (
+        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-brand-red/15 pt-2">
+          <span className="text-2xs font-semibold uppercase tracking-wider text-slate-500">Switch template:</span>
+          {ALL_TEMPLATE_KEYS.map(k => (
+            <button
+              key={k}
+              onClick={() => setTplKey(k)}
+              className={`rounded-full px-2 py-0.5 text-2xs font-semibold transition-colors ${
+                tplKey === k
+                  ? 'bg-brand-teal text-white'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-navy-700 dark:text-slate-200 dark:hover:bg-navy-600'
+              }`}
+              title={TEMPLATE_LABELS[k]}
+            >
+              {TEMPLATE_LABELS[k]}
+              {k === suggested && (
+                <span className="ml-1 opacity-60">(suggested)</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

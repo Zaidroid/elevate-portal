@@ -10,7 +10,7 @@ export type TemplateKey =
   | 'welcome'
   | 'intro_invite'
   | 'match_offer'
-  | 'rejection'
+  | 'on_file'
   | 'thank_you';
 
 export type TemplateContext = {
@@ -80,14 +80,14 @@ const TEMPLATES: Record<TemplateKey, (ctx: TemplateContext) => { subject: string
       `Are you open to an intro call with the founder? If yes, I'll set it up this week.` +
       SIGNATURE(sender),
   }),
-  rejection: ({ advisor, sender }) => ({
-    subject: `Update on your GSG advisor application`,
+  on_file: ({ advisor, sender }) => ({
+    subject: `Welcome to the GSG advisor network`,
     body:
       `Dear ${firstName(advisor.full_name) || 'there'},\n\n` +
-      `Thank you for your interest in supporting Gaza Sky Geeks (GSG) community. We deeply appreciate your willingness to share your time, knowledge, and expertise with our community.\n\n` +
-      `After reviewing our current mentorship needs, we have determined that your expertise, while impressive, may not be required at this stage. However, we truly value your interest and would love to stay connected for future opportunities as our community's needs evolve.\n\n` +
-      `We will keep your application on file and reach out when there's a better fit for your skills. Please feel free to stay engaged with us through the GSG Newsletter.\n\n` +
-      `Thank you again for your interest and for being part of GSG's extended network.` +
+      `Thank you for applying and for your genuine interest in supporting Palestinian tech companies. We are glad to have you in our network.\n\n` +
+      `We match advisors to companies based on their specific intervention needs, confirmed once our company cohort is finalised. Your profile and expertise are on file and we will reach out as soon as there is a strong match for you.\n\n` +
+      `We look forward to working with you and hope you stay connected through the GSG Newsletter in the meantime.\n\n` +
+      `Best regards,` +
       SIGNATURE(sender),
   }),
   thank_you: ({ advisor, sender }) => ({
@@ -143,7 +143,7 @@ export function suggestedTemplate(pipelineStatus: string): TemplateKey {
     case 'Approved':
       return 'match_offer';
     case 'Rejected':
-      return 'rejection';
+      return 'on_file';
     case 'Matched':
       return 'thank_you';
     default:
@@ -152,9 +152,14 @@ export function suggestedTemplate(pipelineStatus: string): TemplateKey {
 }
 
 export const TEMPLATE_LABELS: Record<TemplateKey, string> = {
-  welcome: 'Welcome / intro invite',
-  intro_invite: 'Welcome / intro invite',
+  welcome: 'Welcome & intro invite',
+  intro_invite: 'Welcome & intro invite',
   match_offer: 'Match offer',
-  rejection: 'Polite decline',
+  on_file: 'On file — waiting for match',
   thank_you: 'Thank you / wrap',
 };
+
+// All templates exposed to the picker, in the order they should appear.
+// `intro_invite` is intentionally omitted — it's an alias of `welcome`,
+// so showing both would just be visual noise.
+export const ALL_TEMPLATE_KEYS: TemplateKey[] = ['welcome', 'on_file', 'match_offer', 'thank_you'];
