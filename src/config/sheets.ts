@@ -72,15 +72,28 @@ export const SHEETS: Record<string, ModuleConfig> = {
     },
   },
   freelancers: {
-    label: 'E3 - Freelancers',
+    label: 'E3 - Freelancers (ElevateBridge)',
     sheetId: env('VITE_SHEET_FREELANCERS'),
     tabs: {
+      dashboard: 'Dashboard',
       freelancers: 'Freelancers',
+      followups: 'FollowUps',
+      activity: 'ActivityLog',
+      comments: 'Comments',
       tracks: 'Track Assignments',
       income: 'Income Tracking',
       assessments: 'Assessments',
       lookups: 'Lookups',
     },
+  },
+  // Live Google Form responses sheet for ElevateBridge applicants — same
+  // pattern as advisorsFormResponses. The portal auto-pulls new rows from
+  // here every 5 minutes and appends them to the Freelancers tab as
+  // status='Available'.
+  freelancersFormResponses: {
+    label: 'ElevateBridge Freelancers Application Responses (form)',
+    sheetId: env('VITE_SHEET_FREELANCERS_FORM_RESPONSES'),
+    tabs: { responses: 'Form Responses 1' },
   },
   teamRoster: {
     label: 'E3 - Team Roster',
