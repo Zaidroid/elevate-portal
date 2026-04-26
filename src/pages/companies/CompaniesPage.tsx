@@ -456,6 +456,25 @@ export function CompaniesPage() {
     [joined, interviewedSet]
   );
 
+  // Surface every interview-list name that did NOT find a match against any
+  // applicant in Source Data. These are either spelling drift (fix the static
+  // list) or genuinely missing applicants (Phase 4 Day 2 had a few with no
+  // info). The badge is a click-to-expand inline diagnostic.
+  const unmatchedInterviewed = useMemo(() => {
+    const have = new Set(joined.map(r => norm(r.company_name)));
+    return INTERVIEWED_RAW.filter(name => {
+      const k = norm(name);
+      if (!k) return false;
+      if (have.has(k)) return false;
+      for (const h of have) {
+        if (h.length < 4) continue;
+        if (h.includes(k) || k.includes(h)) return false;
+      }
+      return true;
+    });
+  }, [joined]);
+  const [showUnmatched, setShowUnmatched] = useState(false);
+
   const tabs: TabItem[] = [
     { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
     { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: counts.total },
@@ -470,7 +489,19 @@ export function CompaniesPage() {
             <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Companies</h1>
             <Badge tone="teal">{joined.length} cohort 3</Badge>
             {interviewedSet.size > 0 && (
-              <Badge tone="amber">{interviewedCount} interviewed</Badge>
+              <Badge tone="amber">
+                {interviewedCount} / {INTERVIEWED_RAW.length} interviewed
+              </Badge>
+            )}
+            {unmatchedInterviewed.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowUnmatched(s => !s)}
+                className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+                title="Click to view names that didn't match any applicant in Source Data"
+              >
+                {unmatchedInterviewed.length} unmatched
+              </button>
             )}
           </div>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
@@ -478,6 +509,19 @@ export function CompaniesPage() {
             scheduled across Phases 1–4 (April 2026); edit{' '}
             <code className="rounded bg-slate-100 px-1 py-0.5 text-[11px] dark:bg-slate-800">interviewedSource.ts</code> to update.
           </p>
+          {showUnmatched && unmatchedInterviewed.length > 0 && (
+            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+              <div className="mb-1 font-semibold">
+                {unmatchedInterviewed.length} schedule name{unmatchedInterviewed.length === 1 ? '' : 's'} didn't match any applicant in Source Data:
+              </div>
+              <ul className="ml-4 list-disc space-y-0.5">
+                {unmatchedInterviewed.map(n => (<li key={n}>{n}</li>))}
+              </ul>
+              <div className="mt-1.5 text-[11px] opacity-80">
+                Either the spelling differs from Source Data (fix it in interviewedSource.ts) or the company isn't in the 107.
+              </div>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
