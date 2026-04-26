@@ -5,7 +5,7 @@
 // instances (advisors, followups, activity, comments). Joining is done
 // client-side in `enrichAdvisors`.
 
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity as ActivityIcon,
   AlertCircle,
@@ -101,6 +101,9 @@ export function AdvisorsPage() {
   // Default view hides Archived (pre-Cohort 3 historicals + parked rows).
   // Admin toggles it on to inspect the archive.
   const [showArchived, setShowArchived] = useState(false);
+  // `importing` is still tracked so a future manual refresh can show a
+  // pulsing icon, but the visible "Pull from form" button has been replaced
+  // with an auto-poll every 5 minutes.
   const [importing, setImporting] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -283,52 +286,88 @@ export function AdvisorsPage() {
     }
   };
 
-  const handleImportFromForm = async () => {
-    if (!sheetId) return;
+  // Refs so the auto-poll closure always sees the latest hook data without
+  // re-creating the effect every time advHook.rows / .headers update (which
+  // would tear down and rebuild the interval on every poll cycle).
+  const importStateRef = useRef({
+    sheetId: sheetId || '',
+    headers: advHook.headers,
+    existing: advHook.rows,
+    userEmail,
+  });
+  importStateRef.current = {
+    sheetId: sheetId || '',
+    headers: advHook.headers,
+    existing: advHook.rows,
+    userEmail,
+  };
+
+  // Single import runner used by both the auto-poll and any future manual
+  // trigger. `silent: true` suppresses the "0 new" notification.
+  const runFormImport = useCallback(async (silent: boolean) => {
+    const s = importStateRef.current;
+    if (!s.sheetId) return;
     const formSheetId = getSheetId('advisorsFormResponses');
     const formTab = getTab('advisorsFormResponses', 'responses');
     if (!formSheetId) {
-      toast.error('Set VITE_SHEET_ADVISORS_FORM_RESPONSES in your environment to enable form import.');
+      if (!silent) toast.error('Set VITE_SHEET_ADVISORS_FORM_RESPONSES in your environment to enable form import.');
       return;
     }
-    setImporting(true);
+    if (!silent) setImporting(true);
     try {
       const result = await importNewFormResponses({
         formSheetId,
         formTabName: formTab,
-        destSheetId: sheetId,
+        destSheetId: s.sheetId,
         destTabName: tabAdvisors,
-        destHeaders: advHook.headers,
-        existingAdvisors: advHook.rows,
-        userEmail,
+        destHeaders: s.headers,
+        existingAdvisors: s.existing,
+        userEmail: s.userEmail,
       });
       if (result.errors.length > 0) {
-        toast.error(`Import error: ${result.errors[0]}`);
-      } else if (result.imported === 0) {
-        toast.success(`Form has ${result.fetched} entries · ${result.alreadyKnown} already in tracker · 0 new`);
-      } else {
-        toast.success(`Imported ${result.imported} new entries (${result.archived} archived as pre-2026)`);
+        if (!silent) toast.error(`Import error: ${result.errors[0]}`);
+        else console.warn('[advisors] auto-import error:', result.errors[0]);
+        return;
       }
-      await advHook.refresh();
-      if (sheetId && result.imported > 0) {
-        // Append a single ActivityLog row summarising the import so the audit
-        // trail captures who pulled when.
-        await appendActivity(sheetId, tabActivity, {
-          user_email: userEmail,
+      if (result.imported > 0) {
+        // Always notify the user when something actually lands, even on auto.
+        toast.success(`${result.imported} new advisor entr${result.imported === 1 ? 'y' : 'ies'} imported${result.archived > 0 ? ` (${result.archived} pre-2026)` : ''}`);
+        await advHook.refresh();
+        await appendActivity(s.sheetId, tabActivity, {
+          user_email: s.userEmail,
           advisor_id: '',
           action: 'form_import',
           field: 'count',
           new_value: String(result.imported),
-          details: `${result.fetched} fetched, ${result.alreadyKnown} dupes, ${result.archived} archived`,
+          details: `auto-poll · ${result.fetched} fetched, ${result.alreadyKnown} dupes`,
         });
         await actHook.refresh();
+      } else if (!silent) {
+        toast.success(`Form has ${result.fetched} entries · all ${result.alreadyKnown} already in tracker`);
       }
     } catch (err) {
-      toast.error(`Import failed: ${(err as Error).message}`);
+      if (!silent) toast.error(`Import failed: ${(err as Error).message}`);
+      else console.warn('[advisors] auto-import failed', err);
     } finally {
-      setImporting(false);
+      if (!silent) setImporting(false);
     }
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabAdvisors, tabActivity]);
+
+  // Auto-poll: pull from the linked Google Form responses sheet on a 5-min
+  // cadence. Fires once 3s after mount (after the initial useSheetDoc load
+  // settles) and then every 5 minutes. Silent unless something new lands.
+  useEffect(() => {
+    if (!sheetId || !canEdit) return;
+    if (!getSheetId('advisorsFormResponses')) return;
+    const POLL_MS = 5 * 60 * 1000;
+    const first = setTimeout(() => { void runFormImport(true); }, 3000);
+    const interval = setInterval(() => { void runFormImport(true); }, POLL_MS);
+    return () => {
+      clearTimeout(first);
+      clearInterval(interval);
+    };
+  }, [sheetId, canEdit, runFormImport]);
 
   const handleAddComment = async (body: string) => {
     if (!selected) return;
@@ -410,10 +449,10 @@ export function AdvisorsPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           {canEdit && (
-            <Button onClick={handleImportFromForm} disabled={importing} variant="primary">
-              <CloudDownload className={`h-4 w-4 ${importing ? 'animate-pulse' : ''}`} />
-              {importing ? 'Pulling…' : 'Pull from form'}
-            </Button>
+            <span className="inline-flex items-center gap-1 self-center text-2xs font-semibold uppercase tracking-wider text-slate-400">
+              <CloudDownload className={`h-3 w-3 ${importing ? 'animate-pulse text-brand-teal' : ''}`} />
+              Auto-syncing form
+            </span>
           )}
           <Button variant="ghost" onClick={() => setShowArchived(v => !v)}>
             <Archive className="h-4 w-4" /> {showArchived ? 'Hide archived' : 'Show archived'}
