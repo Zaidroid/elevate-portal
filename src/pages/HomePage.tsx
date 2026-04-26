@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+// PMFocus uses a local useMemo too, so it's imported via the same statement.
 import { Link } from 'react-router-dom';
 import {
   Activity,
@@ -95,6 +96,22 @@ type TimelineEvent = {
 };
 
 type ModuleTone = 'red' | 'teal' | 'orange' | 'indigo';
+
+type CohortPhase = 'selection' | 'onboarding' | 'execution' | 'closeout';
+
+const PHASE_LABEL: Record<CohortPhase, string> = {
+  selection: 'Selection & Review',
+  onboarding: 'Onboarding',
+  execution: 'Execution',
+  closeout: 'Closeout & Reporting',
+};
+
+const PHASE_DESCRIPTION: Record<CohortPhase, string> = {
+  selection: 'Going through interviewed companies, deciding the final cohort and the intervention pack.',
+  onboarding: 'Onboarding selected companies — kickoffs, agreements, first interventions.',
+  execution: 'Interventions in flight. Procurement, payments, and conferences active.',
+  closeout: 'Wrapping up the cohort — completion, reporting, and graduation.',
+};
 
 type ModuleDef = {
   to: string;
@@ -325,7 +342,7 @@ export function HomePage() {
   // Cohort progress funnel — how many post-interview companies sit in each
   // status bucket. Drives the cohort-progress strip in the hero.
   const cohortProgress = useMemo(() => {
-    const buckets = { Interviewed: 0, Reviewing: 0, Recommended: 0, Selected: 0, Onboarded: 0, Active: 0 };
+    const buckets = { Interviewed: 0, Reviewing: 0, Recommended: 0, Selected: 0, Onboarded: 0, Active: 0, Graduated: 0 };
     const interviewedSet = new Set(INTERVIEWED_RAW.map(n => n.toLowerCase()));
     for (const c of companies.rows) {
       const isPost = isInterviewed(c.company_name || '', INTERVIEWED_NAMES) || interviewedSet.has((c.company_name || '').toLowerCase());
@@ -336,6 +353,66 @@ export function HomePage() {
     }
     return buckets;
   }, [companies.rows]);
+
+  // Detect the phase the cohort is in. The home page's primary CTA pivots
+  // based on this — no point showing a 'Continue review' card when the
+  // team has finished review and moved into onboarding/execution.
+  const phase: CohortPhase = useMemo(() => {
+    const earlySelection = (cohortProgress.Interviewed || 0) + (cohortProgress.Reviewing || 0) + (cohortProgress.Recommended || 0);
+    const onboarding = (cohortProgress.Selected || 0) + (cohortProgress.Onboarded || 0);
+    const execution = (cohortProgress.Active || 0);
+    const closeout = (cohortProgress.Graduated || 0);
+    const max = Math.max(earlySelection, onboarding, execution, closeout);
+    if (max === 0) return 'selection';
+    if (max === earlySelection) return 'selection';
+    if (max === onboarding) return 'onboarding';
+    if (max === execution) return 'execution';
+    return 'closeout';
+  }, [cohortProgress]);
+
+  // Per-company review summary — drives "needs my review" and "divergent"
+  // signals for both PM and admin focus blocks.
+  const reviewsByCompany = useMemo(() => {
+    const m = new Map<string, Review[]>();
+    for (const r of reviewsDoc.rows) {
+      if (!r.company_id) continue;
+      const arr = m.get(r.company_id) || [];
+      arr.push(r);
+      m.set(r.company_id, arr);
+    }
+    return m;
+  }, [reviewsDoc.rows]);
+
+  // Workload distribution: count of companies per Profile Manager. Drives
+  // the admin focus block.
+  const pmWorkload = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of companies.rows) {
+      const pm = (c.profile_manager_email || '').toLowerCase().trim();
+      if (!pm) continue;
+      m.set(pm, (m.get(pm) || 0) + 1);
+    }
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+  }, [companies.rows]);
+
+  // Bottleneck signals — companies with no PM, divergent reviews, etc.
+  const bottlenecks = useMemo(() => {
+    const interviewedCompanies = companies.rows.filter(c =>
+      isInterviewed(c.company_name || '', INTERVIEWED_NAMES)
+    );
+    const unassigned = interviewedCompanies.filter(c => !c.profile_manager_email).length;
+    let divergent = 0;
+    let needsAnyReview = 0;
+    for (const c of interviewedCompanies) {
+      if (!c.company_id) continue;
+      const rs = reviewsByCompany.get(c.company_id) || [];
+      const decisionsActual = rs.map(r => r.decision).filter(Boolean);
+      if (decisionsActual.length === 0) needsAnyReview += 1;
+      const distinctDecisions = new Set(decisionsActual);
+      if (distinctDecisions.size > 1) divergent += 1;
+    }
+    return { unassigned, divergent, needsAnyReview };
+  }, [companies.rows, reviewsByCompany]);
 
   const activity = useMemo(() => {
     const events: TimelineEvent[] = [];
@@ -443,14 +520,15 @@ export function HomePage() {
   return (
     <div className="mx-auto max-w-6xl space-y-10">
       <header className="space-y-2">
-        <div className="eyebrow">Cohort 3 · Week {week} of {COHORT_TOTAL_WEEKS}</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="eyebrow">Cohort 3 · Week {week} of {COHORT_TOTAL_WEEKS}</span>
+          <PhaseChip phase={phase} />
+        </div>
         <h1 className="display-h1 dark:text-white">
           {greeting}, {firstName}.
         </h1>
         <p className="max-w-[720px] text-[15px] leading-relaxed text-slate-600 dark:text-slate-300">
-          {tier === 'leadership' && 'Your command center. Every module is backed by a Google Sheet — edit in either place.'}
-          {tier === 'profile_manager' && `Your portfolio: ${mine.companies.length} companies, ${mine.assignments.length} interventions. Both the sheet and the app stay in sync.`}
-          {tier === 'member' && 'Your active Cohort 3 workstreams. Every module is backed by a Google Sheet.'}
+          {PHASE_DESCRIPTION[phase]}
         </p>
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <Badge tone={tier === 'leadership' ? 'red' : tier === 'profile_manager' ? 'teal' : 'neutral'}>
@@ -462,20 +540,66 @@ export function HomePage() {
           >
             <KanbanSquare className="h-3.5 w-3.5" /> Workboard
           </Link>
+          {tier === 'profile_manager' && (
+            <span className="text-xs text-slate-500 dark:text-slate-400">
+              · {mine.companies.length} companies · {mine.assignments.length} interventions
+            </span>
+          )}
         </div>
       </header>
 
-      {/* ── Review queue (the active workstream) ── */}
-      {reviewQueue.total > 0 && (
+      {/* ── Phase-aware hero ── */}
+      {phase === 'selection' && reviewQueue.total > 0 && (
         <ReviewQueueCard
           total={reviewQueue.total}
           reviewed={reviewQueue.reviewed}
           mine={reviewQueue.mine}
         />
       )}
+      {phase === 'onboarding' && (
+        <OnboardingHero
+          selectedCount={cohortProgress.Selected || 0}
+          onboardedCount={cohortProgress.Onboarded || 0}
+          openAgreements={docs.rows.filter(d => !['Executed', 'Countersigned'].includes(d.status || '')).length}
+        />
+      )}
+      {phase === 'execution' && (
+        <ExecutionHero
+          activeCount={cohortProgress.Active || 0}
+          activeInterventions={kpis.activeAssignments}
+          openPRs={kpis.openPRs}
+          pendingPayments={kpis.pendingPaymentsCount}
+        />
+      )}
+      {phase === 'closeout' && (
+        <ClosetHero graduatedCount={cohortProgress.Graduated || 0} />
+      )}
 
       {/* ── Cohort progress funnel ── */}
       <CohortProgressStrip buckets={cohortProgress} total={INTERVIEWED_RAW.length} />
+
+      {/* ── Role-specific focus block ── */}
+      {tier === 'leadership' && (
+        <AdminFocus
+          bottlenecks={bottlenecks}
+          pmWorkload={pmWorkload}
+          kpis={kpis}
+        />
+      )}
+      {tier === 'profile_manager' && (
+        <PMFocus
+          mine={mine}
+          interviewedSet={INTERVIEWED_NAMES}
+          reviewsByCompany={reviewsByCompany}
+          userEmail={user?.email || ''}
+        />
+      )}
+      {tier === 'member' && (
+        <MemberFocus
+          reviewQueue={reviewQueue}
+          activity={activity.filter(e => e.who?.toLowerCase() === (user?.email || '').toLowerCase()).slice(0, 5)}
+        />
+      )}
 
       <section
         aria-label="Summary"
@@ -916,5 +1040,383 @@ function CohortProgressStrip({ buckets, total }: { buckets: Record<string, numbe
         })}
       </div>
     </section>
+  );
+}
+
+// Small phase chip rendered next to the cohort week label in the header.
+function PhaseChip({ phase }: { phase: CohortPhase }) {
+  const tone: Record<CohortPhase, string> = {
+    selection: 'bg-brand-teal/10 text-brand-teal border-brand-teal/30',
+    onboarding: 'bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-950 dark:text-orange-200',
+    execution: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-200',
+    closeout: 'bg-slate-200 text-slate-700 border-slate-300 dark:bg-navy-700 dark:text-slate-200',
+  };
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${tone[phase]}`}>
+      Phase: {PHASE_LABEL[phase]}
+    </span>
+  );
+}
+
+// Onboarding-phase hero. Shown when most companies sit in Selected /
+// Onboarded — the action shifts from review to kickoff + agreements.
+function OnboardingHero({ selectedCount, onboardedCount, openAgreements }: { selectedCount: number; onboardedCount: number; openAgreements: number }) {
+  return (
+    <Link to="/companies" className="group block animate-fade-in-up">
+      <div className="relative overflow-hidden rounded-2xl border border-orange-300/50 bg-gradient-to-br from-orange-50 via-white to-amber-50/40 p-5 shadow-card transition-all hover:-translate-y-0.5 hover:border-orange-500/60 hover:shadow-card-lg dark:border-orange-800/40 dark:from-orange-950/30 dark:via-navy-600 dark:to-navy-700">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-brand-orange text-white shadow">
+              <Building2 className="h-6 w-6" />
+            </div>
+            <div>
+              <div className="text-2xs font-extrabold uppercase tracking-[0.1em] text-brand-orange">Active workstream</div>
+              <h2 className="mt-0.5 text-xl font-extrabold text-navy-500 dark:text-white">Cohort onboarding</h2>
+              <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">
+                {selectedCount} selected · {onboardedCount} onboarded · {openAgreements} open agreements.
+              </p>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1 self-center rounded-lg bg-brand-orange px-3 py-2 text-sm font-bold text-white">
+            Manage portfolio <ArrowRight className="h-4 w-4" />
+          </span>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+// Execution-phase hero. Most companies are Active — focus shifts to PRs,
+// payments, and live interventions.
+function ExecutionHero({ activeCount, activeInterventions, openPRs, pendingPayments }: { activeCount: number; activeInterventions: number; openPRs: number; pendingPayments: number }) {
+  return (
+    <div className="relative overflow-hidden rounded-2xl border border-emerald-300/40 bg-gradient-to-br from-emerald-50 via-white to-teal-50/40 p-5 shadow-card dark:border-emerald-800/40 dark:from-emerald-950/30 dark:via-navy-600 dark:to-navy-700">
+      <div className="flex items-start gap-3">
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow">
+          <Activity className="h-6 w-6" />
+        </div>
+        <div className="flex-1">
+          <div className="text-2xs font-extrabold uppercase tracking-[0.1em] text-emerald-700 dark:text-emerald-300">Active workstream</div>
+          <h2 className="mt-0.5 text-xl font-extrabold text-navy-500 dark:text-white">Cohort in execution</h2>
+          <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">
+            {activeCount} active companies · {activeInterventions} live interventions.
+          </p>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <Link to="/procurement" className="rounded-lg border border-slate-200 bg-white px-3 py-2 hover:border-brand-teal dark:border-navy-700 dark:bg-navy-700">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Open PRs</div>
+              <div className="mt-0.5 text-2xl font-extrabold text-navy-500 dark:text-white">{openPRs}</div>
+            </Link>
+            <Link to="/payments" className="rounded-lg border border-slate-200 bg-white px-3 py-2 hover:border-brand-teal dark:border-navy-700 dark:bg-navy-700">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Payments pending</div>
+              <div className="mt-0.5 text-2xl font-extrabold text-brand-orange">{pendingPayments}</div>
+            </Link>
+            <Link to="/board" className="rounded-lg border border-slate-200 bg-white px-3 py-2 hover:border-brand-teal dark:border-navy-700 dark:bg-navy-700">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Live interventions</div>
+              <div className="mt-0.5 text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">{activeInterventions}</div>
+            </Link>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Closeout-phase hero. The cohort is wrapping up — graduation + reporting.
+function ClosetHero({ graduatedCount }: { graduatedCount: number }) {
+  return (
+    <Link to="/reports" className="group block animate-fade-in-up">
+      <div className="relative overflow-hidden rounded-2xl border border-slate-300 bg-gradient-to-br from-slate-50 via-white to-slate-100 p-5 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-lg dark:border-navy-700 dark:from-navy-600 dark:via-navy-600 dark:to-navy-700">
+        <div className="flex items-start gap-3">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-slate-700 text-white shadow">
+            <TrendingUp className="h-6 w-6" />
+          </div>
+          <div>
+            <div className="text-2xs font-extrabold uppercase tracking-[0.1em] text-slate-600 dark:text-slate-300">Active workstream</div>
+            <h2 className="mt-0.5 text-xl font-extrabold text-navy-500 dark:text-white">Closeout & reporting</h2>
+            <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">
+              {graduatedCount} companies graduated. Pull cross-module reports for the donor packs.
+            </p>
+          </div>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+// Admin focus — bottlenecks + workload + fund pace at a glance.
+function AdminFocus({
+  bottlenecks,
+  pmWorkload,
+  kpis,
+}: {
+  bottlenecks: { unassigned: number; divergent: number; needsAnyReview: number };
+  pmWorkload: Array<[string, number]>;
+  kpis: { openPRs: number; pendingPaymentsCount: number; pendingPaymentsTotal: number; activeAssignments: number; companiesTotal: number };
+}) {
+  return (
+    <section className="grid gap-4 lg:grid-cols-3">
+      <Card>
+        <CardHeader
+          overline="Bottlenecks"
+          title={<span className="inline-flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-brand-red" /> What's stuck</span>}
+          subtitle="Where the cohort needs unblocking"
+        />
+        <ul className="space-y-2 text-sm">
+          <BottleneckRow
+            label="Companies with no PM"
+            count={bottlenecks.unassigned}
+            severity={bottlenecks.unassigned > 0 ? 'red' : 'neutral'}
+            to="/companies"
+            hint="Assign owners on the company detail page"
+          />
+          <BottleneckRow
+            label="Companies with no team review"
+            count={bottlenecks.needsAnyReview}
+            severity={bottlenecks.needsAnyReview > 5 ? 'amber' : 'neutral'}
+            to="/companies"
+            hint="Open Review tab to triage"
+          />
+          <BottleneckRow
+            label="Divergent reviews"
+            count={bottlenecks.divergent}
+            severity={bottlenecks.divergent > 0 ? 'amber' : 'neutral'}
+            to="/companies"
+            hint="Team disagrees on the call"
+          />
+          <BottleneckRow
+            label="Open PRs"
+            count={kpis.openPRs}
+            severity="neutral"
+            to="/procurement"
+          />
+        </ul>
+      </Card>
+
+      <Card>
+        <CardHeader
+          overline="Team"
+          title="PM workload"
+          subtitle="Companies per Profile Manager"
+        />
+        {pmWorkload.length === 0 ? (
+          <EmptyState title="No PM assignments yet" description="Once companies have owners, you'll see workload distribution here." />
+        ) : (
+          <ul className="space-y-2">
+            {pmWorkload.slice(0, 6).map(([email, count]) => (
+              <li key={email} className="flex items-center gap-3 text-sm">
+                <span className="flex-1 truncate font-semibold text-navy-500 dark:text-slate-100">
+                  {displayName(email)}
+                </span>
+                <div className="flex w-32 items-center gap-2">
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+                    <div
+                      className="h-full bg-brand-teal"
+                      style={{ width: `${Math.min(100, (count / Math.max(1, pmWorkload[0][1])) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-xs font-bold text-slate-600 dark:text-slate-300 tabular">{count}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader
+          overline="Finance"
+          title="Pace"
+          subtitle="Live across the cohort"
+        />
+        <dl className="space-y-2 text-sm">
+          <FocusRow label="Companies in master" value={kpis.companiesTotal} />
+          <FocusRow label="Live interventions" value={kpis.activeAssignments} />
+          <FocusRow label="Open PRs" value={kpis.openPRs} />
+          <FocusRow label="Payments awaiting" value={`${kpis.pendingPaymentsCount} · $${formatAmount(kpis.pendingPaymentsTotal)}`} />
+        </dl>
+      </Card>
+    </section>
+  );
+}
+
+// PM focus — your portfolio + your reviews.
+function PMFocus({
+  mine,
+  interviewedSet,
+  reviewsByCompany,
+  userEmail,
+}: {
+  mine: { companies: Master[]; assignments: Assignment[]; prs: PR[]; payments: Payment[] };
+  interviewedSet: Set<string>;
+  reviewsByCompany: Map<string, Review[]>;
+  userEmail: string;
+}) {
+  const lower = userEmail.toLowerCase();
+  // Companies I haven't reviewed yet from the interviewed cohort.
+  const myReviewQueue = useMemo(() => {
+    const out: { id: string; name: string }[] = [];
+    for (const c of mine.companies) {
+      if (!c.company_id) continue;
+      if (!isInterviewed(c.company_name || '', interviewedSet)) continue;
+      const rs = reviewsByCompany.get(c.company_id) || [];
+      const reviewed = rs.some(r => r.reviewer_email?.toLowerCase() === lower && r.decision);
+      if (!reviewed) out.push({ id: c.company_id, name: c.company_name || c.company_id });
+    }
+    return out;
+  }, [mine.companies, interviewedSet, reviewsByCompany, lower]);
+
+  return (
+    <section className="grid gap-4 lg:grid-cols-3">
+      <Card className="lg:col-span-2">
+        <CardHeader
+          overline="Your portfolio"
+          title="My companies"
+          subtitle={`${mine.companies.length} companies you're the Profile Manager for`}
+          action={<Link to="/companies?view=mine" className="text-xs font-semibold text-brand-teal hover:underline">All</Link>}
+        />
+        {mine.companies.length === 0 ? (
+          <EmptyState title="No companies assigned to you yet" description="A company is assigned when an intervention names you as the owner." />
+        ) : (
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {mine.companies.slice(0, 8).map(c => {
+              const activeCount = mine.assignments.filter(
+                a => a.company_id === c.company_id && ['Planned', 'In Progress'].includes(a.status || '')
+              ).length;
+              return (
+                <Link
+                  key={c.company_id}
+                  to={`/companies/${c.company_id}`}
+                  className="rounded-xl border border-slate-200 p-3 transition hover:border-brand-teal dark:border-navy-700"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-bold text-navy-500 dark:text-white">{c.company_name || c.company_id}</div>
+                      <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                        {c.sector || '—'} · {activeCount} active
+                      </div>
+                    </div>
+                    {c.status && <Badge tone={statusTone(c.status)}>{c.status}</Badge>}
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader
+          overline="Action items"
+          title="Reviews I owe"
+          subtitle={myReviewQueue.length === 0 ? 'You\'re caught up.' : `${myReviewQueue.length} of your portfolio still need your review`}
+          action={myReviewQueue.length > 0 ? <Link to="/companies" className="text-xs font-semibold text-brand-teal hover:underline">Open Review</Link> : undefined}
+        />
+        {myReviewQueue.length === 0 ? (
+          <EmptyState title="All caught up" description="No outstanding reviews on your portfolio." />
+        ) : (
+          <ul className="space-y-1.5">
+            {myReviewQueue.slice(0, 8).map(c => (
+              <li key={c.id}>
+                <Link to={`/companies/${c.id}`} className="block rounded-md border border-slate-200 px-2.5 py-1.5 text-sm hover:border-brand-teal dark:border-navy-700">
+                  <div className="truncate font-semibold text-navy-500 dark:text-slate-100">{c.name}</div>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+    </section>
+  );
+}
+
+// Member focus — review queue + own activity. Lighter view since members
+// don't own portfolios.
+function MemberFocus({
+  reviewQueue,
+  activity,
+}: {
+  reviewQueue: { total: number; reviewed: number; mine: number };
+  activity: TimelineEvent[];
+}) {
+  const myRemaining = Math.max(0, reviewQueue.total - reviewQueue.mine);
+  return (
+    <section className="grid gap-4 lg:grid-cols-2">
+      <Card>
+        <CardHeader
+          overline="Action items"
+          title="Reviews you can contribute"
+          subtitle={myRemaining > 0 ? `${myRemaining} companies you haven't reviewed yet` : 'You\'ve reviewed every company.'}
+        />
+        {myRemaining > 0 ? (
+          <Link to="/companies" className="inline-flex items-center gap-1 rounded-lg bg-brand-teal px-3 py-2 text-sm font-bold text-white">
+            Continue review <ArrowRight className="h-4 w-4" />
+          </Link>
+        ) : (
+          <EmptyState title="Done" description="No outstanding reviews." />
+        )}
+      </Card>
+      <Card>
+        <CardHeader overline="Recent" title="Your activity" />
+        {activity.length === 0 ? (
+          <EmptyState title="No recent activity" description="When you edit data, it shows up here." />
+        ) : (
+          <ul className="space-y-2">
+            {activity.map((e, i) => (
+              <li key={i}>
+                <Link to={e.to || '#'} className="block rounded-md p-1.5 hover:bg-slate-50 dark:hover:bg-navy-700">
+                  <div className="flex items-center gap-2">
+                    <Badge tone={e.tone || 'neutral'}>{e.kind}</Badge>
+                    <span className="text-xs text-slate-400">{relativeTime(e.when)}</span>
+                  </div>
+                  <div className="mt-0.5 text-sm font-medium text-navy-500 dark:text-white">{e.title}</div>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+    </section>
+  );
+}
+
+function BottleneckRow({
+  label,
+  count,
+  severity,
+  to,
+  hint,
+}: {
+  label: string;
+  count: number;
+  severity: 'red' | 'amber' | 'neutral';
+  to: string;
+  hint?: string;
+}) {
+  const sev: Record<string, string> = {
+    red: 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200',
+    amber: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200',
+    neutral: 'bg-slate-100 text-slate-700 dark:bg-navy-700 dark:text-slate-200',
+  };
+  return (
+    <li>
+      <Link to={to} className="flex items-center gap-3 rounded-md py-1.5 transition hover:bg-slate-50 dark:hover:bg-navy-700">
+        <span className={`inline-flex h-7 min-w-[2rem] items-center justify-center rounded-md px-1.5 text-sm font-bold tabular ${sev[severity]}`}>
+          {count}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold text-navy-500 dark:text-slate-100">{label}</div>
+          {hint && <div className="text-[11px] text-slate-500 dark:text-slate-400">{hint}</div>}
+        </div>
+      </Link>
+    </li>
+  );
+}
+
+function FocusRow({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="flex items-center justify-between border-b border-slate-100 py-1.5 last:border-b-0 dark:border-navy-800">
+      <span className="text-sm font-semibold text-slate-500 dark:text-slate-400">{label}</span>
+      <span className="text-sm font-bold tabular text-navy-500 dark:text-white">{value}</span>
+    </div>
   );
 }

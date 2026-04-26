@@ -137,27 +137,54 @@ function getRequestedPillars(app: Record<string, string>): Set<string> {
 // Recommended pillars derive from (a) the comma-separated assessedInterventions
 // field on Interview Assessment and (b) the Company Needs flags (Domain
 // Coaching = Yes, Elevate Bridge = Yes, etc.) that the selection-tool sets.
-function getRecommendedPillars(sel: SelectionContext): Set<string> {
-  const out = new Set<string>();
+// Per-pillar recommendation breakdown — captures BOTH which pillars
+// were recommended AND why, so the UI can show "Recommended via Interview
+// Assessment" vs "Recommended via Company Needs (Marketing Maturity =
+// Mature)". The Set returned by getRecommendedPillars stays for back-
+// compat with code that just needs a yes/no.
+type RecommendationReason = {
+  source: 'interview' | 'needs';
+  detail: string;
+};
+function getRecommendationReasons(sel: SelectionContext): Map<string, RecommendationReason[]> {
+  const out = new Map<string, RecommendationReason[]>();
+  const push = (pillar: string, source: RecommendationReason['source'], detail: string) => {
+    const arr = out.get(pillar) || [];
+    arr.push({ source, detail });
+    out.set(pillar, arr);
+  };
+
   const assessed = sel.interviewAssessment?.assessedInterventions || sel.interviewAssessment?.['Assessed Interventions'] || '';
   if (assessed) {
     for (const t of assessed.split(',')) {
       const code = t.trim();
       const p = pillarFor(code)?.code;
-      if (p) out.add(p);
+      if (p) push(p, 'interview', `Assessed: ${code}`);
     }
   }
+
   const n = sel.needs;
   if (n) {
-    if (asBool(n['Train To Hire']) || asBool(n['Train-to-Hire']) || asBool(n['TTH'])) out.add('TTH');
-    if (asBool(n['Upskilling']) || (n['Upskilling'] && n['Upskilling'] !== 'No' && n['Upskilling'] !== '0')) out.add('Upskilling');
-    if (n['Marketing Maturity'] || n['Marketing']) out.add('MKG');
-    if (n['Legal Tier'] || n['Legal Urgency'] || n['Legal']) out.add('MA');
-    if (asBool(n['Domain Coaching']) || n['Primary Domain']) out.add('C-Suite');
-    if (asBool(n['Elevate Bridge']) || asBool(n['ElevateBridge'])) out.add('ElevateBridge');
-    if (asBool(n['Conferences'])) out.add('Conferences');
+    if (asBool(n['Train To Hire']) || asBool(n['Train-to-Hire']) || asBool(n['TTH']))
+      push('TTH', 'needs', `Train To Hire = ${n['Train To Hire'] || n['Train-to-Hire'] || n['TTH']}`);
+    if (asBool(n['Upskilling']) || (n['Upskilling'] && n['Upskilling'] !== 'No' && n['Upskilling'] !== '0'))
+      push('Upskilling', 'needs', `Upskilling = ${n['Upskilling']}`);
+    if (n['Marketing Maturity'] || n['Marketing'])
+      push('MKG', 'needs', `Marketing Maturity = ${n['Marketing Maturity'] || n['Marketing']}`);
+    if (n['Legal Tier'] || n['Legal Urgency'] || n['Legal'])
+      push('MA', 'needs', `Legal Tier = ${n['Legal Tier'] || n['Legal Urgency'] || n['Legal']}`);
+    if (asBool(n['Domain Coaching']) || n['Primary Domain'])
+      push('C-Suite', 'needs', `Primary Domain = ${n['Primary Domain'] || n['Domain Coaching']}`);
+    if (asBool(n['Elevate Bridge']) || asBool(n['ElevateBridge']))
+      push('ElevateBridge', 'needs', `Elevate Bridge = Yes`);
+    if (asBool(n['Conferences']))
+      push('Conferences', 'needs', `Conferences = Yes`);
   }
   return out;
+}
+
+function getRecommendedPillars(sel: SelectionContext): Set<string> {
+  return new Set(getRecommendationReasons(sel).keys());
 }
 
 export function ReviewView({
@@ -784,7 +811,6 @@ function GlanceTab({
   sel,
   summary,
   requestedPillars,
-  recommendedPillars,
 }: {
   company: ReviewableCompany;
   application: Record<string, string>;
@@ -797,6 +823,7 @@ function GlanceTab({
   const aboutKey = presentInApp(APPLICATION_KEY_FIELDS[0][1]);
   const whyKey = presentInApp(APPLICATION_KEY_FIELDS[1][1]);
   const painKey = presentInApp(APPLICATION_KEY_FIELDS[2][1]);
+  const recommendationReasons = useMemo(() => getRecommendationReasons(sel), [sel]);
 
   return (
     <div className="space-y-3">
@@ -817,7 +844,10 @@ function GlanceTab({
 
       {/* Requested vs Recommended interventions */}
       <Card>
-        <SectionHeader title="Interventions: requested vs recommended" subtitle="What they asked for in the application vs what the team recommended during selection" />
+        <SectionHeader
+          title="Interventions: requested vs recommended"
+          subtitle="ASKED = a wantsXXX field on the application set to true. REC = Interview Assessment's assessedInterventions OR a Company Needs flag (hover the dot for the source)."
+        />
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-navy-700">
           <table className="w-full text-xs">
             <thead className="bg-slate-50 dark:bg-navy-800">
@@ -825,17 +855,42 @@ function GlanceTab({
                 <th className="px-2 py-1.5 text-left font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">Pillar</th>
                 <th className="px-2 py-1.5 text-center font-bold uppercase tracking-wider text-blue-700 dark:text-blue-300">Asked for</th>
                 <th className="px-2 py-1.5 text-center font-bold uppercase tracking-wider text-purple-700 dark:text-purple-300">Team recommended</th>
+                <th className="px-2 py-1.5 text-left font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Why</th>
               </tr>
             </thead>
             <tbody>
               {PILLARS.map(p => {
                 const req = requestedPillars.has(p.code);
-                const rec = recommendedPillars.has(p.code);
+                const reasons = recommendationReasons.get(p.code) || [];
+                const rec = reasons.length > 0;
                 return (
                   <tr key={p.code} className="border-t border-slate-100 dark:border-navy-800">
                     <td className="px-2 py-1.5 font-bold text-navy-500 dark:text-slate-100">{p.label}</td>
                     <td className="px-2 py-1.5 text-center">{req ? <CheckCircle2 className="inline h-3.5 w-3.5 text-blue-600" /> : <span className="text-slate-300">—</span>}</td>
-                    <td className="px-2 py-1.5 text-center">{rec ? <CheckCircle2 className="inline h-3.5 w-3.5 text-purple-600" /> : <span className="text-slate-300">—</span>}</td>
+                    <td className="px-2 py-1.5 text-center">
+                      {rec
+                        ? <CheckCircle2 className="inline h-3.5 w-3.5 text-purple-600" />
+                        : <span className="text-slate-300">—</span>}
+                    </td>
+                    <td className="px-2 py-1.5 text-[11px] text-slate-600 dark:text-slate-400">
+                      {rec ? (
+                        <div className="flex flex-wrap gap-1">
+                          {reasons.map((r, i) => (
+                            <span
+                              key={i}
+                              className={`rounded px-1.5 py-0.5 ${
+                                r.source === 'interview'
+                                  ? 'bg-purple-50 text-purple-800 dark:bg-purple-950 dark:text-purple-200'
+                                  : 'bg-blue-50 text-blue-800 dark:bg-blue-950 dark:text-blue-200'
+                              }`}
+                              title={r.source === 'interview' ? 'From Interview Assessment' : 'From Company Needs'}
+                            >
+                              {r.source === 'interview' ? 'Interview' : 'Needs'}: {r.detail}
+                            </span>
+                          ))}
+                        </div>
+                      ) : <span className="text-slate-300">—</span>}
+                    </td>
                   </tr>
                 );
               })}
