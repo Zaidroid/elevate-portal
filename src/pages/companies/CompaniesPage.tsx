@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   BarChart3,
   Download,
   Kanban as KanbanIcon,
+  MessageCircle,
   Plus,
   RefreshCw,
   Table as TableIcon,
@@ -12,6 +13,7 @@ import {
 import { useAuth } from '../../services/auth';
 import { useSheetDoc } from '../../lib/two-way-sync';
 import { getSheetId, getTab } from '../../config/sheets';
+import { ensureSchema } from '../../lib/sheets/client';
 import {
   Badge,
   Button,
@@ -32,6 +34,17 @@ import type { Column, FilterGroup, FilterValues, KanbanColumn, KanbanItem, TabIt
 import { displayName, getProfileManagers, isAdmin } from '../../config/team';
 import { pillarFor } from '../../config/interventions';
 import { INTERVIEWED_NAMES, INTERVIEWED_RAW, isInterviewed } from './interviewedSource';
+import { ReviewView } from './ReviewView';
+import type { ReviewableCompany } from './ReviewView';
+import { ExpandableCompanyCard } from './ExpandableCompanyCard';
+import type { CardCompany } from './ExpandableCompanyCard';
+import {
+  ACTIVITY_HEADERS,
+  COMMENTS_HEADERS,
+  REVIEWS_HEADERS,
+  summarizeReviews,
+} from './reviewTypes';
+import type { CompanyComment, Review, ReviewSummary } from './reviewTypes';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
 // Company schema so keys are camelCase.
@@ -168,6 +181,45 @@ export function CompaniesPage() {
     { userEmail: user?.email }
   );
 
+  // Auto-create the post-interview review tabs (Reviews / Company Comments /
+  // Activity Log) on first mount if the workbook doesn't have them yet. The
+  // user never has to re-upload the file — the tabs appear in-place with the
+  // canonical headers and useSheetDoc starts working immediately.
+  const [schemaReady, setSchemaReady] = useState(false);
+  useEffect(() => {
+    if (!masterSheetId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        await Promise.all([
+          ensureSchema(masterSheetId, getTab('companies', 'reviews'), REVIEWS_HEADERS),
+          ensureSchema(masterSheetId, getTab('companies', 'comments'), COMMENTS_HEADERS),
+          ensureSchema(masterSheetId, getTab('companies', 'activity'), ACTIVITY_HEADERS),
+        ]);
+        if (!cancelled) setSchemaReady(true);
+      } catch (err) {
+        // Non-fatal: review view will still render but writes will fail. Surface in console.
+        console.warn('[companies] ensureSchema failed', err);
+        if (!cancelled) setSchemaReady(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [masterSheetId]);
+
+  const reviews = useSheetDoc<Review>(
+    schemaReady && masterSheetId ? masterSheetId : null,
+    getTab('companies', 'reviews'),
+    'review_id',
+    { userEmail: user?.email }
+  );
+
+  const comments = useSheetDoc<CompanyComment>(
+    schemaReady && masterSheetId ? masterSheetId : null,
+    getTab('companies', 'comments'),
+    'comment_id',
+    { userEmail: user?.email }
+  );
+
   // Static, hand-maintained list of Cohort 3 interviewed companies (see
   // interviewedSource.ts for the why). Used to overlay the "Interviewed"
   // status onto the master sheet without ever demoting a higher status.
@@ -202,7 +254,7 @@ export function CompaniesPage() {
   const [query, setQuery] = useState('');
   const [filters, setFilters] = useState<FilterValues>({ pm: [], stage: [], status: [], fund: [] });
   const [creating, setCreating] = useState(false);
-  const [view, setView] = useState<'dashboard' | 'pipeline' | 'roster'>('dashboard');
+  const [view, setView] = useState<'review' | 'dashboard' | 'pipeline' | 'roster'>('review');
   const [savedView, setSavedView] = useState<'' | 'mine' | 'unassigned' | 'interviewed' | 'active'>('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
@@ -515,6 +567,31 @@ export function CompaniesPage() {
         );
       },
     },
+    {
+      key: '_reviews',
+      header: 'Reviews',
+      width: '160px',
+      render: r => {
+        const s = reviewSummaryByCompany.get(r.company_id);
+        if (!s || s.total === 0) {
+          return <span className="text-xs text-slate-400 italic">no reviews</span>;
+        }
+        const tone =
+          s.consensus === 'Recommend' ? 'green' :
+          s.consensus === 'Reject' ? 'red' :
+          s.consensus === 'Hold' ? 'amber' : 'amber';
+        return (
+          <div className="flex items-center gap-1.5">
+            <Badge tone={tone as Tone}>{s.total}× {s.consensus}</Badge>
+            {s.divergence && (
+              <span className="text-[10px] font-semibold text-amber-700 dark:text-amber-300" title="Divergent reviews">
+                divergent
+              </span>
+            )}
+          </div>
+        );
+      },
+    },
   ];
 
   if (!masterSheetId && !selectionSheetId) {
@@ -620,11 +697,73 @@ export function CompaniesPage() {
     [aliases]
   );
 
+  // Per-company review aggregation — drives the kanban consensus chip and
+  // the Roster review-status column. Indexed by company_id.
+  const reviewSummaryByCompany = useMemo(() => {
+    const m = new Map<string, ReviewSummary>();
+    const grouped = new Map<string, Review[]>();
+    for (const r of reviews.rows) {
+      if (!r.company_id) continue;
+      const arr = grouped.get(r.company_id) || [];
+      arr.push(r);
+      grouped.set(r.company_id, arr);
+    }
+    for (const [cid, arr] of grouped) m.set(cid, summarizeReviews(arr));
+    return m;
+  }, [reviews.rows]);
+
+  // Apply review-aware count for the Review tab — companies still needing
+  // *any* review by *anyone*. Shown as the small badge on the tab.
+  const reviewableCompanies = filteredBySelection;
+  const reviewedAnyone = useMemo(
+    () => reviewableCompanies.filter(c => (reviewSummaryByCompany.get(c.company_id)?.total || 0) > 0).length,
+    [reviewableCompanies, reviewSummaryByCompany]
+  );
+
   const tabs: TabItem[] = [
+    { value: 'review', label: `Review · ${reviewedAnyone}/${reviewableCompanies.length}`, icon: <MessageCircle className="h-4 w-4" /> },
     { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
     { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: counts.total },
     { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: counts.filtered },
   ];
+
+  // Build the applicants-by-name lookup — needed by the Review view to
+  // surface the Source Data application snapshot for each company.
+  const applicantByName = useMemo(() => {
+    const m = new Map<string, Applicant>();
+    for (const a of applicants.rows) {
+      const name = a.name || a.companyName || a.company_name || '';
+      const k = norm(name);
+      if (k) m.set(k, a);
+    }
+    return m;
+  }, [applicants.rows]);
+
+  const masterById = useMemo(() => {
+    const m = new Map<string, Master>();
+    for (const r of masterE3) if (r.company_id) m.set(r.company_id, r);
+    return m;
+  }, [masterE3]);
+
+  const reviewableForView: ReviewableCompany[] = useMemo(() => {
+    return reviewableCompanies.map(r => ({
+      route_id: r.route_id,
+      applicant_id: r.applicant_id,
+      company_id: r.company_id,
+      company_name: r.company_name,
+      sector: r.sector,
+      city: r.city,
+      governorate: r.governorate,
+      employee_count: r.employee_count,
+      readiness_score: r.readiness_score,
+      fund_code: r.fund_code,
+      status: r.status,
+      profile_manager_email: r.profile_manager_email,
+      contact_email: r.contact_email,
+      applicantRaw: applicantByName.get(norm(r.company_name)) || null,
+      masterRaw: (masterById.get(r.company_id) as unknown as Record<string, string>) || null,
+    }));
+  }, [reviewableCompanies, applicantByName, masterById]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
@@ -782,6 +921,31 @@ export function CompaniesPage() {
 
       <Tabs items={tabs} value={view} onChange={v => setView(v as typeof view)} />
 
+      {view === 'review' && (
+        <ReviewView
+          companies={reviewableForView}
+          reviews={reviews.rows}
+          comments={comments.rows}
+          reviewerEmail={user?.email || ''}
+          onSaveReview={async r => {
+            // Replace any existing review by (reviewer_email, company_id) with
+            // the new one — keeps the tab tidy across edits.
+            const lower = r.reviewer_email.toLowerCase();
+            const existing = reviews.rows.find(x =>
+              x.company_id === r.company_id &&
+              x.reviewer_email.toLowerCase() === lower
+            );
+            if (existing) {
+              await reviews.updateRow(existing.review_id, r);
+            } else {
+              await reviews.createRow(r);
+            }
+          }}
+          onAddComment={async c => { await comments.createRow(c); }}
+          onJumpToCompany={rid => navigate(`/companies/${encodeURIComponent(rid)}`)}
+        />
+      )}
+
       {view === 'dashboard' && (
         <CompanyDashboard
           rows={filteredBySavedView}
@@ -793,6 +957,7 @@ export function CompaniesPage() {
       {view === 'pipeline' && (
         <CompanyPipelineKanban
           rows={filteredBySelection}
+          reviewSummaryByCompany={reviewSummaryByCompany}
           onCardClick={r => navigate(`/companies/${encodeURIComponent(r.route_id)}`)}
           includePreInterview={includePreInterview}
         />
@@ -935,10 +1100,12 @@ const PILLAR_DOT_COLOR: Record<string, string> = {
 
 function CompanyPipelineKanban({
   rows,
+  reviewSummaryByCompany,
   onCardClick,
   includePreInterview,
 }: {
   rows: Row[];
+  reviewSummaryByCompany: Map<string, ReviewSummary>;
   onCardClick: (r: Row) => void;
   includePreInterview: boolean;
 }) {
@@ -958,37 +1125,29 @@ function CompanyPipelineKanban({
       readOnly
       onStatusChange={async () => {}}
       onCardClick={item => onCardClick(item.row)}
-      renderCard={item => (
-        <div className="space-y-1">
-          <div className="truncate text-sm font-bold text-navy-500 dark:text-white">{item.row.company_name || '—'}</div>
-          <div className="truncate text-2xs text-slate-500">
-            {[item.row.sector, item.row.governorate].filter(Boolean).join(' · ') || '—'}
-          </div>
-          {item.row.profile_manager_email && (
-            <div className="text-2xs text-slate-500">PM: {displayName(item.row.profile_manager_email).split(' ')[0]}</div>
-          )}
-          <div className="flex flex-wrap items-center gap-1.5">
-            {item.row.fund_code && (
-              <Badge tone={item.row.fund_code === '97060' ? 'teal' : 'amber'}>
-                {item.row.fund_code === '97060' ? 'Dutch' : 'SIDA'}
-              </Badge>
-            )}
-            {item.row.intervention_count > 0 ? (
-              <span
-                className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:border-navy-700 dark:bg-navy-800 dark:text-slate-200"
-                title={`${item.row.intervention_count} intervention${item.row.intervention_count === 1 ? '' : 's'}: ${item.row.intervention_pillars.join(', ')}`}
-              >
-                {item.row.intervention_pillars.map(p => (
-                  <span key={p} className={`inline-block h-1.5 w-1.5 rounded-full ${PILLAR_DOT_COLOR[p] || 'bg-slate-400'}`} />
-                ))}
-                {item.row.intervention_count}× int
-              </span>
-            ) : (
-              <span className="text-[10px] font-medium text-slate-400 italic">no interventions yet</span>
-            )}
-          </div>
-        </div>
-      )}
+      renderCard={item => {
+        const card: CardCompany = {
+          route_id: item.row.route_id,
+          company_id: item.row.company_id,
+          company_name: item.row.company_name,
+          sector: item.row.sector,
+          city: item.row.city,
+          governorate: item.row.governorate,
+          fund_code: item.row.fund_code,
+          status: item.row.status,
+          profile_manager_email: item.row.profile_manager_email,
+          contact_email: item.row.contact_email,
+          intervention_count: item.row.intervention_count,
+          intervention_pillars: item.row.intervention_pillars,
+        };
+        return (
+          <ExpandableCompanyCard
+            row={card}
+            reviewSummary={reviewSummaryByCompany.get(item.row.company_id)}
+            onOpen={() => onCardClick(item.row)}
+          />
+        );
+      }}
       emptyHint="Empty"
     />
   );

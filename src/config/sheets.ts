@@ -22,6 +22,13 @@ export const SHEETS: Record<string, ModuleConfig> = {
       statusLog: 'Status Log',
       historical: 'Historical Interventions',
       lookups: 'Lookups',
+      // The post-interview review workflow lives here. Reviews are
+      // auto-created on first read via ensureSchema; the team writes
+      // one row per (reviewer, company) capturing their proposed
+      // interventions, decision, and notes.
+      reviews: 'Reviews',
+      comments: 'Company Comments',
+      activity: 'Activity Log',
     },
   },
   procurement: {
