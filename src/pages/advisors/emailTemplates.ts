@@ -1,21 +1,21 @@
 // Pipeline-stage email templates. Each template renders a subject + body
-// from an advisor + sender + optional company. Output is wrapped into a
-// mailto: URL so clicking it opens the user's default mail client with
-// everything pre-filled.
+// from an advisor + sender + optional company. Output is wrapped into
+// either a mailto: URL (opens the OS default mail client — Outlook on
+// macOS / Windows when configured) or an Outlook web compose URL as a
+// fallback when no desktop client is wired up.
 
 import type { Advisor } from '../../types/advisor';
 
 export type TemplateKey =
   | 'welcome'
   | 'intro_invite'
-  | 'assessment_request'
   | 'match_offer'
   | 'rejection'
   | 'thank_you';
 
 export type TemplateContext = {
   advisor: Pick<Advisor, 'full_name' | 'email' | 'position' | 'employer' | 'country'>;
-  sender: { name?: string; email: string };
+  sender: { name?: string; email: string; title?: string };
   company?: { company_name?: string };
 };
 
@@ -25,65 +25,80 @@ export type RenderedTemplate = {
   to: string;
 };
 
-const SIGNATURE = (name?: string) =>
-  name
-    ? `\n\nBest,\n${name}\nGSG Elevate Companies team`
-    : `\n\nBest,\nGSG Elevate Companies team`;
-
-const TEMPLATES: Record<TemplateKey, (ctx: TemplateContext) => { subject: string; body: string }> = {
-  welcome: ({ advisor, sender }) => ({
-    subject: `GSG Elevate · welcome, ${firstName(advisor.full_name)}`,
-    body:
-      `Hi ${firstName(advisor.full_name)},\n\n` +
-      `Thanks for applying to advise GSG Elevate companies. We received your form and will be in touch within the week with next steps.\n\n` +
-      `If anything in your submission has changed, just reply to this email and we'll update your file.` +
-      SIGNATURE(sender.name),
-  }),
-  intro_invite: ({ advisor, sender }) => ({
-    subject: `GSG Elevate · intro call`,
-    body:
-      `Hi ${firstName(advisor.full_name)},\n\n` +
-      `Following up on your application — we'd love to schedule a 30-minute intro call to walk you through how Elevate works and learn more about how you could best support our cohort.\n\n` +
-      `What times work for you in the next two weeks? Send me a couple of slots and I'll confirm the calendar invite.` +
-      SIGNATURE(sender.name),
-  }),
-  assessment_request: ({ advisor, sender }) => ({
-    subject: `GSG Elevate · next steps`,
-    body:
-      `Hi ${firstName(advisor.full_name)},\n\n` +
-      `Great chatting today. As a next step, we'd like to do a short assessment so we can match you to the right Elevate company. I'll send the assessment brief separately within 48 hours.` +
-      SIGNATURE(sender.name),
-  }),
-  match_offer: ({ advisor, sender, company }) => ({
-    subject: `GSG Elevate · ${company?.company_name ? `proposed match with ${company.company_name}` : 'proposed match'}`,
-    body:
-      `Hi ${firstName(advisor.full_name)},\n\n` +
-      `We'd like to match you with ${company?.company_name || 'an Elevate company'} for an advisory engagement. They're working on areas we think align well with your background${advisor.position ? ` (${advisor.position}${advisor.employer ? ` at ${advisor.employer}` : ''})` : ''}.\n\n` +
-      `Are you open to an intro call with the founder? If yes, I'll set it up this week.` +
-      SIGNATURE(sender.name),
-  }),
-  rejection: ({ advisor, sender }) => ({
-    subject: `GSG Elevate · update on your application`,
-    body:
-      `Hi ${firstName(advisor.full_name)},\n\n` +
-      `Thanks again for taking the time to apply to advise our Elevate cohort. We're not able to move forward with a match this round, but we'll keep your profile on file for future cohorts where the fit may be stronger.\n\n` +
-      `We appreciate your interest and hope to stay in touch.` +
-      SIGNATURE(sender.name),
-  }),
-  thank_you: ({ advisor, sender }) => ({
-    subject: `GSG Elevate · thank you`,
-    body:
-      `Hi ${firstName(advisor.full_name)},\n\n` +
-      `Thank you for your support of the Elevate companies. The engagement has wrapped up successfully — we appreciate the time and expertise you contributed.\n\n` +
-      `We'll keep you in mind for future opportunities.` +
-      SIGNATURE(sender.name),
-  }),
-};
-
 function firstName(full: string): string {
   if (!full) return '';
   return full.trim().split(/\s+/)[0];
 }
+
+function senderFirstName(s: TemplateContext['sender']): string {
+  if (s.name) return firstName(s.name);
+  // Fall back to the local-part of the email if no name is set.
+  return firstName(s.email.split('@')[0].replace(/\./g, ' '));
+}
+
+function senderTitle(s: TemplateContext['sender']): string {
+  return s.title || 'Market Access Coordinator';
+}
+
+const SIGNATURE = (s: TemplateContext['sender']) =>
+  `\n\nBR,\n${senderFirstName(s)}`;
+
+// ---- Templates --------------------------------------------------------
+//
+// Wording supplied by the team. Variables are interpolated:
+//   {first_name}  -> advisor's first name
+//   {sender}      -> Mohammed / Doaa / Zaid etc.
+//   {sender_title} -> "Market Access Coordinator" (default)
+//   {company}     -> matched company name (when available)
+//
+// `welcome` is the live "we want to interview you" outreach. The team
+// uses one combined message for acknowledgement + intro-invite, so the
+// New / Acknowledged / Allocated stages all share this template.
+
+const TEMPLATES: Record<TemplateKey, (ctx: TemplateContext) => { subject: string; body: string }> = {
+  welcome: ({ advisor, sender }) => ({
+    subject: `Becoming a GSG Advisor — let's chat`,
+    body:
+      `Dear ${firstName(advisor.full_name) || 'there'},\n\n` +
+      `I am ${senderFirstName(sender)}, the ${senderTitle(sender)} at Gaza Sky Geeks (GSG). It's a pleasure to e-meet you 😃\n\n` +
+      `Thank you for filling in the survey to become a GSG advisor.\n\n` +
+      `We appreciate your patience while we were filtering applications, and we also highly appreciate your interest in supporting the Palestinian ecosystem.\n\n` +
+      `Upon reviewing your application, it would be my pleasure to have an interview with you to learn more about you and your experience.\n\n` +
+      `Please let me know when you are free for a 30-minute call so we can touch base.\n\n` +
+      `Looking forward to hearing back from you,` +
+      SIGNATURE(sender),
+  }),
+  // Same body as welcome — kept as an alias so post-intro reminders use
+  // a consistent voice without ever asking the team to write a fresh one.
+  intro_invite: (ctx) => TEMPLATES.welcome(ctx),
+  match_offer: ({ advisor, sender, company }) => ({
+    subject: `GSG Elevate — ${company?.company_name ? `proposed match with ${company.company_name}` : 'proposed match'}`,
+    body:
+      `Dear ${firstName(advisor.full_name) || 'there'},\n\n` +
+      `Following up on our last conversation — we'd like to propose matching you with ${company?.company_name || 'one of our Cohort 3 companies'} for an advisory engagement. ` +
+      `Based on your background${advisor.position ? ` as ${advisor.position}${advisor.employer ? ` at ${advisor.employer}` : ''}` : ''}, the fit looks strong.\n\n` +
+      `Are you open to an intro call with the founder? If yes, I'll set it up this week.` +
+      SIGNATURE(sender),
+  }),
+  rejection: ({ advisor, sender }) => ({
+    subject: `Update on your GSG advisor application`,
+    body:
+      `Dear ${firstName(advisor.full_name) || 'there'},\n\n` +
+      `Thank you for your interest in supporting Gaza Sky Geeks (GSG) community. We deeply appreciate your willingness to share your time, knowledge, and expertise with our community.\n\n` +
+      `After reviewing our current mentorship needs, we have determined that your expertise, while impressive, may not be required at this stage. However, we truly value your interest and would love to stay connected for future opportunities as our community's needs evolve.\n\n` +
+      `We will keep your application on file and reach out when there's a better fit for your skills. Please feel free to stay engaged with us through the GSG Newsletter.\n\n` +
+      `Thank you again for your interest and for being part of GSG's extended network.` +
+      SIGNATURE(sender),
+  }),
+  thank_you: ({ advisor, sender }) => ({
+    subject: `Thank you for your support`,
+    body:
+      `Dear ${firstName(advisor.full_name) || 'there'},\n\n` +
+      `Thank you for your support of the Elevate companies. The engagement has wrapped up — we appreciate the time and expertise you contributed.\n\n` +
+      `We'll keep you in mind for future opportunities.` +
+      SIGNATURE(sender),
+  }),
+};
 
 export function renderTemplate(key: TemplateKey, ctx: TemplateContext): RenderedTemplate {
   const t = TEMPLATES[key](ctx);
@@ -94,29 +109,51 @@ export function renderTemplate(key: TemplateKey, ctx: TemplateContext): Rendered
   };
 }
 
+// mailto: opens the system default mail client. On macOS / Windows when
+// Outlook is set as the default mail handler, this opens Outlook directly.
+// "From" is whatever account is signed in to that client.
 export function templateMailto(rendered: RenderedTemplate): string {
   const enc = encodeURIComponent;
   return `mailto:${enc(rendered.to)}?subject=${enc(rendered.subject)}&body=${enc(rendered.body)}`;
 }
 
+// Outlook web fallback — useful when no desktop mail client is the default
+// (Chrome on a fresh machine, for example) or the team member is signed in
+// to Office 365 in the browser.
+export function templateOutlookWebUrl(rendered: RenderedTemplate): string {
+  const enc = encodeURIComponent;
+  return (
+    `https://outlook.office.com/mail/deeplink/compose` +
+    `?to=${enc(rendered.to)}` +
+    `&subject=${enc(rendered.subject)}` +
+    `&body=${enc(rendered.body)}`
+  );
+}
+
 // Pick the most relevant template for the advisor's current pipeline stage.
 export function suggestedTemplate(pipelineStatus: string): TemplateKey {
   switch (pipelineStatus) {
-    case 'New': return 'welcome';
+    case 'New':
     case 'Acknowledged':
-    case 'Allocated': return 'intro_invite';
-    case 'Intro Done': return 'assessment_request';
-    case 'Approved': return 'match_offer';
-    case 'Rejected': return 'rejection';
-    case 'Matched': return 'thank_you';
-    default: return 'welcome';
+    case 'Allocated':
+    case 'Intro Scheduled':
+    case 'Intro Done':
+    case 'Assessment':
+      return 'welcome';
+    case 'Approved':
+      return 'match_offer';
+    case 'Rejected':
+      return 'rejection';
+    case 'Matched':
+      return 'thank_you';
+    default:
+      return 'welcome';
   }
 }
 
 export const TEMPLATE_LABELS: Record<TemplateKey, string> = {
-  welcome: 'Welcome',
-  intro_invite: 'Intro invite',
-  assessment_request: 'Assessment request',
+  welcome: 'Welcome / intro invite',
+  intro_invite: 'Welcome / intro invite',
   match_offer: 'Match offer',
   rejection: 'Polite decline',
   thank_you: 'Thank you / wrap',

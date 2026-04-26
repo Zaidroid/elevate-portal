@@ -14,7 +14,7 @@ import { CATEGORY_META, NEXT_ACTION, PIPELINE_COLUMNS } from '../../lib/advisor-
 import type { AdvisorPipelineId } from '../../lib/advisor-scoring';
 import type { FollowUp } from '../../types/advisor';
 import type { CompanyLite, EnrichedAdvisor } from './utils';
-import { renderTemplate, suggestedTemplate, templateMailto, TEMPLATE_LABELS, type TemplateKey } from './emailTemplates';
+import { renderTemplate, suggestedTemplate, templateMailto, templateOutlookWebUrl, TEMPLATE_LABELS, type TemplateKey } from './emailTemplates';
 import { advisorToMarkdown, downloadMarkdown, googleCalendarUrl, suggestMatches } from './smartMatch';
 
 const inputClass =
@@ -36,6 +36,7 @@ export function AdvisorDetailDrawer({
   canEdit,
   userEmail,
   userName,
+  userTitle,
   companies = [],
   onClose,
   onTrackerSave,
@@ -48,6 +49,7 @@ export function AdvisorDetailDrawer({
   canEdit: boolean;
   userEmail: string;
   userName?: string;
+  userTitle?: string;
   companies?: CompanyLite[];
   onClose: () => void;
   onTrackerSave: (updates: Partial<EnrichedAdvisor>) => Promise<void>;
@@ -136,6 +138,7 @@ export function AdvisorDetailDrawer({
             advisor={advisor}
             userEmail={userEmail}
             userName={userName}
+            userTitle={userTitle}
             companies={companies}
             onAdvance={async (nextLabel) => {
               await onTrackerSave({ pipeline_status: nextLabel } as Partial<EnrichedAdvisor>);
@@ -211,12 +214,14 @@ function NextActionCard({
   advisor,
   userEmail,
   userName,
+  userTitle,
   companies,
   onAdvance,
 }: {
   advisor: EnrichedAdvisor;
   userEmail: string;
   userName?: string;
+  userTitle?: string;
   companies: CompanyLite[];
   onAdvance: (nextLabel: string) => Promise<void>;
 }) {
@@ -231,10 +236,11 @@ function NextActionCard({
     : undefined;
   const rendered = renderTemplate(tplKey, {
     advisor: { full_name: advisor.full_name, email: advisor.email, position: advisor.position, employer: advisor.employer, country: advisor.country },
-    sender: { name: userName, email: userEmail },
+    sender: { name: userName, email: userEmail, title: userTitle },
     company: matchedCompany ? { company_name: matchedCompany.company_name } : undefined,
   });
   const mailto = templateMailto(rendered);
+  const outlookWeb = templateOutlookWebUrl(rendered);
 
   // Smart suggestions baked into the card.
   const tips: string[] = [];
@@ -285,13 +291,25 @@ function NextActionCard({
             </Button>
           )}
           {advisor.email && (
-            <a
-              href={mailto}
-              className="inline-flex items-center gap-1 rounded-lg border border-brand-teal/40 bg-brand-teal/10 px-3 py-1.5 text-xs font-semibold text-brand-teal transition-colors hover:bg-brand-teal hover:text-white"
-            >
-              <Mail className="h-3 w-3" />
-              {TEMPLATE_LABELS[tplKey]}
-            </a>
+            <div className="flex flex-col items-end gap-1">
+              <a
+                href={mailto}
+                className="inline-flex items-center gap-1 rounded-lg border border-brand-teal/40 bg-brand-teal/10 px-3 py-1.5 text-xs font-semibold text-brand-teal transition-colors hover:bg-brand-teal hover:text-white"
+                title="Opens your default mail client (Outlook on a Mac/Windows when set as default) with the message pre-filled"
+              >
+                <Mail className="h-3 w-3" />
+                {TEMPLATE_LABELS[tplKey]}
+              </a>
+              <a
+                href={outlookWeb}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-2xs font-semibold text-slate-500 hover:text-brand-teal hover:underline"
+                title="Open in Outlook on the web"
+              >
+                Outlook web →
+              </a>
+            </div>
           )}
         </div>
       </div>

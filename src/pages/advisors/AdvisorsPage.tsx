@@ -24,7 +24,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { isAdmin } from '../../config/team';
+import { getUserByEmail, isAdmin } from '../../config/team';
 import { useSheetDoc } from '../../lib/two-way-sync';
 import { getSheetId, getTab } from '../../config/sheets';
 import {
@@ -910,6 +910,7 @@ export function AdvisorsPage() {
         canEdit={canEdit}
         userEmail={userEmail}
         userName={user?.name}
+        userTitle={getUserByEmail(userEmail)?.title}
         companies={companies}
         onClose={() => setSelectedId(null)}
         onTrackerSave={handleTrackerSave}
