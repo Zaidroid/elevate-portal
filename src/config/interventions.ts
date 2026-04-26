@@ -14,10 +14,10 @@ export type Pillar = {
 export const PILLARS: Pillar[] = [
   {
     code: 'TTH',
-    label: 'Tech Talent Hub',
+    label: 'Train To Hire',
     shortLabel: 'TTH',
     color: 'teal',
-    description: 'Placement of tech talent into Elevate companies.',
+    description: 'Train candidates against a company hiring spec, then place them as employees.',
     subInterventions: [],
   },
   {
