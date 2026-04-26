@@ -93,7 +93,7 @@ export function AdvisorsPage() {
   const actHook = useSheetDoc<ActivityRow>(sheetId || null, tabActivity, 'activity_id', { userEmail });
   const cmtHook = useSheetDoc<AdvisorComment>(sheetId || null, tabComments, 'comment_id', { userEmail });
 
-  const [tab, setTab] = useState<string>('pipeline');
+  const [tab, setTab] = useState<string>('dashboard');
   const [query, setQuery] = useState('');
   const [filterCountry, setFilterCountry] = useState<string>('');
   const [filterCategory, setFilterCategory] = useState<string>('');
@@ -363,6 +363,11 @@ export function AdvisorsPage() {
   const loading = advHook.loading;
 
   const tabs: TabItem[] = [
+    // Order: overview → daily work → reference → tasks → audit. Dashboard
+    // first so opening the page lands on the summary; Pipeline next as the
+    // primary triage surface; Roster as the searchable index; Follow-ups
+    // as the side workload; Activity as the audit trail.
+    { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
     { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: active.length },
     { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: filtered.length },
     {
@@ -377,7 +382,6 @@ export function AdvisorsPage() {
       icon: <ActivityIcon className="h-4 w-4" />,
       count: actHook.rows.length,
     },
-    { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
   ];
 
   return (
@@ -438,8 +442,11 @@ export function AdvisorsPage() {
             <Button
               variant="primary"
               onClick={() => {
-                setTab('pipeline');
+                setTab('roster');
                 setFilterPipeline('New');
+                setQuery('');
+                setFilterCountry('');
+                setFilterCategory('');
               }}
             >
               <AlertCircle className="h-4 w-4" /> Triage now

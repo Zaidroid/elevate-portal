@@ -149,6 +149,12 @@ export function Kanban<S extends string, T extends KanbanItem<S>>({
                       draggable={!readOnly}
                       onDragStart={e => handleDragStart(e, item.id)}
                       onDragEnd={handleDragEnd}
+                      // dragover MUST preventDefault on the card itself.
+                      // Without this, when the drag pointer is over a card,
+                      // the browser refuses the drop before the column's
+                      // bubble-up handler runs.
+                      onDragOver={e => handleDragOver(e, col.id)}
+                      onDrop={e => handleDrop(e, col.id)}
                       onClick={() => onCardClick?.(item)}
                       className={`group cursor-grab rounded-xl border border-slate-200 bg-white p-3 shadow-sm transition-all hover:border-brand-teal hover:shadow-md active:cursor-grabbing dark:border-navy-600 dark:bg-navy-600 ${
                         draggedId === item.id ? 'opacity-40' : ''

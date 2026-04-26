@@ -61,22 +61,34 @@ function routeHeader(legacy: string): keyof Advisor | null {
   return null;
 }
 
-// Form-response timestamps come back as the formatted string Sheets renders
-// (e.g. "11/15/2025 14:32:01" or "2026-02-01 09:11:00"). Normalize to ISO.
+// Form-response timestamps come back as whatever string Sheets renders
+// (e.g. "11/15/2025 14:32:01", "2026-02-01 09:11:00", "2026-02-01T09:11:00").
+// Normalize to a single canonical "YYYY-MM-DD HH:MM:SS" so dedupe matches
+// the Python migrator's _coerce(datetime) output exactly.
 function normalizeTimestamp(s: string): string {
   if (!s) return '';
-  // Already ISO?
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s;
-  // US-style m/d/yyyy h:mm:ss
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
-  if (m) {
-    const [, mo, d, y, h = '0', mi = '0', se = '0'] = m;
-    const iso = new Date(
-      Date.UTC(+y, +mo - 1, +d, +h, +mi, +se)
-    ).toISOString();
-    return iso.slice(0, 19);
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+  const fmt = (y: number, mo: number, d: number, h: number, mi: number, se: number) =>
+    `${y}-${pad(mo)}-${pad(d)} ${pad(h)}:${pad(mi)}:${pad(se)}`;
+  // ISO with T separator → space
+  let iso = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (iso) {
+    const [, y, mo, d, h, mi, se = '0'] = iso;
+    return fmt(+y, +mo, +d, +h, +mi, +se);
   }
-  return s;
+  // ISO date-only
+  iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) {
+    const [, y, mo, d] = iso;
+    return fmt(+y, +mo, +d, 0, 0, 0);
+  }
+  // US m/d/yyyy h:mm:ss
+  const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (us) {
+    const [, mo, d, y, h = '0', mi = '0', se = '0'] = us;
+    return fmt(+y, +mo, +d, +h, +mi, +se);
+  }
+  return s.trim();
 }
 
 function dedupeKey(email: string, timestampIso: string): string {
