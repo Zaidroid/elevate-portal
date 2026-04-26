@@ -247,6 +247,20 @@ export function ReviewView({
     setShowFinalize(false);
   }, [myExistingReview, company?.company_id, company?.profile_manager_email]);
 
+  // These hooks must be called unconditionally on every render — never move
+  // them below an early return. The functions tolerate empty inputs.
+  const requestedPillars = useMemo(
+    () => getRequestedPillars(company?.applicantRaw || {}),
+    [company?.applicantRaw]
+  );
+  const recommendedPillars = useMemo(
+    () => getRecommendedPillars(company?.selection || {
+      scoring: null, docReview: null, needs: null, interviewAssessment: null,
+      interviewDiscussion: null, committeeVotes: null, selectionVotes: null,
+    }),
+    [company?.selection]
+  );
+
   if (companies.length === 0) {
     return (
       <Card>
@@ -389,8 +403,6 @@ export function ReviewView({
 
   const application = company.applicantRaw || {};
   const sel = company.selection;
-  const requestedPillars = useMemo(() => getRequestedPillars(application), [application]);
-  const recommendedPillars = useMemo(() => getRecommendedPillars(sel), [sel]);
 
   const has = {
     scoring: !!sel.scoring,
