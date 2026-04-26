@@ -12,9 +12,12 @@
 import { batchGet, fetchRange, getSpreadsheetMetaCached } from '../sheets/client';
 
 export type SourceProcurementRow = {
-  source_tab: string;          // month tab name
+  source_tab: string;          // month tab name (e.g. "Nov 2025")
   source_row: number;          // 1-based row number within the tab
+  // Sortable yyyymm derived from the tab name. 0 when unparseable.
+  source_month_yyyymm: number;
   pr_id: string;               // PR# from the team's column when present
+  company_name: string;        // routed from a Company / Beneficiary / Recipient column
   activity: string;
   item_description: string;
   qty: string;
@@ -37,6 +40,10 @@ const COLUMN_RULES: Array<[keyof SourceProcurementRow, string[]]> = [
   ['pr_id', ['pr#']],
   ['pr_id', ['pr no']],
   ['pr_id', ['pr number']],
+  ['company_name', ['company']],
+  ['company_name', ['beneficiary']],
+  ['company_name', ['recipient']],
+  ['company_name', ['business']],
   ['activity', ['activity']],
   ['item_description', ['item description']],
   ['item_description', ['description']],
@@ -77,6 +84,51 @@ const MONTH_PATTERNS = [
   'january', 'february', 'march', 'april', 'june', 'july', 'august',
   'september', 'october', 'november', 'december',
 ];
+
+// Map of month-name fragments → 1..12 so we can convert "Nov 2025" /
+// "November 2025" / "11-2025" / "2025-11" into a sortable yyyymm number.
+const MONTH_TO_NUM: Record<string, number> = {
+  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+  apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+  aug: 8, august: 8, sep: 9, sept: 9, september: 9,
+  oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
+};
+
+// Parse a tab name into a sortable yyyymm integer (e.g. "Nov 2025" → 202511).
+// Returns 0 when no year is recoverable.
+export function parseTabYyyymm(tabName: string): number {
+  if (!tabName) return 0;
+  const low = tabName.toLowerCase();
+  // Look for a 4-digit year first.
+  const yearMatch = low.match(/(20\d{2})/);
+  let year = yearMatch ? parseInt(yearMatch[1], 10) : 0;
+
+  // Month from name first, then numeric.
+  let month = 0;
+  for (const k of Object.keys(MONTH_TO_NUM).sort((a, b) => b.length - a.length)) {
+    if (low.includes(k)) { month = MONTH_TO_NUM[k]; break; }
+  }
+  if (!month) {
+    // Try patterns like "11-2025" / "2025-11" / "11/2025"
+    const m1 = low.match(/\b(\d{1,2})[\/\-\s_](20\d{2})\b/);
+    const m2 = low.match(/\b(20\d{2})[\/\-\s_](\d{1,2})\b/);
+    if (m1) {
+      month = parseInt(m1[1], 10);
+      year = year || parseInt(m1[2], 10);
+    } else if (m2) {
+      year = year || parseInt(m2[1], 10);
+      month = parseInt(m2[2], 10);
+    }
+  }
+
+  if (!year) {
+    // Default to the current year when the tab name only mentions a month.
+    // The team usually rolls forward without re-stamping years.
+    year = new Date().getFullYear();
+  }
+  if (!month || month < 1 || month > 12) return 0;
+  return year * 100 + month;
+}
 
 // A separator row is a row that contains the literal word "companies" in
 // any cell, in a row where most other cells are blank (the team uses
@@ -142,7 +194,9 @@ function readEntry(
   const entry: SourceProcurementRow = {
     source_tab: tabName,
     source_row: rowNumber,
+    source_month_yyyymm: parseTabYyyymm(tabName),
     pr_id: '',
+    company_name: '',
     activity: '',
     item_description: '',
     qty: '',
@@ -163,7 +217,7 @@ function readEntry(
     if (!target) continue;
     const v = (row[i] || '').trim();
     if (!v) continue;
-    if (target === 'raw' || target === 'source_tab' || target === 'source_row') continue;
+    if (target === 'raw' || target === 'source_tab' || target === 'source_row' || target === 'source_month_yyyymm') continue;
     entry[target] = v as never;
   }
   return entry;

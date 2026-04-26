@@ -7,6 +7,7 @@ import { getSheetId, getTab } from '../../config/sheets';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { SourceComparisonView } from './SourceComparisonView';
+import { SourceAnalysisView } from './SourceAnalysisView';
 
 type Quarter = 'q1' | 'q2' | 'q3' | 'q4';
 
@@ -65,13 +66,13 @@ function thresholdTone(cls: string): 'neutral' | 'teal' | 'amber' | 'red' | 'gre
   }
 }
 
-type ViewMode = Quarter | 'source';
+type ViewMode = Quarter | 'source' | 'analysis';
 
 export function ProcurementPage() {
   const { user } = useAuth();
   const sheetId = getSheetId('procurement');
   const [view, setView] = useState<ViewMode>('q1');
-  const isQuarter = view !== 'source';
+  const isQuarter = view !== 'source' && view !== 'analysis';
   const tab = getTab('procurement', isQuarter ? view : 'q1');
 
   const { rows, loading, error, refresh, updateRow, createRow } = useSheetDoc<PR>(
@@ -190,9 +191,20 @@ export function ProcurementPage() {
         >
           Team source ▸ E3
         </button>
+        <button
+          onClick={() => setView('analysis')}
+          className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+            view === 'analysis'
+              ? 'bg-brand-teal text-white'
+              : 'text-navy-500 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-navy-700'
+          }`}
+          title="Per-company breakdown of the source sheet from Nov 2025 onwards"
+        >
+          Source analysis (Nov 2025 →)
+        </button>
       </div>
 
-      {error && view !== 'source' && (
+      {error && isQuarter && (
         <Card className="border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950">
           <p className="text-sm text-red-700 dark:text-red-300">Failed to load: {error.message}</p>
         </Card>
@@ -200,6 +212,8 @@ export function ProcurementPage() {
 
       {view === 'source' ? (
         <SourceComparisonView e3Rows={allE3Rows} />
+      ) : view === 'analysis' ? (
+        <SourceAnalysisView />
       ) : (
         <>
           <div className="relative">
