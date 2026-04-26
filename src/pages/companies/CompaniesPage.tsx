@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  AlertTriangle,
   BarChart3,
   Download,
   Kanban as KanbanIcon,
@@ -31,7 +30,7 @@ import {
 } from '../../lib/ui';
 import type { Column, FilterGroup, FilterValues, KanbanColumn, KanbanItem, TabItem, Tone } from '../../lib/ui';
 import { displayName, getProfileManagers, isAdmin } from '../../config/team';
-import { fetchInterviewedCompanies, isInterviewed } from './interviewedSource';
+import { INTERVIEWED_NAMES, INTERVIEWED_RAW, isInterviewed } from './interviewedSource';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
 // Company schema so keys are camelCase.
@@ -119,7 +118,6 @@ export function CompaniesPage() {
   const selectionSheetId = getSheetId('selection');
   const masterTab = getTab('companies', 'companies');
   const sourceTab = getTab('selection', 'sourceData');
-  const interviewedSheetId = getSheetId('companiesInterviewed');
 
   const master = useSheetDoc<Master>(
     masterSheetId || null,
@@ -135,23 +133,10 @@ export function CompaniesPage() {
     { userEmail: user?.email }
   );
 
-  // Read-only set of company names that have been interviewed. Auto-loads
-  // on mount; surfaces errors but never blocks the page.
-  const [interviewedSet, setInterviewedSet] = useState<Set<string>>(new Set());
-  const [interviewedTabs, setInterviewedTabs] = useState<string[]>([]);
-  const [interviewedErrors, setInterviewedErrors] = useState<string[]>([]);
-  useEffect(() => {
-    if (!interviewedSheetId) return;
-    let cancelled = false;
-    (async () => {
-      const r = await fetchInterviewedCompanies(interviewedSheetId);
-      if (cancelled) return;
-      setInterviewedSet(r.names);
-      setInterviewedTabs(r.tabs);
-      setInterviewedErrors(r.errors);
-    })();
-    return () => { cancelled = true; };
-  }, [interviewedSheetId]);
+  // Static, hand-maintained list of Cohort 3 interviewed companies (see
+  // interviewedSource.ts for the why). Used to overlay the "Interviewed"
+  // status onto the master sheet without ever demoting a higher status.
+  const interviewedSet = INTERVIEWED_NAMES;
 
   const [query, setQuery] = useState('');
   const [filters, setFilters] = useState<FilterValues>({ pm: [], stage: [], status: [], fund: [] });
@@ -489,8 +474,9 @@ export function CompaniesPage() {
             )}
           </div>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            107 Cohort 3 applicants. Status of "Interviewed" is sourced from the team's interviewed-companies sheet
-            ({interviewedTabs.length > 0 ? `${interviewedSet.size} names from ${interviewedTabs.length} tab${interviewedTabs.length === 1 ? '' : 's'}` : 'not yet loaded'}).
+            107 Cohort 3 applicants. Status of "Interviewed" is overlaid from a static list of {INTERVIEWED_RAW.length} companies
+            scheduled across Phases 1–4 (April 2026); edit{' '}
+            <code className="rounded bg-slate-100 px-1 py-0.5 text-[11px] dark:bg-slate-800">interviewedSource.ts</code> to update.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -524,15 +510,6 @@ export function CompaniesPage() {
           <p className="text-sm text-red-700 dark:text-red-300">Failed to load: {error.message}</p>
         </Card>
       )}
-      {interviewedErrors.length > 0 && (
-        <Card className="border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950">
-          <p className="text-xs text-amber-800 dark:text-amber-200">
-            <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
-            Couldn't load the interviewed-companies sheet: {interviewedErrors[0]}
-          </p>
-        </Card>
-      )}
-
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs uppercase tracking-wider text-slate-500">Quick views:</span>
         {([

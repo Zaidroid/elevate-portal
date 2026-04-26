@@ -1,23 +1,74 @@
-// Read-only loader for the Cohort 3 "interviewed companies" source sheet
-// (1NT-ZoJN_crFlH3Jgfa104uZHlycRrHal). Pulls every tab, hunts for the
-// column whose header contains "company" or "name", and returns a Set of
-// normalised company names. The Companies page joins this set against the
-// 107 applicants and overrides their status to "Interviewed" so the
-// post-interview cohort surfaces correctly even when the master sheet's
-// status field is still blank.
+// Static list of Cohort 3 companies that have an interview scheduled or
+// completed. Source: the team's Phase 1–4 interview schedule (West Bank +
+// Gaza, April 2026). Pasted in from the team's tracker rather than fetched
+// from Drive because the upstream file is an .xlsx (not a native Sheet) and
+// the Sheets API rejects those with FAILED_PRECONDITION. The list is small,
+// rarely changes, and overriding the master sheet's status to "Interviewed"
+// is the only thing the portal needs from it.
 //
-// The portal NEVER writes to this sheet.
+// To update: just edit the array below and ship a new build.
 
-import { batchGet, getSpreadsheetMetaCached } from '../../lib/sheets/client';
+const RAW_NAMES: string[] = [
+  // Phase 1 — West Bank (Online), 6 + 3 companies
+  'TechnoGeeks',
+  'Bashar Al-Bakri & Partners for Marketing and Technological Solutions',
+  'Aipilot',
+  'Mobile Telephone System - MTSC',
+  'Kidify',
+  'HSD – Himam Software Development',
+  'IzTechValley',
+  'ASAL Technologies',
+  'Enbat',
 
-export type InterviewedFetchResult = {
-  names: Set<string>;
-  tabs: string[];
-  rawCount: number;
-  errors: string[];
-};
+  // Phase 2 — West Bank Old, all online
+  'Hesabate',
+  'Dotline Marketing and Advertising Agency',
+  'National Cyber Security Company',
+  'OFFTEC Palestine',
+  'Radix Technologies',
+  'ULTIMIT Advanced Turnkey Solutions',
+  'PITS',
+  'Aeliasoft',
+  'Orion VLSI Technologies',
+  'Pillars For Development and Technology Investment',
+  'SAFEDENY for Secure Technologies',
+  'Sada Intelligence',
+  'Tech 360',
+  'Scope Systems',
+  'Olivery',
+  'Top Mena Talents for Programming and Information Technology',
+  'Business Alliance for Services and Investment',
+  'Digify Company for Marketing Consultation and Projects Development',
 
-const NAME_HEADER_HINTS = ['company name', 'company', 'name', 'organization', 'startup', 'business'];
+  // Phase 3 — West Bank New, Ramallah on-site
+  'Electra Control Systems',
+  'Badawi Information Systems',
+  'ABA Agency',
+  'Togo App',
+  'Inspire IT Solutions for Information Technology',
+  'Seema Application for digital services',
+  'Synergia for Workforce Management',
+  'Siraj for Students Services & Career Guidance',
+
+  // Phase 4 — Gaza, all online
+  'World Links',
+  'Taif',
+  'Dash',
+  'WE WILL TECH',
+  'Haweya',
+  'سمارت أبيكس لتكنولوجيا المعلومات',
+  'PediaLink',
+  'Tweets Tec Company',
+  'Shift ICT',
+  'Hexa',
+  'EvoInsight',
+  'ME Group',
+  'Tatwer',
+  'Dimensions',
+  'Polaris',
+  'Go Global',
+  'Jaffa.Net',
+];
 
 function normName(s: string): string {
   return (s || '')
@@ -27,72 +78,10 @@ function normName(s: string): string {
     .trim();
 }
 
-function findNameColumn(headerRow: string[]): number {
-  if (!headerRow || headerRow.length === 0) return -1;
-  // Prefer the most-specific match.
-  for (const hint of NAME_HEADER_HINTS) {
-    const idx = headerRow.findIndex(h => (h || '').toLowerCase().trim() === hint);
-    if (idx >= 0) return idx;
-  }
-  for (const hint of NAME_HEADER_HINTS) {
-    const idx = headerRow.findIndex(h => (h || '').toLowerCase().includes(hint));
-    if (idx >= 0) return idx;
-  }
-  // Last resort: first non-empty column.
-  return headerRow.findIndex(h => (h || '').trim().length > 0);
-}
+export const INTERVIEWED_NAMES: Set<string> = new Set(RAW_NAMES.map(normName));
+export const INTERVIEWED_RAW: ReadonlyArray<string> = RAW_NAMES;
 
-export async function fetchInterviewedCompanies(sheetId: string): Promise<InterviewedFetchResult> {
-  const result: InterviewedFetchResult = { names: new Set(), tabs: [], rawCount: 0, errors: [] };
-  if (!sheetId) {
-    result.errors.push('VITE_SHEET_COMPANIES_INTERVIEWED is not configured.');
-    return result;
-  }
-
-  let tabs: string[] = [];
-  try {
-    const meta = await getSpreadsheetMetaCached(sheetId);
-    tabs = meta.sheets.map(s => s.title);
-  } catch (err) {
-    result.errors.push(`Failed to read tab list: ${(err as Error).message}`);
-    return result;
-  }
-  if (tabs.length === 0) return result;
-
-  let valueRanges: Array<{ range: string; values?: string[][] }> = [];
-  try {
-    valueRanges = await batchGet(sheetId, tabs.map(t => `${t}!A:ZZ`));
-  } catch (err) {
-    result.errors.push(`batchGet failed: ${(err as Error).message}`);
-    return result;
-  }
-
-  for (let i = 0; i < tabs.length; i++) {
-    const rows = valueRanges[i]?.values || [];
-    if (rows.length < 1) continue;
-    // Find a likely header row in the first 10 rows. We do this defensively
-    // because some sheets have a banner row above the header.
-    let headerIdx = -1;
-    let nameCol = -1;
-    for (let r = 0; r < Math.min(rows.length, 10); r++) {
-      const c = findNameColumn(rows[r]);
-      if (c >= 0) { headerIdx = r; nameCol = c; break; }
-    }
-    if (headerIdx < 0 || nameCol < 0) continue;
-    result.tabs.push(tabs[i]);
-    for (let r = headerIdx + 1; r < rows.length; r++) {
-      const v = (rows[r][nameCol] || '').trim();
-      if (!v) continue;
-      // Skip obvious header repeats / separator rows.
-      if (NAME_HEADER_HINTS.some(h => v.toLowerCase() === h)) continue;
-      result.rawCount += 1;
-      result.names.add(normName(v));
-    }
-  }
-  return result;
-}
-
-export function isInterviewed(companyName: string, names: Set<string>): boolean {
+export function isInterviewed(companyName: string, names: Set<string> = INTERVIEWED_NAMES): boolean {
   if (!companyName || names.size === 0) return false;
   const k = normName(companyName);
   if (!k) return false;
