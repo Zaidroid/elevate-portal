@@ -1,32 +1,17 @@
-// ReviewView — the team's step-through workflow for going through every
-// post-interview company, deciding inclusion, and proposing interventions.
-//
-// New layout (drastically rethought to surface every prior team
-// evaluation artifact alongside the decision form):
-//
-//   ┌─────────────────────────────────────────────────────────────────┐
-//   │ Sticky progress strip + jump-to-company dropdown                │
-//   ├─────────────────────────────────────────────────────────────────┤
-//   │ Hero (company icon + name + status / fund / consensus chips)    │
-//   ├──────────────────────────────────────┬──────────────────────────┤
-//   │ Evaluation timeline (left, 8/12)     │ Decision form (right,    │
-//   │  ┌ At a glance — KPI strip          │ 4/12, sticky)             │
-//   │  ├ Application — Source Data         │  Decision: Rec/Hold/Rej  │
-//   │  ├ Scoring — score class + matrix    │  Pillars + sub-int       │
-//   │  ├ Doc Review — readiness notes      │  Notes                   │
-//   │  ├ Interview — assess + discussion   │  Save & Next             │
-//   │  ├ Committee — votes from before     │                          │
-//   │  └ Team thread — reviews + comments  │                          │
-//   └──────────────────────────────────────┴──────────────────────────┘
-//
-// The right pane stays put while the reviewer scrolls through evaluation
-// history; their decision form is always one glance away.
+// ReviewView — the team's step-through workflow.
+// Layout: 2-pane. Left = tabbed evaluation timeline (At a glance / Application
+// / Scoring & Needs / Doc Review / Interview / Committee / Team thread).
+// Right = sticky decision form with PM picker, mini stats, Recommend / Hold /
+// Reject, pillar picker (each pillar shows whether the company REQUESTED it
+// in their application and whether the TEAM RECOMMENDED it during selection),
+// notes, Save & Next, and an admin-only Finalize panel that locks status +
+// materializes interventions into the Intervention Assignments tab.
 
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Activity, AlertTriangle, BookOpen, Building2, ChevronLeft, ChevronRight,
-  ClipboardCheck, ExternalLink, FileText, MapPin, MessageCircle,
-  PauseCircle, Save, SkipForward, ThumbsDown, ThumbsUp, Users, Vote, Zap,
+  Activity, AlertTriangle, BookOpen, Building2, CheckCircle2, ChevronLeft, ChevronRight,
+  ClipboardCheck, ExternalLink, FileText, Lock, MapPin, MessageCircle,
+  PauseCircle, Save, SkipForward, ThumbsDown, ThumbsUp, UserCheck, Users, Vote, Zap,
 } from 'lucide-react';
 import { Badge, Button, Card, EmptyState, useToast } from '../../lib/ui';
 import type { Tone } from '../../lib/ui';
@@ -66,6 +51,13 @@ export type ReviewableCompany = {
   selection: SelectionContext;
 };
 
+export type FinalizeArgs = {
+  companyId: string;
+  pmEmail?: string;
+  status: string;
+  interventions: Array<{ pillar: string; sub: string }>;
+};
+
 const DECISION_TONE: Record<ReviewDecision, Tone> = {
   Recommend: 'green',
   Hold: 'amber',
@@ -73,13 +65,11 @@ const DECISION_TONE: Record<ReviewDecision, Tone> = {
 };
 
 const DECISION_ICON: Record<ReviewDecision, React.ReactNode> = {
-  Recommend: <ThumbsUp className="h-4 w-4" />,
-  Hold: <PauseCircle className="h-4 w-4" />,
-  Reject: <ThumbsDown className="h-4 w-4" />,
+  Recommend: <ThumbsUp className="h-3.5 w-3.5" />,
+  Hold: <PauseCircle className="h-3.5 w-3.5" />,
+  Reject: <ThumbsDown className="h-3.5 w-3.5" />,
 };
 
-// Header buckets used to group raw key/value pairs from each Selection tab
-// into readable sections without hardcoding tab schemas.
 const SCORING_BUCKETS = [
   { label: 'Score & Class', pattern: /score|class|rank|tier|grade|weight/i },
   { label: 'Notes', pattern: /note|comment|reason|justification/i },
@@ -106,32 +96,93 @@ const NEEDS_BUCKETS = [
 ];
 
 const APPLICATION_KEY_FIELDS: Array<[string, string[]]> = [
-  ['About the company', ['businessDescription', 'whatTheyDo', 'productOrService', 'description', 'about']],
+  ['About', ['businessDescription', 'whatTheyDo', 'productOrService', 'description', 'about']],
   ['Why Elevate', ['whyElevate', 'goals', 'reasonForApplying', 'why']],
   ['Pain points', ['mainPainPoint', 'challenges', 'mainChallenge', 'problems', 'pain']],
-  ['Hiring spec', ['wantsTrainToHire', 'trainToHireCount', 'rolesNeeded', 'hiring']],
+  ['Hiring spec', ['rolesNeeded', 'hiring', 'trainToHireCount']],
   ['Founders / Team', ['founderName', 'founderEmail', 'leadership', 'foundingTeam', 'founders']],
   ['Markets', ['markets', 'targetMarkets', 'currentMarkets', 'currentMarket']],
-  ['Revenue', ['revenue', 'annualRevenue', 'revenueBracket', 'arr']],
+  ['Revenue', ['annualRevenue', 'revenueBracket', 'revenue', 'arr']],
 ];
 
 type EvalTab = 'glance' | 'application' | 'scoring' | 'docReview' | 'interview' | 'committee' | 'team';
+
+// Maps application 'wantsXXX' fields → pillar codes. Drives the "Requested"
+// badge on each pillar in the picker so the reviewer sees what the company
+// asked for in their original application.
+const WANTS_TO_PILLAR: Array<[string, string]> = [
+  ['wantsTrainToHire', 'TTH'],
+  ['wantsUpskilling', 'Upskilling'],
+  ['wantsMarketingSupport', 'MKG'],
+  ['wantsLegalSupport', 'MA'],
+  ['wantsDomainCoaching', 'C-Suite'],
+  ['wantsConferences', 'Conferences'],
+  ['wantsElevateBridge', 'ElevateBridge'],
+];
+
+function asBool(v?: string): boolean {
+  if (!v) return false;
+  const s = v.trim().toLowerCase();
+  return s === 'true' || s === 'yes' || s === '1' || s === 'y';
+}
+
+function getRequestedPillars(app: Record<string, string>): Set<string> {
+  const out = new Set<string>();
+  for (const [key, code] of WANTS_TO_PILLAR) {
+    if (asBool(app[key])) out.add(code);
+  }
+  return out;
+}
+
+// Recommended pillars derive from (a) the comma-separated assessedInterventions
+// field on Interview Assessment and (b) the Company Needs flags (Domain
+// Coaching = Yes, Elevate Bridge = Yes, etc.) that the selection-tool sets.
+function getRecommendedPillars(sel: SelectionContext): Set<string> {
+  const out = new Set<string>();
+  const assessed = sel.interviewAssessment?.assessedInterventions || sel.interviewAssessment?.['Assessed Interventions'] || '';
+  if (assessed) {
+    for (const t of assessed.split(',')) {
+      const code = t.trim();
+      const p = pillarFor(code)?.code;
+      if (p) out.add(p);
+    }
+  }
+  const n = sel.needs;
+  if (n) {
+    if (asBool(n['Train To Hire']) || asBool(n['Train-to-Hire']) || asBool(n['TTH'])) out.add('TTH');
+    if (asBool(n['Upskilling']) || (n['Upskilling'] && n['Upskilling'] !== 'No' && n['Upskilling'] !== '0')) out.add('Upskilling');
+    if (n['Marketing Maturity'] || n['Marketing']) out.add('MKG');
+    if (n['Legal Tier'] || n['Legal Urgency'] || n['Legal']) out.add('MA');
+    if (asBool(n['Domain Coaching']) || n['Primary Domain']) out.add('C-Suite');
+    if (asBool(n['Elevate Bridge']) || asBool(n['ElevateBridge'])) out.add('ElevateBridge');
+    if (asBool(n['Conferences'])) out.add('Conferences');
+  }
+  return out;
+}
 
 export function ReviewView({
   companies,
   reviews,
   comments,
   reviewerEmail,
+  isAdmin,
+  profileManagers,
   onSaveReview,
   onAddComment,
+  onAssignPM,
+  onFinalize,
   onJumpToCompany,
 }: {
   companies: ReviewableCompany[];
   reviews: Review[];
   comments: CompanyComment[];
   reviewerEmail: string;
+  isAdmin: boolean;
+  profileManagers: Array<{ email: string; name: string }>;
   onSaveReview: (r: Review) => Promise<void>;
   onAddComment: (c: CompanyComment) => Promise<void>;
+  onAssignPM: (companyId: string, pmEmail: string) => Promise<void>;
+  onFinalize: (args: FinalizeArgs) => Promise<void>;
   onJumpToCompany?: (route_id: string) => void;
 }) {
   const toast = useToast();
@@ -174,6 +225,9 @@ export function ReviewView({
   const [savingReview, setSavingReview] = useState(false);
   const [commentDraft, setCommentDraft] = useState('');
   const [postingComment, setPostingComment] = useState(false);
+  const [pmDraft, setPmDraft] = useState('');
+  const [showFinalize, setShowFinalize] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
 
   useEffect(() => {
     if (myExistingReview) {
@@ -189,28 +243,21 @@ export function ReviewView({
     }
     setCommentDraft('');
     setEvalTab('glance');
-  }, [myExistingReview, company?.company_id]);
+    setPmDraft(company?.profile_manager_email || '');
+    setShowFinalize(false);
+  }, [myExistingReview, company?.company_id, company?.profile_manager_email]);
 
   if (companies.length === 0) {
     return (
       <Card>
-        <EmptyState
-          icon={<MessageCircle className="h-10 w-10" />}
-          title="No companies in scope to review"
-          description="Adjust the filters above (or flip 'Include pre-interview') to populate the review queue."
-        />
+        <EmptyState icon={<MessageCircle className="h-8 w-8" />} title="No companies in scope to review" description="Adjust filters or flip 'Include pre-interview'." />
       </Card>
     );
   }
-
   if (!company) {
     return (
       <Card>
-        <EmptyState
-          icon={<MessageCircle className="h-10 w-10" />}
-          title="End of the queue"
-          description="You've stepped through every company in the current scope."
-        />
+        <EmptyState icon={<MessageCircle className="h-8 w-8" />} title="End of the queue" description="You've stepped through every company in scope." />
       </Card>
     );
   }
@@ -241,9 +288,7 @@ export function ReviewView({
       return next;
     });
     const parent = pillarFor(code);
-    if (parent) setPillars(prev => {
-      const next = new Set(prev); next.add(parent.code); return next;
-    });
+    if (parent) setPillars(prev => { const next = new Set(prev); next.add(parent.code); return next; });
   };
 
   const goPrev = () => setCursor(c => Math.max(0, c - 1));
@@ -299,6 +344,42 @@ export function ReviewView({
     }
   };
 
+  const handleAssignPM = async () => {
+    try {
+      await onAssignPM(company.company_id, pmDraft);
+      toast.success('PM assigned', pmDraft ? `${displayName(pmDraft)} now owns ${company.company_name}.` : 'Profile Manager cleared.');
+    } catch (e) {
+      toast.error('Assign failed', (e as Error).message);
+    }
+  };
+
+  const handleFinalize = async (status: string) => {
+    if (!isAdmin) return;
+    setFinalizing(true);
+    try {
+      const interventions: Array<{ pillar: string; sub: string }> = [];
+      // Use this reviewer's selections, or fall back to consensus.
+      const pickedPillars = pillars.size > 0 ? Array.from(pillars) : computeConsensusPillars(companyReviews);
+      const pickedSubs = subInterventions.size > 0 ? Array.from(subInterventions) : computeConsensusSubs(companyReviews);
+      for (const p of pickedPillars) {
+        const subsForP = pickedSubs.filter(s => pillarFor(s)?.code === p);
+        if (subsForP.length === 0) interventions.push({ pillar: p, sub: '' });
+        else for (const s of subsForP) interventions.push({ pillar: p, sub: s });
+      }
+      await onFinalize({
+        companyId: company.company_id,
+        pmEmail: pmDraft || undefined,
+        status,
+        interventions,
+      });
+      toast.success(`${status}`, `${company.company_name} locked in${interventions.length ? ` with ${interventions.length} intervention${interventions.length === 1 ? '' : 's'}` : ''}.`);
+    } catch (e) {
+      toast.error('Finalize failed', (e as Error).message);
+    } finally {
+      setFinalizing(false);
+    }
+  };
+
   const companyReviews = reviews.filter(r => r.company_id === company.company_id);
   const companyComments = comments
     .filter(c => c.company_id === company.company_id)
@@ -307,11 +388,10 @@ export function ReviewView({
   const progressPct = Math.round((reviewedCount / Math.max(1, companies.length)) * 100);
 
   const application = company.applicantRaw || {};
-  const presentInApp = (keys: string[]) =>
-    keys.find(k => application[k] && application[k].trim());
-
   const sel = company.selection;
-  // Per-tab signal availability for the eval-tab strip.
+  const requestedPillars = useMemo(() => getRequestedPillars(application), [application]);
+  const recommendedPillars = useMemo(() => getRecommendedPillars(sel), [sel]);
+
   const has = {
     scoring: !!sel.scoring,
     docReview: !!sel.docReview,
@@ -321,97 +401,81 @@ export function ReviewView({
   };
 
   const evalTabs: Array<{ id: EvalTab; label: string; icon: React.ReactNode; available: boolean; count?: number }> = [
-    { id: 'glance', label: 'At a glance', icon: <Zap className="h-4 w-4" />, available: true },
-    { id: 'application', label: 'Application', icon: <FileText className="h-4 w-4" />, available: Object.keys(application).length > 0 },
-    { id: 'scoring', label: 'Scoring & Needs', icon: <Activity className="h-4 w-4" />, available: has.scoring || has.needs },
-    { id: 'docReview', label: 'Doc Review', icon: <ClipboardCheck className="h-4 w-4" />, available: has.docReview },
-    { id: 'interview', label: 'Interview', icon: <BookOpen className="h-4 w-4" />, available: has.interview },
-    { id: 'committee', label: 'Committee', icon: <Vote className="h-4 w-4" />, available: has.committee },
-    { id: 'team', label: 'Team thread', icon: <Users className="h-4 w-4" />, available: true, count: companyReviews.length + companyComments.length },
+    { id: 'glance', label: 'Glance', icon: <Zap className="h-3.5 w-3.5" />, available: true },
+    { id: 'application', label: 'Application', icon: <FileText className="h-3.5 w-3.5" />, available: Object.keys(application).length > 0 },
+    { id: 'scoring', label: 'Scoring & Needs', icon: <Activity className="h-3.5 w-3.5" />, available: has.scoring || has.needs },
+    { id: 'docReview', label: 'Doc Review', icon: <ClipboardCheck className="h-3.5 w-3.5" />, available: has.docReview },
+    { id: 'interview', label: 'Interview', icon: <BookOpen className="h-3.5 w-3.5" />, available: has.interview },
+    { id: 'committee', label: 'Committee', icon: <Vote className="h-3.5 w-3.5" />, available: has.committee },
+    { id: 'team', label: 'Team thread', icon: <Users className="h-3.5 w-3.5" />, available: true, count: companyReviews.length + companyComments.length },
   ];
 
   return (
-    <div className="space-y-5">
-      {/* ───────── Sticky progress + nav strip ───────── */}
-      <Card className="sticky top-0 z-30 border-b-2 border-brand-teal/20 bg-white/95 backdrop-blur dark:bg-navy-900/95">
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={goPrev} disabled={cursor === 0}>
-              <ChevronLeft className="h-4 w-4" /> Prev
+    <div className="space-y-3">
+      {/* Sticky progress + nav strip */}
+      <div className="sticky top-0 z-30 -mx-2 rounded-xl border border-slate-200 bg-white/95 px-3 py-2 backdrop-blur dark:border-navy-700 dark:bg-navy-900/95">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <Button variant="ghost" size="sm" onClick={goPrev} disabled={cursor === 0}>
+              <ChevronLeft className="h-3.5 w-3.5" /> Prev
             </Button>
-            <span className="rounded-md bg-brand-teal/10 px-2 py-1 text-sm font-bold text-brand-teal">
-              {cursor + 1} / {companies.length}
+            <span className="rounded bg-brand-teal/10 px-2 py-1 text-xs font-bold text-brand-teal">
+              {cursor + 1}/{companies.length}
             </span>
-            <Button variant="ghost" onClick={goNext} disabled={cursor === companies.length - 1}>
-              Next <ChevronRight className="h-4 w-4" />
+            <Button variant="ghost" size="sm" onClick={goNext} disabled={cursor === companies.length - 1}>
+              Next <ChevronRight className="h-3.5 w-3.5" />
             </Button>
           </div>
-
-          <div className="flex-1 min-w-[220px]">
-            <div className="flex items-center justify-between text-sm font-semibold text-slate-700 dark:text-slate-200">
-              <span>{reviewedCount} of {companies.length} reviewed</span>
-              <span className="text-slate-500 dark:text-slate-400">{progressPct}% · you've done {myReviewedCount}</span>
+          <div className="flex-1 min-w-[180px]">
+            <div className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-200">
+              <span>{reviewedCount}/{companies.length} reviewed</span>
+              <span className="text-slate-500">{progressPct}% · you: {myReviewedCount}</span>
             </div>
-            <div className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
-              <div
-                className="h-full bg-gradient-to-r from-brand-teal to-emerald-500 transition-all"
-                style={{ width: `${progressPct}%` }}
-              />
+            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+              <div className="h-full bg-gradient-to-r from-brand-teal to-emerald-500" style={{ width: `${progressPct}%` }} />
             </div>
           </div>
-
           <select
             value={cursor}
             onChange={e => setCursor(Number(e.currentTarget.value))}
-            className="min-w-[220px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
-            title="Jump to a company"
+            className="min-w-[180px] rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-medium dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
           >
             {companies.map((c, i) => {
               const s = summaryByCompany.get(c.company_id);
               const tag = s && s.total > 0 ? ` · ${s.consensus}` : '';
-              return (
-                <option key={c.company_id} value={i}>
-                  {i + 1}. {c.company_name || c.company_id}{tag}
-                </option>
-              );
+              return <option key={c.company_id} value={i}>{i + 1}. {c.company_name}{tag}</option>;
             })}
           </select>
         </div>
-      </Card>
+      </div>
 
-      {/* ───────── Hero ───────── */}
-      <Card className="border-l-4 border-l-brand-teal">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="flex items-start gap-4">
-            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-brand-teal/10 text-brand-teal">
-              <Building2 className="h-7 w-7" />
+      {/* Hero */}
+      <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-teal/10 text-brand-teal">
+              <Building2 className="h-5 w-5" />
             </div>
             <div>
-              <h2 className="text-2xl font-extrabold text-navy-500 dark:text-white">
+              <h2 className="text-lg font-extrabold leading-tight text-navy-500 dark:text-white">
                 {company.company_name || 'Unnamed company'}
               </h2>
-              <div className="mt-1 flex flex-wrap items-center gap-3 text-sm text-slate-600 dark:text-slate-300">
-                {company.sector && (
-                  <span className="inline-flex items-center gap-1">
-                    <Building2 className="h-3.5 w-3.5" /> {company.sector}
-                  </span>
-                )}
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-300">
+                {company.sector && <span>{company.sector}</span>}
                 {(company.city || company.governorate) && (
                   <span className="inline-flex items-center gap-1">
-                    <MapPin className="h-3.5 w-3.5" /> {[company.city, company.governorate].filter(Boolean).join(', ')}
+                    <MapPin className="h-3 w-3" /> {[company.city, company.governorate].filter(Boolean).join(', ')}
                   </span>
                 )}
-                {company.employee_count && (
-                  <span>{company.employee_count} {company.employee_count === '1' ? 'employee' : 'employees'}</span>
-                )}
+                {company.employee_count && <span>{company.employee_count} emp</span>}
               </div>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
             <Badge tone="teal">{company.status || 'Interviewed'}</Badge>
             {company.fund_code && (
               <Badge tone={company.fund_code === '97060' ? 'teal' : 'amber'}>
-                {company.fund_code === '97060' ? 'Dutch (97060)' : 'SIDA (91763)'}
+                {company.fund_code === '97060' ? 'Dutch' : 'SIDA'}
               </Badge>
             )}
             {summary && summary.total > 0 && (
@@ -420,87 +484,67 @@ export function ReviewView({
               </Badge>
             )}
             {onJumpToCompany && (
-              <Button variant="ghost" onClick={() => onJumpToCompany(company.route_id)}>
-                <ExternalLink className="h-4 w-4" /> Open detail
+              <Button variant="ghost" size="sm" onClick={() => onJumpToCompany(company.route_id)}>
+                <ExternalLink className="h-3.5 w-3.5" /> Detail
               </Button>
             )}
           </div>
         </div>
-      </Card>
+      </div>
 
-      {/* ───────── Two-pane: timeline + sticky decision form ───────── */}
-      <div className="grid gap-5 lg:grid-cols-12">
-        {/* ════════ LEFT — Evaluation timeline ════════ */}
-        <div className="space-y-4 lg:col-span-8">
+      {/* Two-pane */}
+      <div className="grid gap-3 lg:grid-cols-12">
+        {/* LEFT — Evaluation timeline */}
+        <div className="space-y-3 lg:col-span-8">
           {/* Eval tab strip */}
-          <Card>
-            <div className="flex flex-wrap gap-1.5">
-              {evalTabs.map(t => {
-                const active = evalTab === t.id;
-                const dim = !t.available && !active;
-                return (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => setEvalTab(t.id)}
-                    disabled={!t.available && !active}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold transition-colors ${
-                      active
-                        ? 'bg-brand-teal text-white shadow'
-                        : dim
-                        ? 'bg-slate-100 text-slate-400 dark:bg-navy-800 dark:text-slate-500'
-                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-navy-800 dark:text-slate-200 dark:hover:bg-navy-700'
-                    }`}
-                  >
-                    {t.icon} {t.label}
-                    {t.count !== undefined && t.count > 0 && (
-                      <span className={`rounded-full px-1.5 text-[10px] font-bold ${active ? 'bg-white/20 text-white' : 'bg-slate-300 text-slate-700 dark:bg-navy-600 dark:text-slate-200'}`}>
-                        {t.count}
-                      </span>
-                    )}
-                    {!t.available && <span className="text-[10px] font-medium opacity-60">none</span>}
-                  </button>
-                );
-              })}
-            </div>
-          </Card>
+          <div className="flex flex-wrap gap-1 rounded-xl border border-slate-200 bg-white p-1.5 dark:border-navy-700 dark:bg-navy-900">
+            {evalTabs.map(t => {
+              const active = evalTab === t.id;
+              const dim = !t.available && !active;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setEvalTab(t.id)}
+                  disabled={!t.available && !active}
+                  className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-bold transition-colors ${
+                    active ? 'bg-brand-teal text-white' :
+                    dim ? 'text-slate-400 dark:text-slate-500' :
+                    'text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-navy-700'
+                  }`}
+                >
+                  {t.icon} {t.label}
+                  {t.count !== undefined && t.count > 0 && (
+                    <span className={`rounded-full px-1.5 text-[10px] ${active ? 'bg-white/20' : 'bg-slate-200 dark:bg-navy-700'}`}>
+                      {t.count}
+                    </span>
+                  )}
+                  {!t.available && !active && <span className="text-[9px] opacity-60">(none)</span>}
+                </button>
+              );
+            })}
+          </div>
 
-          {/* ── At a glance ── */}
           {evalTab === 'glance' && (
-            <GlanceTab company={company} application={application} sel={sel} summary={summary} />
-          )}
-
-          {/* ── Application ── */}
-          {evalTab === 'application' && (
-            <ApplicationTab application={application} presentInApp={presentInApp} />
-          )}
-
-          {/* ── Scoring & Needs ── */}
-          {evalTab === 'scoring' && (
-            <ScoringTab sel={sel} />
-          )}
-
-          {/* ── Doc Review ── */}
-          {evalTab === 'docReview' && (
-            <RawTabContent
-              row={sel.docReview}
-              buckets={DOC_REVIEW_BUCKETS}
-              empty="No doc review on file."
-              icon={<ClipboardCheck className="h-6 w-6" />}
+            <GlanceTab
+              company={company}
+              application={application}
+              sel={sel}
+              summary={summary}
+              requestedPillars={requestedPillars}
+              recommendedPillars={recommendedPillars}
             />
           )}
-
-          {/* ── Interview ── */}
-          {evalTab === 'interview' && (
-            <InterviewTab sel={sel} />
+          {evalTab === 'application' && <ApplicationTab application={application} />}
+          {evalTab === 'scoring' && <ScoringTab sel={sel} />}
+          {evalTab === 'docReview' && (
+            <Card>
+              {sel.docReview ? <BucketedFields entries={meaningfulEntries(sel.docReview)} buckets={DOC_REVIEW_BUCKETS} />
+                : <EmptyHint icon={<ClipboardCheck className="h-5 w-5" />} text="No doc review on file." />}
+            </Card>
           )}
-
-          {/* ── Committee ── */}
-          {evalTab === 'committee' && (
-            <CommitteeTab sel={sel} />
-          )}
-
-          {/* ── Team thread ── */}
+          {evalTab === 'interview' && <InterviewTab sel={sel} />}
+          {evalTab === 'committee' && <CommitteeTab sel={sel} />}
           {evalTab === 'team' && (
             <TeamThreadTab
               companyReviews={companyReviews}
@@ -513,93 +557,109 @@ export function ReviewView({
           )}
         </div>
 
-        {/* ════════ RIGHT — Sticky decision form ════════ */}
+        {/* RIGHT — Sticky decision form */}
         <div className="lg:col-span-4">
-          <div className="space-y-4 lg:sticky lg:top-[140px]">
-            {/* Quick stats — score + readiness + interventions hint */}
-            <Card>
-              <SectionHeader title="Quick read" subtitle="What we already have on this company" />
-              <div className="grid grid-cols-3 gap-2">
-                <MiniStat
-                  label="Score"
-                  value={pickValue(sel.scoring, /^(class|tier|grade)$/i) || pickValue(sel.scoring, /score|rating/i) || '—'}
-                  tone="teal"
-                />
-                <MiniStat
-                  label="Readiness"
-                  value={company.readiness_score || pickValue(sel.needs, /readiness|score/i) || '—'}
-                  tone="amber"
-                />
-                <MiniStat
-                  label="Reviews"
-                  value={summary && summary.total > 0 ? `${summary.total}` : '0'}
-                  tone={summary && summary.total > 0 ? (summary.consensus === 'Recommend' ? 'green' : summary.consensus === 'Reject' ? 'red' : 'amber') : 'neutral'}
-                />
+          <div className="space-y-3 lg:sticky lg:top-[88px]">
+            {/* PM picker */}
+            <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+              <div className="mb-1.5 flex items-center justify-between">
+                <h3 className="inline-flex items-center gap-1 text-sm font-bold text-navy-500 dark:text-white">
+                  <UserCheck className="h-3.5 w-3.5" /> Profile Manager
+                </h3>
+                {company.profile_manager_email && (
+                  <span className="text-[11px] text-slate-500">current: {displayName(company.profile_manager_email)}</span>
+                )}
               </div>
-            </Card>
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={pmDraft}
+                  onChange={e => setPmDraft(e.currentTarget.value)}
+                  className="flex-1 rounded-md border border-slate-200 bg-brand-editable/30 px-2 py-1.5 text-xs dark:border-navy-700 dark:bg-navy-700 dark:text-slate-100"
+                >
+                  <option value="">Unassigned</option>
+                  {profileManagers.map(pm => (
+                    <option key={pm.email} value={pm.email}>{pm.name}</option>
+                  ))}
+                </select>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleAssignPM}
+                  disabled={pmDraft === company.profile_manager_email}
+                >
+                  Assign
+                </Button>
+              </div>
+            </div>
 
-            {/* Decision tile */}
-            <Card>
-              <SectionHeader title="Your decision" subtitle="Pick one" />
-              <div className="grid grid-cols-3 gap-2">
+            {/* Mini stats */}
+            <div className="grid grid-cols-3 gap-1.5">
+              <MiniStat label="Score" value={pickValue(sel.scoring, /^(class|tier|grade)$/i) || pickValue(sel.scoring, /score|rating/i) || '—'} tone="teal" />
+              <MiniStat label="Readiness" value={company.readiness_score || pickValue(sel.needs, /readiness/i) || '—'} tone="amber" />
+              <MiniStat label="Reviews" value={summary && summary.total > 0 ? `${summary.total}` : '0'} tone={summary && summary.total > 0 ? (summary.consensus === 'Recommend' ? 'green' : summary.consensus === 'Reject' ? 'red' : 'amber') : 'neutral'} />
+            </div>
+
+            {/* Decision */}
+            <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+              <h3 className="mb-2 text-sm font-bold text-navy-500 dark:text-white">Your decision</h3>
+              <div className="grid grid-cols-3 gap-1.5">
                 {REVIEW_DECISIONS.map(d => {
                   const active = decision === d;
                   const tones = {
-                    Recommend: {
-                      on: 'border-emerald-500 bg-emerald-500 text-white shadow-md shadow-emerald-500/30',
-                      off: 'border-slate-200 bg-white text-slate-700 hover:border-emerald-400 hover:bg-emerald-50 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200 dark:hover:bg-emerald-950',
-                    },
-                    Hold: {
-                      on: 'border-amber-500 bg-amber-500 text-white shadow-md shadow-amber-500/30',
-                      off: 'border-slate-200 bg-white text-slate-700 hover:border-amber-400 hover:bg-amber-50 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200 dark:hover:bg-amber-950',
-                    },
-                    Reject: {
-                      on: 'border-red-500 bg-red-500 text-white shadow-md shadow-red-500/30',
-                      off: 'border-slate-200 bg-white text-slate-700 hover:border-red-400 hover:bg-red-50 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200 dark:hover:bg-red-950',
-                    },
+                    Recommend: { on: 'border-emerald-500 bg-emerald-500 text-white', off: 'border-slate-200 hover:border-emerald-400 hover:bg-emerald-50 dark:border-navy-700 dark:hover:bg-emerald-950' },
+                    Hold: { on: 'border-amber-500 bg-amber-500 text-white', off: 'border-slate-200 hover:border-amber-400 hover:bg-amber-50 dark:border-navy-700 dark:hover:bg-amber-950' },
+                    Reject: { on: 'border-red-500 bg-red-500 text-white', off: 'border-slate-200 hover:border-red-400 hover:bg-red-50 dark:border-navy-700 dark:hover:bg-red-950' },
                   };
-                  const cls = active ? tones[d].on : tones[d].off;
+                  const cls = active ? tones[d].on : `${tones[d].off} text-slate-700 dark:text-slate-200 bg-white dark:bg-navy-900`;
                   return (
                     <button
                       key={d}
                       type="button"
                       onClick={() => setDecision(d)}
-                      className={`flex flex-col items-center justify-center gap-1 rounded-xl border-2 px-3 py-3 text-sm font-bold transition-all ${cls}`}
+                      className={`flex flex-col items-center justify-center gap-0.5 rounded-lg border-2 px-2 py-2 text-xs font-bold transition-all ${cls}`}
                     >
                       {DECISION_ICON[d]} {d}
                     </button>
                   );
                 })}
               </div>
-            </Card>
+            </div>
 
-            {/* Interventions */}
-            <Card>
-              <SectionHeader title="Proposed interventions" />
-              <div className="space-y-1.5">
+            {/* Pillars with Requested / Recommended badges */}
+            <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-sm font-bold text-navy-500 dark:text-white">Interventions</h3>
+                <div className="flex items-center gap-2 text-[10px] font-semibold">
+                  <span className="inline-flex items-center gap-0.5 text-blue-700 dark:text-blue-300">
+                    <span className="h-1.5 w-1.5 rounded-full bg-blue-500" /> Asked
+                  </span>
+                  <span className="inline-flex items-center gap-0.5 text-purple-700 dark:text-purple-300">
+                    <span className="h-1.5 w-1.5 rounded-full bg-purple-500" /> Recommended
+                  </span>
+                </div>
+              </div>
+              <div className="space-y-1">
                 {PILLARS.map(p => {
                   const on = pillars.has(p.code);
+                  const req = requestedPillars.has(p.code);
+                  const rec = recommendedPillars.has(p.code);
                   return (
-                    <div
-                      key={p.code}
-                      className={`rounded-lg border-2 transition-colors ${
-                        on
-                          ? 'border-brand-teal bg-brand-teal/5'
-                          : 'border-slate-200 bg-white hover:border-brand-teal/40 dark:border-navy-700 dark:bg-navy-900'
-                      }`}
-                    >
-                      <label className="flex cursor-pointer items-center gap-2 px-3 py-2">
+                    <div key={p.code} className={`rounded-lg border ${on ? 'border-brand-teal bg-brand-teal/5' : 'border-slate-200 dark:border-navy-700'}`}>
+                      <label className="flex cursor-pointer items-center gap-2 px-2 py-1.5">
                         <input
                           type="checkbox"
                           checked={on}
                           onChange={() => togglePillar(p.code)}
-                          className="h-4 w-4 rounded border-slate-300 text-brand-teal focus:ring-brand-teal"
+                          className="h-3.5 w-3.5 rounded border-slate-300 text-brand-teal focus:ring-brand-teal"
                         />
-                        <span className="flex-1 text-sm font-bold text-navy-500 dark:text-slate-100">{p.label}</span>
-                        <Badge tone={on ? 'teal' : 'neutral'}>{p.shortLabel}</Badge>
+                        <span className="flex-1 text-xs font-bold text-navy-500 dark:text-slate-100">{p.label}</span>
+                        <div className="flex items-center gap-1">
+                          {req && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-bold text-blue-700 dark:bg-blue-950 dark:text-blue-200">ASKED</span>}
+                          {rec && <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[9px] font-bold text-purple-700 dark:bg-purple-950 dark:text-purple-200">REC</span>}
+                        </div>
                       </label>
                       {on && p.subInterventions.length > 0 && (
-                        <div className="border-t border-brand-teal/20 px-3 py-2">
+                        <div className="border-t border-brand-teal/20 px-2 py-1.5">
                           <div className="flex flex-wrap gap-1">
                             {p.subInterventions.map(s => {
                               const subOn = subInterventions.has(s);
@@ -608,10 +668,8 @@ export function ReviewView({
                                   key={s}
                                   type="button"
                                   onClick={() => toggleSub(s)}
-                                  className={`rounded-full border-2 px-2 py-0.5 text-xs font-semibold transition-colors ${
-                                    subOn
-                                      ? 'border-brand-teal bg-brand-teal text-white'
-                                      : 'border-slate-300 bg-white text-slate-700 hover:border-brand-teal hover:text-brand-teal dark:border-navy-700 dark:bg-navy-900 dark:text-slate-300'
+                                  className={`rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${
+                                    subOn ? 'border-brand-teal bg-brand-teal text-white' : 'border-slate-300 hover:border-brand-teal hover:text-brand-teal dark:border-navy-700 dark:text-slate-300'
                                   }`}
                                 >
                                   {s.replace(/^MA-/, '')}
@@ -625,39 +683,80 @@ export function ReviewView({
                   );
                 })}
               </div>
-            </Card>
+            </div>
 
             {/* Notes */}
-            <Card>
-              <SectionHeader title="Your notes" />
+            <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+              <h3 className="mb-1.5 text-sm font-bold text-navy-500 dark:text-white">Your notes</h3>
               <textarea
                 value={notes}
                 onChange={e => setNotes(e.currentTarget.value)}
-                rows={4}
-                placeholder="Reasoning, concerns, why this intervention pack…"
-                className="w-full rounded-lg border-2 border-slate-200 bg-brand-editable/30 px-3 py-2 text-sm leading-relaxed focus:border-brand-teal focus:outline-none dark:border-navy-700 dark:bg-navy-700 dark:text-slate-100"
+                rows={3}
+                placeholder="Reasoning, concerns, why this pack…"
+                className="w-full rounded-md border border-slate-200 bg-brand-editable/30 px-2 py-1.5 text-xs leading-relaxed focus:border-brand-teal focus:outline-none dark:border-navy-700 dark:bg-navy-700 dark:text-slate-100"
               />
-            </Card>
+            </div>
 
             {/* Save bar */}
-            <div className="space-y-1.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <Button onClick={() => handleSave(true)} disabled={savingReview || !decision} className="px-5 py-2.5 text-base">
-                  <Save className="h-4 w-4" /> Save & Next
-                </Button>
-                <Button variant="ghost" onClick={() => handleSave(false)} disabled={savingReview || !decision}>
-                  Save (stay)
-                </Button>
-                <Button variant="ghost" onClick={goNext}>
-                  <SkipForward className="h-4 w-4" /> Skip
-                </Button>
-              </div>
-              {myExistingReview && (
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  You reviewed this on <span className="font-semibold">{fmtDate(myExistingReview.updated_at)}</span> — saving will overwrite.
-                </p>
-              )}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Button onClick={() => handleSave(true)} disabled={savingReview || !decision}>
+                <Save className="h-3.5 w-3.5" /> Save & Next
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => handleSave(false)} disabled={savingReview || !decision}>
+                Save (stay)
+              </Button>
+              <Button variant="ghost" size="sm" onClick={goNext}>
+                <SkipForward className="h-3.5 w-3.5" /> Skip
+              </Button>
             </div>
+            {myExistingReview && (
+              <p className="text-[11px] text-slate-500">You reviewed this on {fmtDate(myExistingReview.updated_at)} — saving overwrites.</p>
+            )}
+
+            {/* Admin: Finalize */}
+            {isAdmin && (
+              <div className="rounded-xl border-2 border-dashed border-amber-300 bg-amber-50/50 p-3 dark:border-amber-800 dark:bg-amber-950/20">
+                <button
+                  type="button"
+                  onClick={() => setShowFinalize(s => !s)}
+                  className="flex w-full items-center justify-between"
+                >
+                  <h3 className="inline-flex items-center gap-1 text-sm font-bold text-amber-900 dark:text-amber-200">
+                    <Lock className="h-3.5 w-3.5" /> Finalize (admin)
+                  </h3>
+                  <span className="text-xs font-semibold text-amber-700 dark:text-amber-300">{showFinalize ? '−' : '+'}</span>
+                </button>
+                {showFinalize && (
+                  <div className="mt-2 space-y-2 text-xs text-amber-900 dark:text-amber-100">
+                    <p className="leading-relaxed">
+                      Locks the company status and creates Intervention Assignment rows from the picks below
+                      (or from the team consensus if you haven't picked your own yet).
+                    </p>
+                    {summary && summary.total > 0 ? (
+                      <div className="rounded bg-white p-2 dark:bg-navy-900">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Team consensus</span>
+                        <div className="mt-0.5 text-sm font-bold text-navy-500 dark:text-white">
+                          {summary.consensus} ({summary.recommend}/{summary.hold}/{summary.reject})
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-[11px] italic">No team reviews yet — finalize will use your current picks.</p>
+                    )}
+                    <div className="flex flex-wrap gap-1.5">
+                      <Button size="sm" onClick={() => handleFinalize('Selected')} disabled={finalizing}>
+                        <CheckCircle2 className="h-3.5 w-3.5" /> → Selected
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => handleFinalize('Recommended')} disabled={finalizing}>
+                        → Recommended
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => handleFinalize('Reviewing')} disabled={finalizing}>
+                        → Reviewing
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -665,123 +764,99 @@ export function ReviewView({
   );
 }
 
-// ──────────────────────────── Sub-components ─────────────────────────────
+// ──────── Sub-tabs ────────
 
 function GlanceTab({
   company,
   application,
   sel,
   summary,
+  requestedPillars,
+  recommendedPillars,
 }: {
   company: ReviewableCompany;
   application: Record<string, string>;
   sel: SelectionContext;
   summary?: ReturnType<typeof summarizeReviews>;
+  requestedPillars: Set<string>;
+  recommendedPillars: Set<string>;
 }) {
-  // Collect every signal we have into a single dense KPI strip + two
-  // narrative blocks (About / Why) so a reviewer can decide on this tab
-  // alone if they trust the prior team work.
   const presentInApp = (keys: string[]) => keys.find(k => application[k] && application[k].trim());
   const aboutKey = presentInApp(APPLICATION_KEY_FIELDS[0][1]);
   const whyKey = presentInApp(APPLICATION_KEY_FIELDS[1][1]);
   const painKey = presentInApp(APPLICATION_KEY_FIELDS[2][1]);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
+      {/* Snapshot tiles — fall back to application data so something always shows */}
       <Card>
-        <SectionHeader title="Snapshot" subtitle="Everything the team has on this company so far" />
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <BigStat
-            label="Score class"
-            value={pickValue(sel.scoring, /^(class|tier|grade)$/i) || '—'}
-            hint={pickValue(sel.scoring, /total.*score|^score$|weighted/i)}
-            tone="teal"
-          />
-          <BigStat
-            label="Readiness"
-            value={company.readiness_score || pickValue(sel.needs, /readiness/i) || '—'}
-            hint={pickValue(sel.needs, /total.*intervention|count/i)}
-            tone="amber"
-          />
-          <BigStat
-            label="Interview rating"
-            value={pickValue(sel.interviewAssessment, /rating|score|grade|recommend/i) || '—'}
-            hint={pickValue(sel.interviewAssessment, /interviewer|by/i)}
-            tone="teal"
-          />
-          <BigStat
-            label="Committee"
-            value={pickValue(sel.committeeVotes, /vote|decision|recommend|outcome/i) || '—'}
-            hint={pickValue(sel.committeeVotes, /reason|note/i)}
-            tone="orange"
-          />
-          <BigStat
-            label="Team reviews"
-            value={summary && summary.total > 0 ? `${summary.total}` : '0'}
-            hint={summary && summary.total > 0 ? `${summary.recommend} rec · ${summary.hold} hold · ${summary.reject} rej` : 'No team reviews yet'}
-            tone={summary && summary.consensus === 'Recommend' ? 'green' : summary && summary.consensus === 'Reject' ? 'red' : 'amber'}
-          />
-          <BigStat
-            label="PM"
-            value={company.profile_manager_email ? displayName(company.profile_manager_email).split(' ')[0] : '—'}
-            hint={company.profile_manager_email || 'Unassigned'}
-            tone="navy"
-          />
-          <BigStat
-            label="Sector"
-            value={company.sector || '—'}
-            hint={company.governorate || company.city || ''}
-            tone="navy"
-          />
-          <BigStat
-            label="Employees"
-            value={company.employee_count || '—'}
-            hint={pickValue(application, /^(annualRevenue|revenue|revenueBracket)$/i) || ''}
-            tone="navy"
-          />
+        <SectionHeader title="Snapshot" subtitle="Pulled from selection-tool + application" />
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <BigStat label="Score" value={pickValue(sel.scoring, /^(class|tier|grade)$/i) || '—'} hint={pickValue(sel.scoring, /total.*score|^score$|weighted/i)} tone="teal" />
+          <BigStat label="Readiness" value={company.readiness_score || pickValue(sel.needs, /readiness/i) || '—'} hint={pickValue(sel.needs, /total.*intervention|count/i)} tone="amber" />
+          <BigStat label="Interview" value={pickValue(sel.interviewAssessment, /rating|score|grade|recommend/i) || '—'} hint={pickValue(sel.interviewAssessment, /interviewer|by/i)} tone="teal" />
+          <BigStat label="Committee" value={pickValue(sel.committeeVotes, /vote|decision|recommend|outcome/i) || '—'} hint={pickValue(sel.committeeVotes, /reason|note/i)} tone="orange" />
+          <BigStat label="Reviews" value={summary && summary.total > 0 ? `${summary.total}` : '0'} hint={summary && summary.total > 0 ? `${summary.recommend} rec · ${summary.hold} hold · ${summary.reject} rej` : 'No team reviews yet'} tone={summary && summary.consensus === 'Recommend' ? 'green' : summary && summary.consensus === 'Reject' ? 'red' : 'amber'} />
+          <BigStat label="Sector" value={company.sector || '—'} hint={[company.city, company.governorate].filter(Boolean).join(', ')} tone="navy" />
+          <BigStat label="Employees" value={company.employee_count || '—'} hint={pickValue(application, /^(annualRevenue|revenue|revenueBracket|arr)$/i)} tone="navy" />
+          <BigStat label="PM" value={company.profile_manager_email ? displayName(company.profile_manager_email).split(' ')[0] : '—'} hint={company.profile_manager_email || 'Unassigned'} tone="navy" />
+        </div>
+      </Card>
+
+      {/* Requested vs Recommended interventions */}
+      <Card>
+        <SectionHeader title="Interventions: requested vs recommended" subtitle="What they asked for in the application vs what the team recommended during selection" />
+        <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-navy-700">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-50 dark:bg-navy-800">
+              <tr>
+                <th className="px-2 py-1.5 text-left font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">Pillar</th>
+                <th className="px-2 py-1.5 text-center font-bold uppercase tracking-wider text-blue-700 dark:text-blue-300">Asked for</th>
+                <th className="px-2 py-1.5 text-center font-bold uppercase tracking-wider text-purple-700 dark:text-purple-300">Team recommended</th>
+              </tr>
+            </thead>
+            <tbody>
+              {PILLARS.map(p => {
+                const req = requestedPillars.has(p.code);
+                const rec = recommendedPillars.has(p.code);
+                return (
+                  <tr key={p.code} className="border-t border-slate-100 dark:border-navy-800">
+                    <td className="px-2 py-1.5 font-bold text-navy-500 dark:text-slate-100">{p.label}</td>
+                    <td className="px-2 py-1.5 text-center">{req ? <CheckCircle2 className="inline h-3.5 w-3.5 text-blue-600" /> : <span className="text-slate-300">—</span>}</td>
+                    <td className="px-2 py-1.5 text-center">{rec ? <CheckCircle2 className="inline h-3.5 w-3.5 text-purple-600" /> : <span className="text-slate-300">—</span>}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </Card>
 
       {(aboutKey || whyKey || painKey) && (
         <Card>
           <SectionHeader title="In their own words" subtitle="From their application" />
-          <div className="space-y-4">
-            {aboutKey && (
-              <NarrativeBlock title="About the company" body={application[aboutKey]} icon={<Building2 className="h-4 w-4" />} />
-            )}
-            {whyKey && (
-              <NarrativeBlock title="Why Elevate" body={application[whyKey]} icon={<Zap className="h-4 w-4" />} />
-            )}
-            {painKey && (
-              <NarrativeBlock title="Pain points" body={application[painKey]} icon={<AlertTriangle className="h-4 w-4" />} />
-            )}
+          <div className="space-y-3">
+            {aboutKey && <NarrativeBlock title="About" body={application[aboutKey]} icon={<Building2 className="h-3.5 w-3.5" />} />}
+            {whyKey && <NarrativeBlock title="Why Elevate" body={application[whyKey]} icon={<Zap className="h-3.5 w-3.5" />} />}
+            {painKey && <NarrativeBlock title="Pain points" body={application[painKey]} icon={<AlertTriangle className="h-3.5 w-3.5" />} />}
           </div>
-        </Card>
-      )}
-
-      {sel.needs && (
-        <Card>
-          <SectionHeader title="Identified needs" subtitle="What the team flagged during selection" />
-          {meaningfulEntries(sel.needs).filter(([k]) => !/company|name/i.test(k)).slice(0, 8).map(([k, v]) => (
-            <KV key={k} label={humanizeKey(k)} value={<span className="whitespace-pre-wrap">{v}</span>} />
-          ))}
         </Card>
       )}
 
       {(sel.interviewAssessment || sel.interviewDiscussion) && (
         <Card>
-          <SectionHeader title="From the interview" subtitle="Tap 'Interview' tab for the full breakdown" />
+          <SectionHeader title="From the interview" subtitle="See 'Interview' tab for full breakdown" />
           {sel.interviewAssessment && (
-            <div className="mb-3">
-              <h4 className="mb-1 text-xs font-bold uppercase tracking-wider text-slate-500">Assessment notes</h4>
+            <div className="mb-2">
+              <h4 className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Assessment</h4>
               <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800 dark:text-slate-200">
-                {pickValue(sel.interviewAssessment, /note|comment|summary|highlight|takeaway|observation/i) || '—'}
+                {pickValue(sel.interviewAssessment, /note|comment|summary|highlight|takeaway|observation/i) || pickValue(sel.interviewAssessment, /assessed|recommend/i) || '—'}
               </p>
             </div>
           )}
           {sel.interviewDiscussion && (
             <div>
-              <h4 className="mb-1 text-xs font-bold uppercase tracking-wider text-slate-500">Team discussion</h4>
+              <h4 className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Team discussion</h4>
               <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800 dark:text-slate-200">
                 {pickValue(sel.interviewDiscussion, /discussion|note|summary|comment/i) || '—'}
               </p>
@@ -793,45 +868,33 @@ function GlanceTab({
   );
 }
 
-function ApplicationTab({
-  application,
-  presentInApp,
-}: {
-  application: Record<string, string>;
-  presentInApp: (keys: string[]) => string | undefined;
-}) {
+function ApplicationTab({ application }: { application: Record<string, string> }) {
+  const presentInApp = (keys: string[]) => keys.find(k => application[k] && application[k].trim());
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <Card>
-        <SectionHeader title="From their application" subtitle="Source Data — the highlights" />
-        <div className="space-y-4">
+        <SectionHeader title="Highlights" subtitle="Curated from Source Data" />
+        <div className="space-y-3">
           {APPLICATION_KEY_FIELDS.map(([title, keys]) => {
             const k = presentInApp(keys);
             if (!k) return null;
             return (
               <div key={title}>
-                <h4 className="mb-1 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                  {title}
-                </h4>
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800 dark:text-slate-200">
-                  {application[k]}
-                </p>
+                <h4 className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{title}</h4>
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800 dark:text-slate-200">{application[k]}</p>
               </div>
             );
           })}
         </div>
       </Card>
-
       <Card>
         <SectionHeader title="Full application" subtitle="Every field they submitted" />
         <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
           {Object.entries(application)
             .filter(([k, v]) => v && v.trim() && !['id', 'name', 'companyName', 'company_name'].includes(k))
             .map(([k, v]) => (
-              <div key={k} className="rounded-lg border border-slate-100 bg-slate-50/50 p-2.5 dark:border-navy-800 dark:bg-navy-800/40">
-                <div className="mb-0.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                  {humanizeKey(k)}
-                </div>
+              <div key={k} className="rounded-md border border-slate-100 bg-slate-50/60 p-2 dark:border-navy-800 dark:bg-navy-800/40">
+                <div className="mb-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{humanizeKey(k)}</div>
                 <div className="whitespace-pre-wrap break-words text-sm text-slate-800 dark:text-slate-200">{v}</div>
               </div>
             ))}
@@ -843,22 +906,16 @@ function ApplicationTab({
 
 function ScoringTab({ sel }: { sel: SelectionContext }) {
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <Card>
         <SectionHeader title="Scoring matrix" subtitle="Output of the team's scoring stage" />
-        {sel.scoring ? (
-          <BucketedFields entries={meaningfulEntries(sel.scoring)} buckets={SCORING_BUCKETS} />
-        ) : (
-          <EmptyHint icon={<Activity className="h-6 w-6" />} text="No scoring row found for this company." />
-        )}
+        {sel.scoring ? <BucketedFields entries={meaningfulEntries(sel.scoring)} buckets={SCORING_BUCKETS} />
+          : <EmptyHint icon={<Activity className="h-5 w-5" />} text="No scoring on file." />}
       </Card>
       <Card>
         <SectionHeader title="Identified needs" subtitle="What interventions the team thought were a fit" />
-        {sel.needs ? (
-          <BucketedFields entries={meaningfulEntries(sel.needs)} buckets={NEEDS_BUCKETS} />
-        ) : (
-          <EmptyHint icon={<Activity className="h-6 w-6" />} text="No needs row found for this company." />
-        )}
+        {sel.needs ? <BucketedFields entries={meaningfulEntries(sel.needs)} buckets={NEEDS_BUCKETS} />
+          : <EmptyHint icon={<Activity className="h-5 w-5" />} text="No needs row on file." />}
       </Card>
     </div>
   );
@@ -866,22 +923,16 @@ function ScoringTab({ sel }: { sel: SelectionContext }) {
 
 function InterviewTab({ sel }: { sel: SelectionContext }) {
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <Card>
-        <SectionHeader title="Interview assessment" subtitle="What the interviewer captured" />
-        {sel.interviewAssessment ? (
-          <BucketedFields entries={meaningfulEntries(sel.interviewAssessment)} buckets={INTERVIEW_BUCKETS} />
-        ) : (
-          <EmptyHint icon={<BookOpen className="h-6 w-6" />} text="No interview assessment on file." />
-        )}
+        <SectionHeader title="Interview assessment" subtitle="Captured by the interviewer" />
+        {sel.interviewAssessment ? <BucketedFields entries={meaningfulEntries(sel.interviewAssessment)} buckets={INTERVIEW_BUCKETS} />
+          : <EmptyHint icon={<BookOpen className="h-5 w-5" />} text="No assessment on file." />}
       </Card>
       <Card>
         <SectionHeader title="Team interview discussion" subtitle="What we said about them post-interview" />
-        {sel.interviewDiscussion ? (
-          <BucketedFields entries={meaningfulEntries(sel.interviewDiscussion)} buckets={INTERVIEW_BUCKETS} />
-        ) : (
-          <EmptyHint icon={<MessageCircle className="h-6 w-6" />} text="No team discussion captured for this company." />
-        )}
+        {sel.interviewDiscussion ? <BucketedFields entries={meaningfulEntries(sel.interviewDiscussion)} buckets={INTERVIEW_BUCKETS} />
+          : <EmptyHint icon={<MessageCircle className="h-5 w-5" />} text="No discussion captured." />}
       </Card>
     </div>
   );
@@ -889,46 +940,18 @@ function InterviewTab({ sel }: { sel: SelectionContext }) {
 
 function CommitteeTab({ sel }: { sel: SelectionContext }) {
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <Card>
-        <SectionHeader title="Committee votes" subtitle="Decisions the committee logged before review" />
-        {sel.committeeVotes ? (
-          <BucketedFields entries={meaningfulEntries(sel.committeeVotes)} buckets={COMMITTEE_BUCKETS} />
-        ) : (
-          <EmptyHint icon={<Vote className="h-6 w-6" />} text="No committee vote on file." />
-        )}
+        <SectionHeader title="Committee votes" subtitle="Decisions captured before review" />
+        {sel.committeeVotes ? <BucketedFields entries={meaningfulEntries(sel.committeeVotes)} buckets={COMMITTEE_BUCKETS} />
+          : <EmptyHint icon={<Vote className="h-5 w-5" />} text="No committee vote on file." />}
       </Card>
       <Card>
-        <SectionHeader title="Selection votes" subtitle="Per-person votes captured in selection" />
-        {sel.selectionVotes ? (
-          <BucketedFields entries={meaningfulEntries(sel.selectionVotes)} buckets={COMMITTEE_BUCKETS} />
-        ) : (
-          <EmptyHint icon={<Vote className="h-6 w-6" />} text="No selection vote on file." />
-        )}
+        <SectionHeader title="Selection votes" subtitle="Per-person votes from selection" />
+        {sel.selectionVotes ? <BucketedFields entries={meaningfulEntries(sel.selectionVotes)} buckets={COMMITTEE_BUCKETS} />
+          : <EmptyHint icon={<Vote className="h-5 w-5" />} text="No selection vote on file." />}
       </Card>
     </div>
-  );
-}
-
-function RawTabContent({
-  row,
-  buckets,
-  empty,
-  icon,
-}: {
-  row: RawRow | null;
-  buckets: Array<{ label: string; pattern: RegExp }>;
-  empty: string;
-  icon: React.ReactNode;
-}) {
-  return (
-    <Card>
-      {row ? (
-        <BucketedFields entries={meaningfulEntries(row)} buckets={buckets} />
-      ) : (
-        <EmptyHint icon={icon} text={empty} />
-      )}
-    </Card>
   );
 }
 
@@ -948,82 +971,63 @@ function TeamThreadTab({
   postingComment: boolean;
 }) {
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <Card>
-        <SectionHeader title="Reviews" subtitle="Every team member's call on this company" />
+        <SectionHeader title="Reviews" subtitle="Every team member's call" />
         {companyReviews.length === 0 ? (
-          <EmptyHint icon={<Users className="h-6 w-6" />} text="No reviews yet — be the first to weigh in." />
+          <EmptyHint icon={<Users className="h-5 w-5" />} text="No reviews yet." />
         ) : (
-          <ul className="space-y-3">
-            {companyReviews
-              .sort((a, b) => (a.updated_at || '').localeCompare(b.updated_at || ''))
-              .map(r => (
-                <li key={r.review_id} className="rounded-lg border border-slate-200 p-3 dark:border-navy-700">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-bold text-navy-500 dark:text-slate-100">
-                      {displayName(r.reviewer_email)}
-                    </span>
-                    {r.decision && (
-                      <Badge tone={DECISION_TONE[r.decision as ReviewDecision]}>{r.decision}</Badge>
-                    )}
-                  </div>
-                  {(r.proposed_pillars || r.proposed_sub_interventions) && (
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {splitCsv(r.proposed_pillars).map(p => (
-                        <span key={p} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold dark:border-navy-700 dark:bg-navy-800">
-                          {p}
-                        </span>
-                      ))}
-                      {splitCsv(r.proposed_sub_interventions).map(s => (
-                        <span key={s} className="rounded-md border border-brand-teal/40 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-brand-teal dark:bg-teal-950">
-                          {s.replace(/^MA-/, '')}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {r.notes && (
-                    <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 dark:text-slate-300">
-                      {r.notes}
-                    </p>
-                  )}
-                  <div className="mt-2 text-xs text-slate-400">{fmtDate(r.updated_at)}</div>
-                </li>
-              ))}
-          </ul>
-        )}
-      </Card>
-
-      <Card>
-        <SectionHeader title="Discussion" subtitle="Open thread for this company" />
-        {companyComments.length === 0 ? (
-          <EmptyHint icon={<MessageCircle className="h-6 w-6" />} text="No comments yet." />
-        ) : (
-          <ul className="space-y-2.5">
-            {companyComments.map(c => (
-              <li key={c.comment_id} className="rounded-lg border border-slate-200 bg-slate-50/50 p-3 dark:border-navy-700 dark:bg-navy-800/30">
+          <ul className="space-y-2">
+            {companyReviews.sort((a, b) => (a.updated_at || '').localeCompare(b.updated_at || '')).map(r => (
+              <li key={r.review_id} className="rounded-md border border-slate-200 p-2 dark:border-navy-700">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-bold text-navy-500 dark:text-slate-100">
-                    {displayName(c.author_email)}
-                  </span>
-                  <span className="text-xs text-slate-400">{fmtDate(c.created_at)}</span>
+                  <span className="text-xs font-bold text-navy-500 dark:text-slate-100">{displayName(r.reviewer_email)}</span>
+                  {r.decision && <Badge tone={DECISION_TONE[r.decision as ReviewDecision]}>{r.decision}</Badge>}
                 </div>
-                <p className="mt-1.5 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 dark:text-slate-300">
-                  {c.body}
-                </p>
+                {(r.proposed_pillars || r.proposed_sub_interventions) && (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {splitCsv(r.proposed_pillars).map(p => (
+                      <span key={p} className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-semibold dark:border-navy-700 dark:bg-navy-800">{p}</span>
+                    ))}
+                    {splitCsv(r.proposed_sub_interventions).map(s => (
+                      <span key={s} className="rounded border border-brand-teal/40 bg-teal-50 px-1.5 py-0.5 text-[10px] font-semibold text-brand-teal dark:bg-teal-950">{s.replace(/^MA-/, '')}</span>
+                    ))}
+                  </div>
+                )}
+                {r.notes && <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 dark:text-slate-300">{r.notes}</p>}
+                <div className="mt-1 text-[10px] text-slate-400">{fmtDate(r.updated_at)}</div>
               </li>
             ))}
           </ul>
         )}
-        <div className="mt-3 space-y-2">
+      </Card>
+      <Card>
+        <SectionHeader title="Discussion" subtitle="Open thread" />
+        {companyComments.length === 0 ? (
+          <EmptyHint icon={<MessageCircle className="h-5 w-5" />} text="No comments yet." />
+        ) : (
+          <ul className="space-y-2">
+            {companyComments.map(c => (
+              <li key={c.comment_id} className="rounded-md border border-slate-200 bg-slate-50/50 p-2 dark:border-navy-700 dark:bg-navy-800/30">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-navy-500 dark:text-slate-100">{displayName(c.author_email)}</span>
+                  <span className="text-[10px] text-slate-400">{fmtDate(c.created_at)}</span>
+                </div>
+                <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 dark:text-slate-300">{c.body}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-2 space-y-1.5">
           <textarea
             value={commentDraft}
             onChange={e => setCommentDraft(e.currentTarget.value)}
-            rows={3}
+            rows={2}
             placeholder="Write a comment for the team…"
-            className="w-full rounded-lg border-2 border-slate-200 bg-brand-editable/30 px-3 py-2 text-sm leading-relaxed focus:border-brand-teal focus:outline-none dark:border-navy-700 dark:bg-navy-700 dark:text-slate-100"
+            className="w-full rounded-md border border-slate-200 bg-brand-editable/30 px-2 py-1.5 text-xs leading-relaxed focus:border-brand-teal focus:outline-none dark:border-navy-700 dark:bg-navy-700 dark:text-slate-100"
           />
           <Button size="sm" onClick={onPostComment} disabled={postingComment || !commentDraft.trim()}>
-            <MessageCircle className="h-4 w-4" /> Post comment
+            <MessageCircle className="h-3.5 w-3.5" /> Post
           </Button>
         </div>
       </Card>
@@ -1031,22 +1035,13 @@ function TeamThreadTab({
   );
 }
 
-// ──────────────────────────── Primitives ────────────────────────────────
+// ──────── Primitives ────────
 
 function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
-    <div className="mb-3">
-      <h3 className="text-base font-extrabold text-navy-500 dark:text-white">{title}</h3>
-      {subtitle && <p className="text-xs text-slate-500 dark:text-slate-400">{subtitle}</p>}
-    </div>
-  );
-}
-
-function KV({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex items-start justify-between gap-3 border-b border-slate-100 py-2 last:border-b-0 dark:border-navy-800">
-      <span className="shrink-0 text-sm font-semibold text-slate-500 dark:text-slate-400">{label}</span>
-      <span className="text-right text-sm text-slate-800 dark:text-slate-100">{value}</span>
+    <div className="mb-2">
+      <h3 className="text-sm font-bold text-navy-500 dark:text-white">{title}</h3>
+      {subtitle && <p className="text-[11px] text-slate-500 dark:text-slate-400">{subtitle}</p>}
     </div>
   );
 }
@@ -1064,9 +1059,9 @@ function MiniStat({ label, value, tone }: { label: string; value: string; tone: 
     neutral: 'bg-slate-100 text-slate-700 dark:bg-navy-800 dark:text-slate-300',
   };
   return (
-    <div className={`rounded-lg p-2.5 text-center ${toneCls[tone] || toneCls.neutral}`}>
-      <div className="text-xl font-extrabold leading-tight">{value}</div>
-      <div className="mt-0.5 text-[10px] font-bold uppercase tracking-wider opacity-80">{label}</div>
+    <div className={`rounded-lg p-1.5 text-center ${toneCls[tone] || toneCls.neutral}`}>
+      <div className="truncate text-base font-extrabold leading-tight">{value}</div>
+      <div className="mt-0.5 text-[9px] font-bold uppercase tracking-wider opacity-80">{label}</div>
     </div>
   );
 }
@@ -1082,10 +1077,10 @@ function BigStat({ label, value, hint, tone }: { label: string; value: string; h
     neutral: 'border-slate-200 bg-white text-slate-700 dark:border-navy-700 dark:bg-navy-800 dark:text-slate-200',
   };
   return (
-    <div className={`rounded-xl border-2 p-3 ${toneCls[tone] || toneCls.neutral}`}>
+    <div className={`rounded-lg border p-2 ${toneCls[tone] || toneCls.neutral}`}>
       <div className="text-[10px] font-bold uppercase tracking-wider opacity-80">{label}</div>
-      <div className="mt-1 truncate text-xl font-extrabold">{value || '—'}</div>
-      {hint && <div className="mt-0.5 truncate text-[11px] font-medium opacity-70">{hint}</div>}
+      <div className="mt-0.5 truncate text-base font-extrabold">{value || '—'}</div>
+      {hint && <div className="mt-0.5 truncate text-[10px] font-medium opacity-70">{hint}</div>}
     </div>
   );
 }
@@ -1093,7 +1088,7 @@ function BigStat({ label, value, hint, tone }: { label: string; value: string; h
 function NarrativeBlock({ title, body, icon }: { title: string; body: string; icon?: React.ReactNode }) {
   return (
     <div>
-      <h4 className="mb-1 inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+      <h4 className="mb-1 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
         {icon} {title}
       </h4>
       <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800 dark:text-slate-200">{body}</p>
@@ -1106,16 +1101,14 @@ function BucketedFields({ entries, buckets }: { entries: Array<[string, string]>
   const grouped = bucketize(entries, buckets);
   if (grouped.length === 0) return null;
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {grouped.map(g => (
         <div key={g.label}>
-          <h4 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{g.label}</h4>
-          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+          <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{g.label}</h4>
+          <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
             {g.entries.map(([k, v]) => (
-              <div key={k} className="rounded-lg border border-slate-100 bg-slate-50/50 p-2.5 dark:border-navy-800 dark:bg-navy-800/40">
-                <div className="mb-0.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                  {humanizeKey(k)}
-                </div>
+              <div key={k} className="rounded-md border border-slate-100 bg-slate-50/60 p-2 dark:border-navy-800 dark:bg-navy-800/40">
+                <div className="mb-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{humanizeKey(k)}</div>
                 <div className="whitespace-pre-wrap break-words text-sm text-slate-800 dark:text-slate-200">{v}</div>
               </div>
             ))}
@@ -1128,14 +1121,14 @@ function BucketedFields({ entries, buckets }: { entries: Array<[string, string]>
 
 function EmptyHint({ icon, text }: { icon: React.ReactNode; text: string }) {
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-sm text-slate-500 dark:border-navy-700 dark:text-slate-400">
+    <div className="flex items-center gap-2 rounded-md border border-dashed border-slate-200 px-3 py-3 text-xs text-slate-500 dark:border-navy-700 dark:text-slate-400">
       <span className="text-slate-400">{icon}</span>
       <span>{text}</span>
     </div>
   );
 }
 
-// ──────────────────────────── helpers ────────────────────────────────
+// ──────── Helpers ────────
 
 function pickValue(row: RawRow | null | undefined, pattern: RegExp): string {
   if (!row) return '';
@@ -1157,4 +1150,31 @@ function fmtDate(s?: string): string {
     if (Number.isNaN(d.getTime())) return s;
     return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   } catch { return s; }
+}
+
+// Compute the team consensus pillars as the union of every Recommend
+// review's proposed_pillars. Used by the admin Finalize fall-back when the
+// admin hasn't picked their own pillars.
+function computeConsensusPillars(reviews: Review[]): string[] {
+  const counts = new Map<string, number>();
+  for (const r of reviews) {
+    if (r.decision !== 'Recommend') continue;
+    for (const p of splitCsv(r.proposed_pillars)) counts.set(p, (counts.get(p) || 0) + 1);
+  }
+  const total = reviews.filter(r => r.decision === 'Recommend').length || 1;
+  return Array.from(counts.entries())
+    .filter(([, n]) => n / total >= 0.5)
+    .map(([p]) => p);
+}
+
+function computeConsensusSubs(reviews: Review[]): string[] {
+  const counts = new Map<string, number>();
+  for (const r of reviews) {
+    if (r.decision !== 'Recommend') continue;
+    for (const s of splitCsv(r.proposed_sub_interventions)) counts.set(s, (counts.get(s) || 0) + 1);
+  }
+  const total = reviews.filter(r => r.decision === 'Recommend').length || 1;
+  return Array.from(counts.entries())
+    .filter(([, n]) => n / total >= 0.5)
+    .map(([s]) => s);
 }

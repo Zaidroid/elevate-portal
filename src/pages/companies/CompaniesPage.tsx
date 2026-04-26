@@ -962,9 +962,9 @@ export function CompaniesPage() {
           reviews={reviews.rows}
           comments={comments.rows}
           reviewerEmail={user?.email || ''}
+          isAdmin={admin}
+          profileManagers={pms}
           onSaveReview={async r => {
-            // Replace any existing review by (reviewer_email, company_id) with
-            // the new one — keeps the tab tidy across edits.
             const lower = r.reviewer_email.toLowerCase();
             const existing = reviews.rows.find(x =>
               x.company_id === r.company_id &&
@@ -977,6 +977,79 @@ export function CompaniesPage() {
             }
           }}
           onAddComment={async c => { await comments.createRow(c); }}
+          onAssignPM={async (companyId, pmEmail) => {
+            // Upsert the master row's PM assignment. If the company is
+            // applicant-only (synthesized id), create a master row first
+            // so the assignment has somewhere to land.
+            const existing = master.rows.find(m => m.company_id === companyId);
+            if (existing) {
+              await master.updateRow(companyId, { profile_manager_email: pmEmail });
+            } else {
+              const c = reviewableForView.find(c => c.company_id === companyId);
+              if (!c) throw new Error('Company not found');
+              await master.createRow({
+                company_id: companyId,
+                company_name: c.company_name,
+                cohort: 'E3',
+                status: c.status || 'Interviewed',
+                profile_manager_email: pmEmail,
+                sector: c.sector || '',
+                city: c.city || '',
+                governorate: c.governorate || '',
+              } as Master);
+            }
+          }}
+          onFinalize={async ({ companyId, pmEmail, status, interventions }) => {
+            // 1) Lock the master row (status + optional PM). Create if needed.
+            const existing = master.rows.find(m => m.company_id === companyId);
+            const c = reviewableForView.find(c => c.company_id === companyId);
+            if (!c) throw new Error('Company not found');
+            if (existing) {
+              await master.updateRow(companyId, {
+                status,
+                ...(pmEmail !== undefined ? { profile_manager_email: pmEmail } : {}),
+              });
+            } else {
+              await master.createRow({
+                company_id: companyId,
+                company_name: c.company_name,
+                cohort: 'E3',
+                status,
+                profile_manager_email: pmEmail || '',
+                sector: c.sector || '',
+                city: c.city || '',
+                governorate: c.governorate || '',
+                fund_code: c.fund_code || '',
+              } as Master);
+            }
+
+            // 2) Materialize each intervention as an assignment row. We don't
+            // delete prior assignments — a re-finalize is additive so any
+            // edits the team already made on the assignments tab are safe.
+            const now = new Date().toISOString();
+            const existingPairs = new Set(
+              assignments.rows
+                .filter(a => a.company_id === companyId)
+                .map(a => `${a.intervention_type}::${a.sub_intervention || ''}`)
+            );
+            for (const i of interventions) {
+              const key = `${i.pillar}::${i.sub || ''}`;
+              if (existingPairs.has(key)) continue;
+              await assignments.createRow({
+                assignment_id: `asn-${companyId}-${i.pillar}-${i.sub || 'all'}-${now}`,
+                company_id: companyId,
+                intervention_type: i.pillar,
+                sub_intervention: i.sub || '',
+                fund_code: c.fund_code || '',
+                status: 'Planned',
+                start_date: '',
+                end_date: '',
+                owner_email: pmEmail || c.profile_manager_email || '',
+                budget_usd: '',
+                notes: '',
+              } as Assignment);
+            }
+          }}
           onJumpToCompany={rid => navigate(`/companies/${encodeURIComponent(rid)}`)}
         />
       )}
