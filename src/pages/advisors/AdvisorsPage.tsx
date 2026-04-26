@@ -125,14 +125,23 @@ export function AdvisorsPage() {
     [active]
   );
 
-  const filtered = useMemo(() => {
+  // The kanban already buckets by pipeline_status into columns, so the
+  // pipeline-filter chip would just hide other columns and — more
+  // importantly — make a dragged card disappear the moment its status no
+  // longer matches the filter. So we only apply pipeline filter to the
+  // roster/follow-ups/activity views.
+  const kanbanItems = useMemo(() => {
     return active.filter(a => {
       if (filterCountry && normalizeCountry(a.country) !== filterCountry) return false;
       if (filterCategory && a.stage2.primary !== filterCategory) return false;
-      if (filterPipeline && a.pipeline_status !== filterPipeline) return false;
       return matchesQuery(a, query);
     });
-  }, [active, query, filterCountry, filterCategory, filterPipeline]);
+  }, [active, query, filterCountry, filterCategory]);
+
+  const filtered = useMemo(() => {
+    if (!filterPipeline) return kanbanItems;
+    return kanbanItems.filter(a => (a.pipeline_status || 'New') === filterPipeline);
+  }, [kanbanItems, filterPipeline]);
 
   const countries = useMemo(() => {
     const set = new Set<string>();
@@ -531,7 +540,7 @@ export function AdvisorsPage() {
 
       {tab === 'pipeline' && (
         <AdvisorPipelineKanban
-          advisors={filtered}
+          advisors={kanbanItems}
           readOnly={!canEdit}
           onMove={handleMovePipeline}
           onCardClick={a => setSelectedId(a.advisor_id)}
