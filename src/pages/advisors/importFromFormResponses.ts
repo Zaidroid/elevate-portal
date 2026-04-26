@@ -92,7 +92,14 @@ function normalizeTimestamp(s: string): string {
 }
 
 function dedupeKey(email: string, timestampIso: string): string {
-  return `${email.toLowerCase().trim()}|${timestampIso.slice(0, 19)}`;
+  // Match on email + calendar date only. The original (email + full timestamp)
+  // form was too brittle: the migrator wrote "2024-06-03 15:35:20" while
+  // form pulls came back as "2024-06-03T15:35:20" or "6/3/2024 15:35:20"
+  // depending on locale, and the smallest format drift created phantom
+  // duplicates. Same email + same day is a near-certain dedupe; cross-day
+  // resubmissions still register as new (rare, intentional case).
+  const dateOnly = timestampIso.slice(0, 10);
+  return `${email.toLowerCase().trim()}|${dateOnly}`;
 }
 
 export type ImportResult = {

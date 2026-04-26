@@ -21,6 +21,7 @@ import {
   Search,
   Sparkles,
   Table as TableIcon,
+  Trash2,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { isAdmin } from '../../config/team';
@@ -62,6 +63,7 @@ import { AdvisorActivityTab } from './AdvisorActivityTab';
 import { AdvisorDetailDrawer } from './AdvisorDetailDrawer';
 import { AdvisorDashboard } from './AdvisorDashboard';
 import { importNewFormResponses } from './importFromFormResponses';
+import { deduplicateAdvisors } from './deduplicateAdvisors';
 
 const PIPELINE_LABEL_BY_ID: Record<AdvisorPipelineId, string> = {
   new: 'New',
@@ -354,6 +356,38 @@ export function AdvisorsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabAdvisors, tabActivity]);
 
+  const [dedupRunning, setDedupRunning] = useState(false);
+  const handleDeduplicate = async () => {
+    if (!sheetId) return;
+    if (!window.confirm(`Scan ${advHook.rows.length} rows for duplicate emails and remove all but the earliest copy of each? This is permanent.`)) return;
+    setDedupRunning(true);
+    try {
+      const result = await deduplicateAdvisors(sheetId, tabAdvisors, advHook.rows);
+      if (result.rowsRemoved > 0) {
+        toast.success(`Removed ${result.rowsRemoved} duplicate row${result.rowsRemoved === 1 ? '' : 's'} across ${result.duplicateGroups} email${result.duplicateGroups === 1 ? '' : 's'}`);
+        await advHook.refresh();
+        await appendActivity(sheetId, tabActivity, {
+          user_email: userEmail,
+          advisor_id: '',
+          action: 'dedupe',
+          field: 'count',
+          new_value: String(result.rowsRemoved),
+          details: `${result.duplicateGroups} duplicate-email groups`,
+        });
+        await actHook.refresh();
+      } else {
+        toast.success(`No duplicates found in ${result.scanned} rows`);
+      }
+      if (result.errors.length > 0) {
+        toast.error(`Some deletes failed: ${result.errors[0]}`);
+      }
+    } catch (err) {
+      toast.error(`Dedupe failed: ${(err as Error).message}`);
+    } finally {
+      setDedupRunning(false);
+    }
+  };
+
   // Auto-poll: pull from the linked Google Form responses sheet on a 5-min
   // cadence. Fires once 3s after mount (after the initial useSheetDoc load
   // settles) and then every 5 minutes. Silent unless something new lands.
@@ -453,6 +487,12 @@ export function AdvisorsPage() {
               <CloudDownload className={`h-3 w-3 ${importing ? 'animate-pulse text-brand-teal' : ''}`} />
               Auto-syncing form
             </span>
+          )}
+          {canEdit && (
+            <Button variant="ghost" onClick={handleDeduplicate} disabled={dedupRunning}>
+              <Trash2 className={`h-4 w-4 ${dedupRunning ? 'animate-pulse' : ''}`} />
+              {dedupRunning ? 'Deduping…' : 'Dedupe'}
+            </Button>
           )}
           <Button variant="ghost" onClick={() => setShowArchived(v => !v)}>
             <Archive className="h-4 w-4" /> {showArchived ? 'Hide archived' : 'Show archived'}
