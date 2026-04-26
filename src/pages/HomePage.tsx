@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   Activity,
   AlertTriangle,
+  ArrowRight,
   ArrowUpRight,
   Building2,
   Calendar,
@@ -10,6 +11,7 @@ import {
   ExternalLink,
   FileText,
   KanbanSquare,
+  MessageCircle,
   Plane,
   TrendingUp,
   Wallet,
@@ -19,6 +21,8 @@ import { Badge, Card, CardHeader, EmptyState, statusTone } from '../lib/ui';
 import { useSheetDoc } from '../lib/two-way-sync';
 import { getSheetId, getTab } from '../config/sheets';
 import { displayName, getTier } from '../config/team';
+import { INTERVIEWED_RAW, isInterviewed, INTERVIEWED_NAMES } from './companies/interviewedSource';
+import type { Review } from './companies/reviewTypes';
 
 type Row = Record<string, string>;
 
@@ -150,6 +154,14 @@ export function HomePage() {
     getSheetId('docs') || null,
     getTab('docs', 'agreements'),
     'agreement_id',
+    { userEmail: user?.email }
+  );
+  // Review queue — peek at the post-interview review workflow so the home
+  // page surfaces "X of 52 companies reviewed" + a CTA into the Review tab.
+  const reviewsDoc = useSheetDoc<Review>(
+    getSheetId('companies') || null,
+    getTab('companies', 'reviews'),
+    'review_id',
     { userEmail: user?.email }
   );
 
@@ -284,6 +296,47 @@ export function HomePage() {
       .slice(0, 6);
   }, [confs.rows]);
 
+  // Review queue — companies in the interview pool that need team review,
+  // and how many have been reviewed already (any reviewer, plus this user).
+  const reviewQueue = useMemo(() => {
+    const total = INTERVIEWED_RAW.length;
+    // Count interviewed companies (by name match) that have at least one review.
+    const reviewedCompanyIds = new Set<string>();
+    const myReviewedCompanyIds = new Set<string>();
+    const lower = (user?.email || '').toLowerCase();
+    for (const r of reviewsDoc.rows) {
+      if (!r.decision || !r.company_id) continue;
+      reviewedCompanyIds.add(r.company_id);
+      if (r.reviewer_email?.toLowerCase() === lower) myReviewedCompanyIds.add(r.company_id);
+    }
+    // Map review company_id back to company name via the master sheet so
+    // we count only those that match the interviewed list.
+    let reviewed = 0;
+    let mine = 0;
+    for (const c of companies.rows) {
+      if (!c.company_id || !c.company_name) continue;
+      if (!isInterviewed(c.company_name, INTERVIEWED_NAMES)) continue;
+      if (reviewedCompanyIds.has(c.company_id)) reviewed += 1;
+      if (myReviewedCompanyIds.has(c.company_id)) mine += 1;
+    }
+    return { total, reviewed, mine };
+  }, [reviewsDoc.rows, companies.rows, user?.email]);
+
+  // Cohort progress funnel — how many post-interview companies sit in each
+  // status bucket. Drives the cohort-progress strip in the hero.
+  const cohortProgress = useMemo(() => {
+    const buckets = { Interviewed: 0, Reviewing: 0, Recommended: 0, Selected: 0, Onboarded: 0, Active: 0 };
+    const interviewedSet = new Set(INTERVIEWED_RAW.map(n => n.toLowerCase()));
+    for (const c of companies.rows) {
+      const isPost = isInterviewed(c.company_name || '', INTERVIEWED_NAMES) || interviewedSet.has((c.company_name || '').toLowerCase());
+      if (!isPost) continue;
+      const s = (c.status || 'Interviewed').trim();
+      if (s in buckets) buckets[s as keyof typeof buckets] += 1;
+      else buckets.Interviewed += 1;
+    }
+    return buckets;
+  }, [companies.rows]);
+
   const activity = useMemo(() => {
     const events: TimelineEvent[] = [];
     for (const a of assignments.rows) {
@@ -411,6 +464,18 @@ export function HomePage() {
           </Link>
         </div>
       </header>
+
+      {/* ── Review queue (the active workstream) ── */}
+      {reviewQueue.total > 0 && (
+        <ReviewQueueCard
+          total={reviewQueue.total}
+          reviewed={reviewQueue.reviewed}
+          mine={reviewQueue.mine}
+        />
+      )}
+
+      {/* ── Cohort progress funnel ── */}
+      <CohortProgressStrip buckets={cohortProgress} total={INTERVIEWED_RAW.length} />
 
       <section
         aria-label="Summary"
@@ -752,4 +817,104 @@ function greetingForHour() {
   if (h < 12) return 'Good morning';
   if (h < 18) return 'Good afternoon';
   return 'Good evening';
+}
+
+// Review queue card — the active post-interview workstream surfaced at the top
+// of the home page. Shows progress, the reviewer's own count, and a CTA.
+function ReviewQueueCard({ total, reviewed, mine }: { total: number; reviewed: number; mine: number }) {
+  const teamPct = Math.round((reviewed / Math.max(1, total)) * 100);
+  const myPct = Math.round((mine / Math.max(1, total)) * 100);
+  const remaining = Math.max(0, total - mine);
+  return (
+    <Link
+      to="/companies"
+      className="group block animate-fade-in-up"
+    >
+      <div className="relative overflow-hidden rounded-2xl border border-brand-teal/30 bg-gradient-to-br from-brand-teal/5 via-white to-emerald-50/40 p-5 shadow-card transition-all hover:-translate-y-0.5 hover:border-brand-teal/60 hover:shadow-card-lg dark:border-brand-teal/40 dark:from-brand-teal/10 dark:via-navy-600 dark:to-navy-700">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-brand-teal text-white shadow">
+              <MessageCircle className="h-6 w-6" />
+            </div>
+            <div>
+              <div className="text-2xs font-extrabold uppercase tracking-[0.1em] text-brand-teal">Active workstream</div>
+              <h2 className="mt-0.5 text-xl font-extrabold text-navy-500 dark:text-white">
+                Post-interview review
+              </h2>
+              <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">
+                {remaining > 0
+                  ? `You have ${remaining} compan${remaining === 1 ? 'y' : 'ies'} left to review for Cohort 3.`
+                  : 'You\'ve reviewed every interviewed company. Nice.'}
+              </p>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1 self-center rounded-lg bg-brand-teal px-3 py-2 text-sm font-bold text-white transition-transform group-hover:translate-x-0.5">
+            Continue review <ArrowRight className="h-4 w-4" />
+          </span>
+        </div>
+
+        <div className="mt-4 grid grid-cols-3 gap-3">
+          <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-navy-700 dark:bg-navy-700">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Companies</div>
+            <div className="mt-0.5 text-2xl font-extrabold text-navy-500 dark:text-white">{total}</div>
+            <div className="text-[11px] text-slate-500">interviewed</div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-navy-700 dark:bg-navy-700">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Team has reviewed</div>
+            <div className="mt-0.5 text-2xl font-extrabold text-brand-teal">{reviewed}</div>
+            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+              <div className="h-full bg-brand-teal" style={{ width: `${teamPct}%` }} />
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-navy-700 dark:bg-navy-700">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">You</div>
+            <div className="mt-0.5 text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">{mine}</div>
+            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+              <div className="h-full bg-emerald-500" style={{ width: `${myPct}%` }} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+// Cohort progress strip — funnel from Interviewed to Active for the
+// post-interview cohort. Each segment shows the count and a width
+// proportional to its share of the total reviewed cohort.
+function CohortProgressStrip({ buckets, total }: { buckets: Record<string, number>; total: number }) {
+  const stages: Array<{ key: keyof typeof buckets | string; label: string; tone: string }> = [
+    { key: 'Interviewed', label: 'Interviewed', tone: 'bg-slate-300 dark:bg-slate-600' },
+    { key: 'Reviewing', label: 'Reviewing', tone: 'bg-amber-400' },
+    { key: 'Recommended', label: 'Recommended', tone: 'bg-orange-400' },
+    { key: 'Selected', label: 'Selected', tone: 'bg-brand-teal' },
+    { key: 'Onboarded', label: 'Onboarded', tone: 'bg-emerald-500' },
+    { key: 'Active', label: 'Active', tone: 'bg-emerald-600' },
+  ];
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-card dark:border-navy-700 dark:bg-navy-600">
+      <div className="mb-3 flex items-baseline justify-between gap-2">
+        <h3 className="text-sm font-bold text-navy-500 dark:text-white">Cohort 3 progress</h3>
+        <span className="text-[11px] text-slate-500">{total} interviewed companies</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+        {stages.map(s => {
+          const v = buckets[s.key as string] || 0;
+          const pct = Math.round((v / Math.max(1, total)) * 100);
+          return (
+            <div key={s.key as string} className="rounded-lg border border-slate-100 bg-slate-50/50 p-2 dark:border-navy-700 dark:bg-navy-700/40">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{s.label}</div>
+              <div className="mt-0.5 flex items-baseline justify-between gap-1">
+                <span className="text-lg font-extrabold text-navy-500 dark:text-white">{v}</span>
+                <span className="text-[10px] text-slate-400">{pct}%</span>
+              </div>
+              <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-navy-800">
+                <div className={`h-full ${s.tone}`} style={{ width: `${pct}%` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
 }

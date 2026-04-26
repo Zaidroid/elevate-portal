@@ -85,8 +85,17 @@ type ConfTracker = Row & {
   fund_code?: string;
 };
 
-type Lens = 'interventions' | 'prs' | 'payments' | 'agreements' | 'conferences';
+type Lens = 'companies' | 'interventions' | 'prs' | 'payments' | 'agreements' | 'conferences';
 type Scope = 'mine' | 'all';
+
+const COMPANY_COLS: KanbanColumn<string>[] = [
+  { id: 'Interviewed', label: 'Interviewed', tone: 'teal' },
+  { id: 'Reviewing', label: 'Reviewing', tone: 'amber' },
+  { id: 'Recommended', label: 'Recommended', tone: 'orange' },
+  { id: 'Selected', label: 'Selected', tone: 'orange' },
+  { id: 'Onboarded', label: 'Onboarded', tone: 'green' },
+  { id: 'Active', label: 'Active', tone: 'green' },
+];
 
 const ASSIGNMENT_COLS: KanbanColumn<string>[] = [
   { id: 'Planned', label: 'Planned', tone: 'amber' },
@@ -352,7 +361,26 @@ export function BoardPage() {
     return Array.from(s).sort();
   }, [interventionItems, prItems, paymentItems, confItems]);
 
+  // --- Companies lens (post-interview cohort flowing through Reviewing → Selected → Active) ---
+  const POST_INTERVIEW = new Set(['Interviewed', 'Reviewing', 'Recommended', 'Selected', 'Onboarded', 'Active']);
+  const companyItems = useMemo(() => {
+    return companies.rows
+      .filter(c => POST_INTERVIEW.has(c.status || ''))
+      .filter(c => matchScope(undefined, c.company_id))
+      .filter(c => matchSearch(`${c.company_name || ''} ${c.sector || ''} ${c.company_id || ''}`))
+      .map(c => ({
+        id: c.company_id || '',
+        status: c.status || 'Interviewed',
+        raw: c,
+      }))
+      .filter(i => i.id);
+  }, [companies.rows, scope, myCompanyIds, ownerFilter, search]);
+
+  const updateCompanyStatus = (id: string, newStatus: string) =>
+    companies.updateRow(id, { status: newStatus });
+
   const tabs: TabItem[] = [
+    { value: 'companies', label: `Companies (${companyItems.length})` },
     { value: 'interventions', label: `Interventions (${interventionItems.length})` },
     { value: 'prs', label: `PRs (${prItems.length})` },
     { value: 'payments', label: `Payments (${paymentItems.length})` },
@@ -404,7 +432,14 @@ export function BoardPage() {
         </div>
       </header>
 
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <HeroStat
+          label="Companies in flight"
+          value={companyItems.length}
+          icon={Briefcase}
+          tone={companyItems.length > 0 ? 'teal' : 'neutral'}
+          onClick={() => setLens('companies')}
+        />
         <HeroStat
           label="Overdue PRs"
           value={stats.overduePRs}
@@ -491,6 +526,12 @@ export function BoardPage() {
         </div>
 
         <div className="p-4">
+          {lens === 'companies' && (
+            <CompanyBoard
+              items={companyItems}
+              onStatusChange={updateCompanyStatus}
+            />
+          )}
           {lens === 'interventions' && (
             <InterventionBoard
               items={interventionItems}
@@ -535,6 +576,48 @@ export function BoardPage() {
 // --- Boards ---
 
 type CompanyLookup = Record<string, Master>;
+
+function CompanyBoard({
+  items,
+  onStatusChange,
+}: {
+  items: { id: string; status: string; raw: Master }[];
+  onStatusChange: (id: string, newStatus: string) => Promise<void> | void;
+}) {
+  if (items.length === 0) {
+    return <EmptyState icon={<Briefcase className="h-6 w-6" />} title="No companies in view" description="The post-interview cohort will show up here as they move through Reviewing → Selected → Active." />;
+  }
+  return (
+    <Kanban
+      columns={COMPANY_COLS}
+      items={items}
+      onStatusChange={onStatusChange}
+      renderCard={it => {
+        const c = it.raw;
+        return (
+          <Link
+            to={c.company_id ? `/companies/${c.company_id}` : '/companies'}
+            className="block"
+          >
+            <div className="truncate text-xs font-bold text-navy-500 dark:text-white">
+              {c.company_name || c.company_id}
+            </div>
+            <div className="mt-0.5 truncate text-[11px] text-slate-500 dark:text-slate-400">
+              {c.sector || '—'}
+            </div>
+            {c.fund_code && (
+              <div className="mt-1.5">
+                <Badge tone={c.fund_code === '97060' ? 'teal' : 'amber'}>
+                  {c.fund_code === '97060' ? 'Dutch' : 'SIDA'}
+                </Badge>
+              </div>
+            )}
+          </Link>
+        );
+      }}
+    />
+  );
+}
 
 function InterventionBoard({
   items,
