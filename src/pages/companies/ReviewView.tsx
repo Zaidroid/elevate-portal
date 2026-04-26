@@ -1,22 +1,19 @@
 // ReviewView — the team's step-through workflow for going through every
 // post-interview company, deciding inclusion, and proposing interventions.
 //
-// Layout (desktop):
+// Layout (desktop, 12-col grid):
 //   [progress bar + nav]
-//   [ Selection snapshot         | Decision form        | Team thread     ]
-//   [   Source Data application  |  Recommend/Hold/Rej  |  Existing       ]
-//   [   Master enrichment        |  Pillars + subs      |  team reviews   ]
-//   [   Interview-tracker info   |  Notes               |  + comments     ]
-//   [ Save & Next | Skip | Prev ]
+//   [ Selection snapshot (5)  | Decision form (4)  | Team thread (3) ]
+//   [ Save / Skip / Prev ]
 //
 // All writes land in the Companies workbook (Reviews / Company Comments
-// / Activity Log tabs auto-created via ensureSchema). Reviews are keyed
-// by review_id but uniqueness on (reviewer_email + company_id) is enforced
-// at save time so a reviewer's edit updates rather than duplicates.
+// tabs auto-created via ensureSchema). Reviews are upserted by
+// (reviewer_email, company_id) so a reviewer's edit updates rather than
+// duplicates the row.
 
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, MessageCircle, Save, SkipForward, ThumbsDown, ThumbsUp, PauseCircle } from 'lucide-react';
-import { Badge, Button, Card, CardHeader, EmptyState, useToast } from '../../lib/ui';
+import { ChevronLeft, ChevronRight, MessageCircle, Save, SkipForward, ThumbsDown, ThumbsUp, PauseCircle, ExternalLink, Mail, Phone, Building2, MapPin } from 'lucide-react';
+import { Badge, Button, Card, EmptyState, useToast } from '../../lib/ui';
 import type { Tone } from '../../lib/ui';
 import { displayName } from '../../config/team';
 import { PILLARS, pillarFor } from '../../config/interventions';
@@ -37,12 +34,7 @@ export type ReviewableCompany = {
   status: string;
   profile_manager_email: string;
   contact_email: string;
-  // Raw applicant snapshot from Source Data — every key/value pair captured
-  // at application time. Rendered as a structured table so the reviewer
-  // sees everything the company shared.
   applicantRaw: Record<string, string> | null;
-  // Master row enrichment — the operational fields the team has already
-  // filled (PM, fund, sector, etc.).
   masterRaw: Record<string, string> | null;
 };
 
@@ -53,10 +45,22 @@ const DECISION_TONE: Record<ReviewDecision, Tone> = {
 };
 
 const DECISION_ICON: Record<ReviewDecision, React.ReactNode> = {
-  Recommend: <ThumbsUp className="h-4 w-4" />,
-  Hold: <PauseCircle className="h-4 w-4" />,
-  Reject: <ThumbsDown className="h-4 w-4" />,
+  Recommend: <ThumbsUp className="h-5 w-5" />,
+  Hold: <PauseCircle className="h-5 w-5" />,
+  Reject: <ThumbsDown className="h-5 w-5" />,
 };
+
+// Source Data fields the review panel surfaces in a structured "About"
+// block — the rest land in a collapsible "Full application" panel below.
+// Keeping the surface tight: what a reviewer needs to make a call quickly.
+const KEY_APPLICATION_FIELDS: Array<[string, string[]]> = [
+  ['About the company', ['businessDescription', 'whatTheyDo', 'productOrService', 'description']],
+  ['Why Elevate', ['whyElevate', 'goals', 'reasonForApplying']],
+  ['Pain points', ['mainPainPoint', 'challenges', 'mainChallenge', 'problems']],
+  ['Hiring spec', ['wantsTrainToHire', 'trainToHireCount', 'rolesNeeded']],
+  ['Founders / Team', ['founderName', 'founderEmail', 'leadership', 'foundingTeam']],
+  ['Markets', ['markets', 'targetMarkets', 'currentMarkets']],
+];
 
 export function ReviewView({
   companies,
@@ -78,8 +82,6 @@ export function ReviewView({
   const toast = useToast();
   const [cursor, setCursor] = useState(0);
 
-  // Per-company review aggregation (drives the progress bar + the "X of Y"
-  // strip + the kanban / roster badges).
   const summaryByCompany = useMemo(() => {
     const map = new Map<string, ReturnType<typeof summarizeReviews>>();
     for (const c of companies) {
@@ -109,8 +111,6 @@ export function ReviewView({
     return reviews.find(r => r.company_id === company.company_id && r.reviewer_email.toLowerCase() === lower) || null;
   }, [company, reviews, reviewerEmail]);
 
-  // Local form state — primed from the existing review (if any) when the
-  // user navigates between companies. Reset cleanly on every cursor change.
   const [decision, setDecision] = useState<ReviewDecision | ''>('');
   const [pillars, setPillars] = useState<Set<string>>(new Set());
   const [subInterventions, setSubInterventions] = useState<Set<string>>(new Set());
@@ -118,6 +118,7 @@ export function ReviewView({
   const [savingReview, setSavingReview] = useState(false);
   const [commentDraft, setCommentDraft] = useState('');
   const [postingComment, setPostingComment] = useState(false);
+  const [showFullApp, setShowFullApp] = useState(false);
 
   useEffect(() => {
     if (myExistingReview) {
@@ -132,13 +133,14 @@ export function ReviewView({
       setNotes('');
     }
     setCommentDraft('');
+    setShowFullApp(false);
   }, [myExistingReview, company?.company_id]);
 
   if (companies.length === 0) {
     return (
       <Card>
         <EmptyState
-          icon={<MessageCircle className="h-8 w-8" />}
+          icon={<MessageCircle className="h-10 w-10" />}
           title="No companies in scope to review"
           description="Adjust the filters above (or flip 'Include pre-interview') to populate the review queue."
         />
@@ -150,7 +152,7 @@ export function ReviewView({
     return (
       <Card>
         <EmptyState
-          icon={<MessageCircle className="h-8 w-8" />}
+          icon={<MessageCircle className="h-10 w-10" />}
           title="End of the queue"
           description="You've stepped through every company in the current scope."
         />
@@ -163,7 +165,6 @@ export function ReviewView({
       const next = new Set(prev);
       if (next.has(code)) {
         next.delete(code);
-        // Clear sub-interventions tied to this pillar when the pillar is dropped.
         const dead = new Set(PILLARS.find(p => p.code === code)?.subInterventions || []);
         if (dead.size > 0) {
           setSubInterventions(prevSubs => {
@@ -184,7 +185,6 @@ export function ReviewView({
       if (next.has(code)) next.delete(code); else next.add(code);
       return next;
     });
-    // Auto-select the parent pillar when a sub is checked.
     const parent = pillarFor(code);
     if (parent) setPillars(prev => {
       const next = new Set(prev); next.add(parent.code); return next;
@@ -249,38 +249,45 @@ export function ReviewView({
     .filter(c => c.company_id === company.company_id)
     .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
   const summary = summaryByCompany.get(company.company_id);
+  const progressPct = Math.round((reviewedCount / Math.max(1, companies.length)) * 100);
+
+  const application = company.applicantRaw || {};
+  const presentInApp = (keys: string[]) => keys.find(k => application[k] && application[k].trim());
 
   return (
-    <div className="space-y-4">
-      {/* Progress strip + nav */}
-      <Card>
-        <div className="flex flex-wrap items-center gap-3">
+    <div className="space-y-5">
+      {/* ───────── Sticky progress + nav strip ───────── */}
+      <Card className="sticky top-0 z-20 border-b-2 border-brand-teal/20 bg-white/95 backdrop-blur dark:bg-navy-900/95">
+        <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={goPrev} disabled={cursor === 0}>
+            <Button variant="ghost" onClick={goPrev} disabled={cursor === 0}>
               <ChevronLeft className="h-4 w-4" /> Prev
             </Button>
-            <span className="text-sm font-bold text-navy-500 dark:text-white">
+            <span className="rounded-md bg-brand-teal/10 px-2 py-1 text-sm font-bold text-brand-teal">
               {cursor + 1} / {companies.length}
             </span>
-            <Button variant="ghost" size="sm" onClick={goNext} disabled={cursor === companies.length - 1}>
+            <Button variant="ghost" onClick={goNext} disabled={cursor === companies.length - 1}>
               Next <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
-          <div className="flex-1 min-w-[180px]">
-            <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+
+          <div className="flex-1 min-w-[220px]">
+            <div className="flex items-center justify-between text-sm font-semibold text-slate-700 dark:text-slate-200">
+              <span>{reviewedCount} of {companies.length} reviewed</span>
+              <span className="text-slate-500 dark:text-slate-400">{progressPct}% · you've done {myReviewedCount}</span>
+            </div>
+            <div className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
               <div
-                className="h-full bg-brand-teal transition-all"
-                style={{ width: `${Math.round((reviewedCount / Math.max(1, companies.length)) * 100)}%` }}
+                className="h-full bg-gradient-to-r from-brand-teal to-emerald-500 transition-all"
+                style={{ width: `${progressPct}%` }}
               />
             </div>
-            <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-              {reviewedCount} / {companies.length} reviewed by anyone · {myReviewedCount} by you
-            </div>
           </div>
+
           <select
             value={cursor}
             onChange={e => setCursor(Number(e.currentTarget.value))}
-            className="rounded border border-slate-200 bg-white px-2 py-1 text-sm dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+            className="min-w-[220px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
             title="Jump to a company"
           >
             {companies.map((c, i) => {
@@ -288,7 +295,7 @@ export function ReviewView({
               const tag = s && s.total > 0 ? ` · ${s.consensus}` : '';
               return (
                 <option key={c.company_id} value={i}>
-                  {c.company_name || c.company_id}{tag}
+                  {i + 1}. {c.company_name || c.company_id}{tag}
                 </option>
               );
             })}
@@ -296,110 +303,228 @@ export function ReviewView({
         </div>
       </Card>
 
-      {/* The 3-column working surface */}
-      <div className="grid gap-4 lg:grid-cols-12">
-        {/* Left — selection snapshot */}
-        <div className="space-y-4 lg:col-span-5">
-          <Card>
-            <CardHeader
-              title={company.company_name || 'Unnamed company'}
-              subtitle={[company.sector, [company.city, company.governorate].filter(Boolean).join(', ')].filter(Boolean).join(' · ') || undefined}
-              action={
-                onJumpToCompany ? (
-                  <Button variant="ghost" size="sm" onClick={() => onJumpToCompany(company.route_id)}>
-                    Open detail →
-                  </Button>
-                ) : undefined
-              }
-            />
-            <div className="space-y-1 text-sm">
-              <KV label="Status" value={<Badge tone="teal">{company.status || 'Interviewed'}</Badge>} />
-              <KV label="Fund" value={company.fund_code ? <Badge tone={company.fund_code === '97060' ? 'teal' : 'amber'}>{company.fund_code === '97060' ? 'Dutch (97060)' : 'SIDA (91763)'}</Badge> : <span className="text-slate-400">unset</span>} />
-              <KV label="Profile Manager" value={company.profile_manager_email ? displayName(company.profile_manager_email) : <span className="text-slate-400">unassigned</span>} />
-              <KV label="Employees" value={company.employee_count || '—'} />
-              <KV label="Readiness score" value={company.readiness_score || '—'} />
-              <KV label="Contact" value={company.contact_email || '—'} />
+      {/* ───────── Hero header for the company being reviewed ───────── */}
+      <Card className="border-l-4 border-l-brand-teal">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-4">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-brand-teal/10 text-brand-teal">
+              <Building2 className="h-7 w-7" />
             </div>
+            <div>
+              <h2 className="text-2xl font-extrabold text-navy-500 dark:text-white">
+                {company.company_name || 'Unnamed company'}
+              </h2>
+              <div className="mt-1 flex flex-wrap items-center gap-3 text-sm text-slate-600 dark:text-slate-300">
+                {company.sector && (
+                  <span className="inline-flex items-center gap-1">
+                    <Building2 className="h-3.5 w-3.5" /> {company.sector}
+                  </span>
+                )}
+                {(company.city || company.governorate) && (
+                  <span className="inline-flex items-center gap-1">
+                    <MapPin className="h-3.5 w-3.5" /> {[company.city, company.governorate].filter(Boolean).join(', ')}
+                  </span>
+                )}
+                {company.employee_count && (
+                  <span className="inline-flex items-center gap-1">
+                    {company.employee_count} {company.employee_count === '1' ? 'employee' : 'employees'}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone="teal">{company.status || 'Interviewed'}</Badge>
+            {company.fund_code && (
+              <Badge tone={company.fund_code === '97060' ? 'teal' : 'amber'}>
+                {company.fund_code === '97060' ? 'Dutch (97060)' : 'SIDA (91763)'}
+              </Badge>
+            )}
+            {onJumpToCompany && (
+              <Button variant="ghost" onClick={() => onJumpToCompany(company.route_id)}>
+                <ExternalLink className="h-4 w-4" /> Open detail
+              </Button>
+            )}
+          </div>
+        </div>
+      </Card>
+
+      {/* ───────── Three-column working surface ───────── */}
+      <div className="grid gap-5 lg:grid-cols-12">
+        {/* ════════ Left: Selection snapshot ════════ */}
+        <div className="space-y-5 lg:col-span-5">
+          <Card>
+            <SectionHeader title="At a glance" subtitle="What we already know about them" />
+            <dl className="divide-y divide-slate-100 dark:divide-navy-800">
+              <KV label="Profile Manager" value={
+                company.profile_manager_email
+                  ? <span className="font-semibold text-navy-500 dark:text-slate-100">{displayName(company.profile_manager_email)}</span>
+                  : <span className="text-slate-400 italic">unassigned</span>
+              } />
+              <KV label="Readiness score" value={company.readiness_score || '—'} />
+              <KV label="Contact" value={
+                company.contact_email
+                  ? <a href={`mailto:${company.contact_email}`} className="inline-flex items-center gap-1.5 font-semibold text-brand-teal hover:underline">
+                      <Mail className="h-3.5 w-3.5" /> {company.contact_email}
+                    </a>
+                  : <span className="text-slate-400 italic">no email on file</span>
+              } />
+              {application['phone'] && (
+                <KV label="Phone" value={
+                  <span className="inline-flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-200">
+                    <Phone className="h-3.5 w-3.5" /> {application['phone']}
+                  </span>
+                } />
+              )}
+            </dl>
           </Card>
 
-          {company.applicantRaw && Object.keys(company.applicantRaw).length > 0 && (
+          {/* Curated key-fields blocks (About / Why / Pain / Hiring / Founders) */}
+          {KEY_APPLICATION_FIELDS.some(([, keys]) => presentInApp(keys)) && (
             <Card>
-              <CardHeader title="Application snapshot" subtitle="What the company submitted in Source Data" />
-              <div className="max-h-[480px] space-y-1 overflow-y-auto pr-2 text-xs">
-                {Object.entries(company.applicantRaw)
-                  .filter(([k, v]) => v && v.trim() && !['id', 'name', 'companyName', 'company_name'].includes(k))
-                  .map(([k, v]) => (
-                    <KV key={k} label={humanizeKey(k)} value={<span className="whitespace-pre-wrap break-words">{v}</span>} compact />
-                  ))}
+              <SectionHeader title="From their application" subtitle="Source Data — the highlights" />
+              <div className="space-y-4">
+                {KEY_APPLICATION_FIELDS.map(([title, keys]) => {
+                  const k = presentInApp(keys);
+                  if (!k) return null;
+                  return (
+                    <div key={title}>
+                      <h4 className="mb-1 text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                        {title}
+                      </h4>
+                      <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800 dark:text-slate-200">
+                        {application[k]}
+                      </p>
+                    </div>
+                  );
+                })}
               </div>
+            </Card>
+          )}
+
+          {/* Full application dump (collapsible) */}
+          {Object.keys(application).length > 0 && (
+            <Card>
+              <button
+                type="button"
+                onClick={() => setShowFullApp(s => !s)}
+                className="flex w-full items-center justify-between gap-2 text-left"
+              >
+                <SectionHeader
+                  title="Full application"
+                  subtitle={showFullApp ? 'Click to hide' : 'Every field they submitted'}
+                  inline
+                />
+                <span className="text-sm font-semibold text-brand-teal">{showFullApp ? '−' : '+'}</span>
+              </button>
+              {showFullApp && (
+                <div className="mt-3 max-h-[460px] space-y-2 overflow-y-auto pr-2">
+                  {Object.entries(application)
+                    .filter(([k, v]) => v && v.trim() && !['id', 'name', 'companyName', 'company_name'].includes(k))
+                    .map(([k, v]) => (
+                      <div key={k} className="rounded-lg border border-slate-100 bg-slate-50/50 p-2.5 dark:border-navy-800 dark:bg-navy-800/40">
+                        <div className="mb-0.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                          {humanizeKey(k)}
+                        </div>
+                        <div className="whitespace-pre-wrap break-words text-sm text-slate-800 dark:text-slate-200">{v}</div>
+                      </div>
+                    ))}
+                </div>
+              )}
             </Card>
           )}
         </div>
 
-        {/* Center — decision form */}
-        <div className="space-y-4 lg:col-span-4">
-          <Card accent="teal">
-            <CardHeader title="Your decision" subtitle="Pick one. The team aggregate is shown on the right." />
-            <div className="grid grid-cols-3 gap-2">
+        {/* ════════ Center: Decision form ════════ */}
+        <div className="space-y-5 lg:col-span-4">
+          {/* Decision tile */}
+          <Card>
+            <SectionHeader title="Your decision" subtitle="Pick one. Updates the team consensus on the right." />
+            <div className="grid grid-cols-3 gap-3">
               {REVIEW_DECISIONS.map(d => {
                 const active = decision === d;
+                const tones = {
+                  Recommend: {
+                    on: 'border-emerald-500 bg-emerald-500 text-white shadow-md shadow-emerald-500/30',
+                    off: 'border-slate-200 bg-white text-slate-700 hover:border-emerald-400 hover:bg-emerald-50 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200 dark:hover:bg-emerald-950',
+                  },
+                  Hold: {
+                    on: 'border-amber-500 bg-amber-500 text-white shadow-md shadow-amber-500/30',
+                    off: 'border-slate-200 bg-white text-slate-700 hover:border-amber-400 hover:bg-amber-50 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200 dark:hover:bg-amber-950',
+                  },
+                  Reject: {
+                    on: 'border-red-500 bg-red-500 text-white shadow-md shadow-red-500/30',
+                    off: 'border-slate-200 bg-white text-slate-700 hover:border-red-400 hover:bg-red-50 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200 dark:hover:bg-red-950',
+                  },
+                };
+                const cls = active ? tones[d].on : tones[d].off;
                 return (
                   <button
                     key={d}
                     type="button"
                     onClick={() => setDecision(d)}
-                    className={`flex items-center justify-center gap-1.5 rounded-lg border-2 px-3 py-2 text-sm font-bold transition-colors ${
-                      active
-                        ? d === 'Recommend'
-                          ? 'border-emerald-500 bg-emerald-50 text-emerald-800 dark:border-emerald-400 dark:bg-emerald-950 dark:text-emerald-200'
-                          : d === 'Hold'
-                          ? 'border-amber-500 bg-amber-50 text-amber-900 dark:border-amber-400 dark:bg-amber-950 dark:text-amber-100'
-                          : 'border-red-500 bg-red-50 text-red-800 dark:border-red-400 dark:bg-red-950 dark:text-red-200'
-                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-400 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200'
-                    }`}
+                    className={`flex flex-col items-center justify-center gap-1.5 rounded-xl border-2 px-4 py-4 text-base font-bold transition-all ${cls}`}
                   >
-                    {DECISION_ICON[d]} {d}
+                    {DECISION_ICON[d]}
+                    <span>{d}</span>
                   </button>
                 );
               })}
             </div>
           </Card>
 
+          {/* Interventions picker */}
           <Card>
-            <CardHeader title="Proposed interventions" subtitle="Pillars + sub-interventions you'd recommend" />
-            <div className="space-y-2">
+            <SectionHeader title="Proposed interventions" subtitle="Pillars + (where applicable) sub-interventions" />
+            <div className="space-y-2.5">
               {PILLARS.map(p => {
                 const on = pillars.has(p.code);
                 return (
-                  <div key={p.code} className={`rounded-lg border ${on ? 'border-brand-teal bg-teal-50/40 dark:bg-teal-950/30' : 'border-slate-200 dark:border-navy-700'} p-2`}>
-                    <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-navy-500 dark:text-slate-100">
+                  <div
+                    key={p.code}
+                    className={`rounded-xl border-2 transition-colors ${
+                      on
+                        ? 'border-brand-teal bg-brand-teal/5'
+                        : 'border-slate-200 bg-white hover:border-brand-teal/40 dark:border-navy-700 dark:bg-navy-900'
+                    }`}
+                  >
+                    <label className="flex cursor-pointer items-center gap-3 px-4 py-3">
                       <input
                         type="checkbox"
                         checked={on}
                         onChange={() => togglePillar(p.code)}
+                        className="h-4 w-4 rounded border-slate-300 text-brand-teal focus:ring-brand-teal"
                       />
-                      <span>{p.label}</span>
-                      <span className="text-[11px] font-normal text-slate-500">{p.shortLabel}</span>
+                      <div className="flex-1">
+                        <div className="text-base font-bold text-navy-500 dark:text-slate-100">{p.label}</div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400">{p.description}</div>
+                      </div>
+                      <Badge tone={on ? 'teal' : 'neutral'}>{p.shortLabel}</Badge>
                     </label>
                     {on && p.subInterventions.length > 0 && (
-                      <div className="ml-6 mt-1 flex flex-wrap gap-1.5">
-                        {p.subInterventions.map(s => {
-                          const subOn = subInterventions.has(s);
-                          return (
-                            <button
-                              key={s}
-                              type="button"
-                              onClick={() => toggleSub(s)}
-                              className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
-                                subOn
-                                  ? 'border-brand-teal bg-brand-teal text-white'
-                                  : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-100 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-300'
-                              }`}
-                            >
-                              {s}
-                            </button>
-                          );
-                        })}
+                      <div className="border-t border-brand-teal/20 px-4 py-2.5">
+                        <div className="mb-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                          Sub-interventions
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {p.subInterventions.map(s => {
+                            const subOn = subInterventions.has(s);
+                            return (
+                              <button
+                                key={s}
+                                type="button"
+                                onClick={() => toggleSub(s)}
+                                className={`rounded-full border-2 px-2.5 py-1 text-xs font-semibold transition-colors ${
+                                  subOn
+                                    ? 'border-brand-teal bg-brand-teal text-white'
+                                    : 'border-slate-300 bg-white text-slate-700 hover:border-brand-teal hover:text-brand-teal dark:border-navy-700 dark:bg-navy-900 dark:text-slate-300'
+                                }`}
+                              >
+                                {s.replace(/^MA-/, '')}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -408,19 +533,21 @@ export function ReviewView({
             </div>
           </Card>
 
+          {/* Notes */}
           <Card>
-            <CardHeader title="Notes" subtitle="Your reasoning, scoped to this company" />
+            <SectionHeader title="Your notes" subtitle="Reasoning, concerns, special considerations" />
             <textarea
               value={notes}
               onChange={e => setNotes(e.currentTarget.value)}
               rows={5}
               placeholder="What stood out, what concerns you, why this intervention pack…"
-              className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+              className="w-full rounded-lg border-2 border-slate-200 bg-brand-editable/30 px-3 py-2.5 text-sm leading-relaxed focus:border-brand-teal focus:outline-none dark:border-navy-700 dark:bg-navy-700 dark:text-slate-100"
             />
           </Card>
 
+          {/* Save bar */}
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => handleSave(true)} disabled={savingReview || !decision}>
+            <Button onClick={() => handleSave(true)} disabled={savingReview || !decision} className="px-5 py-2.5 text-base">
               <Save className="h-4 w-4" /> Save & Next
             </Button>
             <Button variant="ghost" onClick={() => handleSave(false)} disabled={savingReview || !decision}>
@@ -431,108 +558,130 @@ export function ReviewView({
             </Button>
           </div>
           {myExistingReview && (
-            <div className="text-[11px] text-slate-500 dark:text-slate-400">
-              You already reviewed this company on {fmtDate(myExistingReview.updated_at)} — saving will overwrite.
-            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              You reviewed this on <span className="font-semibold">{fmtDate(myExistingReview.updated_at)}</span> — saving will overwrite.
+            </p>
           )}
         </div>
 
-        {/* Right — team thread */}
-        <div className="space-y-4 lg:col-span-3">
+        {/* ════════ Right: Team thread ════════ */}
+        <div className="space-y-5 lg:col-span-3">
+          {/* Consensus tile */}
           <Card>
-            <CardHeader
-              title="Team consensus"
-              subtitle={summary && summary.total > 0
-                ? `${summary.total} reviewer${summary.total === 1 ? '' : 's'}`
+            <SectionHeader title="Team consensus" subtitle={
+              summary && summary.total > 0
+                ? `${summary.total} review${summary.total === 1 ? '' : 's'}`
                 : 'No reviews yet'
-              }
-            />
+            } />
             {summary && summary.total > 0 ? (
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 text-sm">
-                  {summary.consensus && (
+              <div className="space-y-3">
+                {summary.consensus && (
+                  <div className="flex items-center gap-2">
                     <Badge tone={summary.consensus === 'Mixed' ? 'amber' : DECISION_TONE[summary.consensus as ReviewDecision]}>
                       {summary.consensus}
                     </Badge>
-                  )}
-                  {summary.divergence && <span className="text-[11px] text-amber-700 dark:text-amber-300">Divergent</span>}
-                </div>
-                <div className="grid grid-cols-3 gap-1 text-center text-[11px]">
-                  <div className="rounded bg-emerald-50 p-1.5 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
-                    <div className="text-base font-bold">{summary.recommend}</div>Rec
+                    {summary.divergence && (
+                      <span className="text-xs font-semibold text-amber-700 dark:text-amber-300">divergent</span>
+                    )}
                   </div>
-                  <div className="rounded bg-amber-50 p-1.5 text-amber-900 dark:bg-amber-950 dark:text-amber-100">
-                    <div className="text-base font-bold">{summary.hold}</div>Hold
+                )}
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded-lg bg-emerald-50 p-2.5 dark:bg-emerald-950/40">
+                    <div className="text-2xl font-extrabold text-emerald-700 dark:text-emerald-300">{summary.recommend}</div>
+                    <div className="mt-0.5 text-[11px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">Rec</div>
                   </div>
-                  <div className="rounded bg-red-50 p-1.5 text-red-800 dark:bg-red-950 dark:text-red-200">
-                    <div className="text-base font-bold">{summary.reject}</div>Rej
+                  <div className="rounded-lg bg-amber-50 p-2.5 dark:bg-amber-950/40">
+                    <div className="text-2xl font-extrabold text-amber-700 dark:text-amber-300">{summary.hold}</div>
+                    <div className="mt-0.5 text-[11px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-400">Hold</div>
+                  </div>
+                  <div className="rounded-lg bg-red-50 p-2.5 dark:bg-red-950/40">
+                    <div className="text-2xl font-extrabold text-red-700 dark:text-red-300">{summary.reject}</div>
+                    <div className="mt-0.5 text-[11px] font-bold uppercase tracking-wider text-red-700 dark:text-red-400">Rej</div>
                   </div>
                 </div>
               </div>
             ) : (
-              <p className="text-xs text-slate-500">Be the first to weigh in.</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">Be the first to weigh in.</p>
             )}
           </Card>
 
+          {/* Per-reviewer breakdown */}
           <Card>
-            <CardHeader title="Reviews" subtitle="Each team member's decision + proposed interventions" />
+            <SectionHeader title="Reviews" subtitle="Each team member's call" />
             {companyReviews.length === 0 ? (
-              <p className="text-xs text-slate-500">No reviews yet.</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">No reviews yet.</p>
             ) : (
-              <ul className="space-y-2">
+              <ul className="space-y-3">
                 {companyReviews
                   .sort((a, b) => (a.updated_at || '').localeCompare(b.updated_at || ''))
                   .map(r => (
-                    <li key={r.review_id} className="rounded-lg border border-slate-200 p-2 text-xs dark:border-navy-700">
+                    <li key={r.review_id} className="rounded-lg border border-slate-200 p-3 dark:border-navy-700">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-semibold text-navy-500 dark:text-slate-100">{displayName(r.reviewer_email)}</span>
-                        {r.decision && <Badge tone={DECISION_TONE[r.decision as ReviewDecision]}>{r.decision}</Badge>}
+                        <span className="text-sm font-bold text-navy-500 dark:text-slate-100">
+                          {displayName(r.reviewer_email)}
+                        </span>
+                        {r.decision && (
+                          <Badge tone={DECISION_TONE[r.decision as ReviewDecision]}>{r.decision}</Badge>
+                        )}
                       </div>
                       {(r.proposed_pillars || r.proposed_sub_interventions) && (
-                        <div className="mt-1 flex flex-wrap gap-1">
+                        <div className="mt-2 flex flex-wrap gap-1">
                           {splitCsv(r.proposed_pillars).map(p => (
-                            <span key={p} className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] dark:border-navy-700 dark:bg-navy-800">{p}</span>
+                            <span key={p} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold dark:border-navy-700 dark:bg-navy-800">
+                              {p}
+                            </span>
                           ))}
                           {splitCsv(r.proposed_sub_interventions).map(s => (
-                            <span key={s} className="rounded border border-brand-teal/40 bg-teal-50 px-1.5 py-0.5 text-[10px] text-brand-teal dark:bg-teal-950">{s}</span>
+                            <span key={s} className="rounded-md border border-brand-teal/40 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-brand-teal dark:bg-teal-950">
+                              {s.replace(/^MA-/, '')}
+                            </span>
                           ))}
                         </div>
                       )}
-                      {r.notes && <p className="mt-1 whitespace-pre-wrap break-words text-slate-700 dark:text-slate-300">{r.notes}</p>}
-                      <div className="mt-1 text-[10px] text-slate-400">{fmtDate(r.updated_at)}</div>
+                      {r.notes && (
+                        <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                          {r.notes}
+                        </p>
+                      )}
+                      <div className="mt-2 text-xs text-slate-400">{fmtDate(r.updated_at)}</div>
                     </li>
                   ))}
               </ul>
             )}
           </Card>
 
+          {/* Comments thread */}
           <Card>
-            <CardHeader title="Comments" subtitle="Open thread per company" />
+            <SectionHeader title="Discussion" subtitle="Open thread" />
             {companyComments.length === 0 ? (
-              <p className="text-xs text-slate-500">No comments yet.</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">No comments yet.</p>
             ) : (
-              <ul className="space-y-2">
+              <ul className="space-y-2.5">
                 {companyComments.map(c => (
-                  <li key={c.comment_id} className="rounded-lg border border-slate-200 p-2 text-xs dark:border-navy-700">
+                  <li key={c.comment_id} className="rounded-lg border border-slate-200 bg-slate-50/50 p-3 dark:border-navy-700 dark:bg-navy-800/30">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold text-navy-500 dark:text-slate-100">{displayName(c.author_email)}</span>
-                      <span className="text-[10px] text-slate-400">{fmtDate(c.created_at)}</span>
+                      <span className="text-sm font-bold text-navy-500 dark:text-slate-100">
+                        {displayName(c.author_email)}
+                      </span>
+                      <span className="text-xs text-slate-400">{fmtDate(c.created_at)}</span>
                     </div>
-                    <p className="mt-1 whitespace-pre-wrap break-words text-slate-700 dark:text-slate-300">{c.body}</p>
+                    <p className="mt-1.5 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                      {c.body}
+                    </p>
                   </li>
                 ))}
               </ul>
             )}
-            <div className="mt-2 space-y-1.5">
+            <div className="mt-3 space-y-2">
               <textarea
                 value={commentDraft}
                 onChange={e => setCommentDraft(e.currentTarget.value)}
-                rows={2}
+                rows={3}
                 placeholder="Write a comment for the team…"
-                className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+                className="w-full rounded-lg border-2 border-slate-200 bg-brand-editable/30 px-3 py-2 text-sm leading-relaxed focus:border-brand-teal focus:outline-none dark:border-navy-700 dark:bg-navy-700 dark:text-slate-100"
               />
               <Button size="sm" onClick={handlePostComment} disabled={postingComment || !commentDraft.trim()}>
-                <MessageCircle className="h-3.5 w-3.5" /> Post
+                <MessageCircle className="h-4 w-4" /> Post comment
               </Button>
             </div>
           </Card>
@@ -542,11 +691,20 @@ export function ReviewView({
   );
 }
 
-function KV({ label, value, compact = false }: { label: string; value: React.ReactNode; compact?: boolean }) {
+function SectionHeader({ title, subtitle, inline = false }: { title: string; subtitle?: string; inline?: boolean }) {
   return (
-    <div className={`flex items-start justify-between gap-3 ${compact ? '' : 'border-b border-slate-100 py-1 last:border-b-0 dark:border-navy-800'}`}>
-      <span className="shrink-0 text-xs font-semibold text-slate-500 dark:text-slate-400">{label}</span>
-      <span className="text-right text-xs text-slate-700 dark:text-slate-200">{value}</span>
+    <div className={inline ? '' : 'mb-3'}>
+      <h3 className="text-base font-extrabold text-navy-500 dark:text-white">{title}</h3>
+      {subtitle && <p className="text-xs text-slate-500 dark:text-slate-400">{subtitle}</p>}
+    </div>
+  );
+}
+
+function KV({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-2">
+      <span className="shrink-0 text-sm font-semibold text-slate-500 dark:text-slate-400">{label}</span>
+      <span className="text-right text-sm text-slate-800 dark:text-slate-100">{value}</span>
     </div>
   );
 }

@@ -39,6 +39,8 @@ import {
   useToast,
 } from '../../lib/ui';
 import type { TabItem } from '../../lib/ui';
+import type { Review } from './reviewTypes';
+import { summarizeReviews } from './reviewTypes';
 
 type Company = Record<string, string>;
 type Contact = Record<string, string>;
@@ -63,6 +65,18 @@ const AGREEMENT_STATUSES = ['Drafted', 'Sent', 'Signed', 'Countersigned', 'Execu
 const qaInputClass =
   'w-full rounded-lg border border-slate-200 bg-brand-editable/40 px-3 py-2 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-700 dark:text-white';
 
+// Same palette used on the Companies page kanban + roster, so the
+// pillar dot strip in the hero matches what the team sees elsewhere.
+const PILLAR_DOT_COLOR: Record<string, string> = {
+  TTH: 'bg-brand-teal',
+  Upskilling: 'bg-brand-orange',
+  MKG: 'bg-brand-red',
+  MA: 'bg-brand-navy',
+  ElevateBridge: 'bg-amber-500',
+  'C-Suite': 'bg-brand-teal',
+  Conferences: 'bg-brand-orange',
+};
+
 const norm = (s?: string) => (s || '').trim().toLowerCase();
 const dateOnly = (s?: string) => (s ? s.split('T')[0].split(' ')[0] : '');
 const fmtUsd = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
@@ -83,6 +97,7 @@ export function CompanyDetailPage() {
   const companies = useSheetDoc<Company>(companiesSheet || null, getTab('companies', 'companies'), 'company_id', { userEmail: user?.email });
   const contacts = useSheetDoc<Contact>(companiesSheet || null, getTab('companies', 'contacts'), 'contact_id', { userEmail: user?.email });
   const assignments = useSheetDoc<Assignment>(companiesSheet || null, getTab('companies', 'assignments'), 'assignment_id', { userEmail: user?.email });
+  const reviewsDoc = useSheetDoc<Review>(companiesSheet || null, getTab('companies', 'reviews'), 'review_id', { userEmail: user?.email });
 
   // Source Data from Selection workbook is the authoritative applicant list.
   const sourceData = useSheetDoc<Record<string, string>>(
@@ -173,6 +188,19 @@ export function CompanyDetailPage() {
     () => assignments.rows.filter(a => masterKey && a.company_id === masterKey),
     [assignments.rows, masterKey]
   );
+  const companyReviews = useMemo(
+    () => reviewsDoc.rows.filter(r => masterKey && r.company_id === masterKey),
+    [reviewsDoc.rows, masterKey]
+  );
+  const reviewSummary = useMemo(() => summarizeReviews(companyReviews), [companyReviews]);
+  const interventionPillars = useMemo(() => {
+    const set = new Set<string>();
+    for (const a of companyAssignments) {
+      const p = pillarFor(a.intervention_type || '')?.code;
+      if (p) set.add(p);
+    }
+    return Array.from(set);
+  }, [companyAssignments]);
   const companyPRs = useMemo(() => {
     const all = [...q1.rows, ...q2.rows, ...q3.rows, ...q4.rows];
     return all.filter(p => masterKey && p.company_id === masterKey);
@@ -294,44 +322,75 @@ export function CompanyDetailPage() {
     <div className="mx-auto max-w-7xl space-y-6">
       <Breadcrumbs items={[{ label: 'Companies', to: '/companies' }, { label: company.company_name || id }]} />
 
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex items-start gap-4">
-          <HeroAvatar name={company.company_name} />
-          <div>
-            <Link to="/companies" className="mb-2 inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-brand-red">
-              <ArrowLeft className="h-3 w-3" /> All companies
-            </Link>
-            <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">{company.company_name}</h1>
-              {company.status && <Badge tone={statusTone(company.status)}>{company.status}</Badge>}
-              {company.stage && <Badge tone="neutral">{company.stage}</Badge>}
-              {company.fund_code && (
-                <Badge tone={company.fund_code === '97060' ? 'teal' : 'amber'}>
-                  {company.fund_code === '97060' ? 'Dutch' : 'SIDA'}
-                </Badge>
-              )}
+      <Card className="border-l-4 border-l-brand-teal">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-4">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-brand-teal/10 text-brand-teal">
+              <Building2 className="h-7 w-7" />
             </div>
-            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              {company.sector || 'Sector unset'}
-              {(company.governorate || company.city) && ` · ${[company.city, company.governorate].filter(Boolean).join(', ')}`}
-              {company.cohort && ` · Cohort ${company.cohort}`}
-            </p>
+            <div className="min-w-0">
+              <Link to="/companies" className="mb-1 inline-flex items-center gap-1 text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-brand-red">
+                <ArrowLeft className="h-3 w-3" /> All companies
+              </Link>
+              <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">
+                {company.company_name}
+              </h1>
+              <div className="mt-1.5 flex flex-wrap items-center gap-3 text-sm text-slate-600 dark:text-slate-300">
+                {company.sector && <span>{company.sector}</span>}
+                {(company.city || company.governorate) && (
+                  <span>{[company.city, company.governorate].filter(Boolean).join(', ')}</span>
+                )}
+                {company.cohort && <span>Cohort {company.cohort}</span>}
+              </div>
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                {company.status && <Badge tone={statusTone(company.status)}>{company.status}</Badge>}
+                {company.stage && <Badge tone="neutral">{company.stage}</Badge>}
+                {company.fund_code && (
+                  <Badge tone={company.fund_code === '97060' ? 'teal' : 'amber'}>
+                    {company.fund_code === '97060' ? 'Dutch (97060)' : 'SIDA (91763)'}
+                  </Badge>
+                )}
+                {interventionPillars.length > 0 && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-xs font-semibold text-slate-700 dark:border-navy-700 dark:bg-navy-800 dark:text-slate-200">
+                    {interventionPillars.map(p => (
+                      <span key={p} className={`inline-block h-2 w-2 rounded-full ${PILLAR_DOT_COLOR[p] || 'bg-slate-400'}`} />
+                    ))}
+                    {companyAssignments.length}× intervention{companyAssignments.length === 1 ? '' : 's'}
+                  </span>
+                )}
+                {reviewSummary.total > 0 && (
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-bold ${
+                      reviewSummary.consensus === 'Recommend'
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200'
+                        : reviewSummary.consensus === 'Reject'
+                        ? 'border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200'
+                        : 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100'
+                    }`}
+                    title={`${reviewSummary.recommend} recommend · ${reviewSummary.hold} hold · ${reviewSummary.reject} reject`}
+                  >
+                    {reviewSummary.total}× {reviewSummary.consensus}
+                    {reviewSummary.divergence && <span className="opacity-70">· divergent</span>}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <PMBadge email={currentPMEmail} name={currentPMName} />
+            {company.drive_folder_url && (
+              <a
+                href={company.drive_folder_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-navy-500 hover:border-brand-teal dark:border-navy-700 dark:bg-navy-600 dark:text-white"
+              >
+                Drive folder <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+            )}
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <PMBadge email={currentPMEmail} name={currentPMName} />
-          {company.drive_folder_url && (
-            <a
-              href={company.drive_folder_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-navy-500 hover:border-brand-teal dark:border-navy-700 dark:bg-navy-600 dark:text-white"
-            >
-              Drive folder <ExternalLink className="h-3.5 w-3.5" />
-            </a>
-          )}
-        </div>
-      </div>
+      </Card>
 
       <StatRow
         company={company}
@@ -341,6 +400,7 @@ export function CompanyDetailPage() {
         prsCount={companyPRs.length}
         paymentsTotal={totalPaid}
         budgetTotal={totalBudget}
+        reviewSummary={reviewSummary}
       />
 
       <QuickActionsBar
@@ -515,14 +575,6 @@ function heroInitials(name: string): string {
   return (parts[0][0] + parts[1][0]).toUpperCase();
 }
 
-function HeroAvatar({ name }: { name: string }) {
-  return (
-    <div className={`flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-2xl text-xl font-extrabold ${heroTone(name || '·')}`}>
-      {heroInitials(name)}
-    </div>
-  );
-}
-
 // -------- Stat Row --------
 
 function StatRow({
@@ -533,6 +585,7 @@ function StatRow({
   prsCount,
   paymentsTotal,
   budgetTotal,
+  reviewSummary,
 }: {
   company: Company;
   score?: Record<string, string>;
@@ -541,6 +594,7 @@ function StatRow({
   prsCount: number;
   paymentsTotal: number;
   budgetTotal: number;
+  reviewSummary?: { total: number; recommend: number; hold: number; reject: number; consensus: string | null; divergence: boolean };
 }) {
   const readiness =
     needs?.['Readiness Score'] ||
@@ -556,7 +610,7 @@ function StatRow({
   const showClass = classLetter !== '—';
 
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-5">
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
       {showClass ? (
         <Stat label="Class" value={classLetter} hint={totalScore ? `Score ${totalScore}${rank ? ` · rank ${rank}` : ''}` : undefined} />
       ) : (
@@ -566,13 +620,25 @@ function StatRow({
       <Stat label="Revenue" value={revenue} hint="Bracket" />
       <Stat label="Interventions" value={assignmentsCount.toString()} hint={`${prsCount} PRs · ${fmtUsd(budgetTotal)} budgeted`} />
       <Stat label="Paid" value={fmtUsd(paymentsTotal)} hint="Logged to date" />
+      <Stat
+        label="Reviews"
+        value={reviewSummary && reviewSummary.total > 0 ? String(reviewSummary.total) : '—'}
+        hint={reviewSummary && reviewSummary.total > 0
+          ? `${reviewSummary.recommend} rec · ${reviewSummary.hold} hold · ${reviewSummary.reject} rej${reviewSummary.divergence ? ' · divergent' : ''}`
+          : 'No reviews yet'}
+        accent={reviewSummary && reviewSummary.consensus === 'Recommend' ? 'green' : reviewSummary && reviewSummary.consensus === 'Reject' ? 'red' : reviewSummary && reviewSummary.consensus ? 'amber' : undefined}
+      />
     </div>
   );
 }
 
-function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Stat({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: 'green' | 'red' | 'amber' }) {
+  const accentBorder =
+    accent === 'green' ? 'border-l-4 border-l-emerald-500' :
+    accent === 'red' ? 'border-l-4 border-l-red-500' :
+    accent === 'amber' ? 'border-l-4 border-l-amber-500' : '';
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-navy-700 dark:bg-navy-600">
+    <div className={`rounded-2xl border border-slate-200 bg-white p-4 dark:border-navy-700 dark:bg-navy-600 ${accentBorder}`}>
       <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{label}</div>
       <div className="mt-1 text-2xl font-extrabold text-navy-500 dark:text-white">{value}</div>
       {hint && <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{hint}</div>}
