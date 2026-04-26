@@ -30,6 +30,7 @@ import {
 } from '../../lib/ui';
 import type { Column, FilterGroup, FilterValues, KanbanColumn, KanbanItem, TabItem, Tone } from '../../lib/ui';
 import { displayName, getProfileManagers, isAdmin } from '../../config/team';
+import { pillarFor } from '../../config/interventions';
 import { INTERVIEWED_NAMES, INTERVIEWED_RAW, isInterviewed } from './interviewedSource';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
@@ -59,6 +60,20 @@ type Master = {
   updated_by?: string;
 };
 
+type Assignment = {
+  assignment_id: string;
+  company_id: string;
+  intervention_type: string;
+  sub_intervention: string;
+  fund_code: string;
+  start_date: string;
+  end_date: string;
+  owner_email: string;
+  status: string;
+  budget_usd: string;
+  notes: string;
+};
+
 // Joined row shown in the table.
 type Row = {
   route_id: string;              // route param used for /companies/:id
@@ -76,11 +91,17 @@ type Row = {
   profile_manager_email: string;
   contact_email: string;
   source: 'applicant' | 'master' | 'both';
+  intervention_count: number;
+  intervention_pillars: string[];   // unique pillar codes assigned to this company
 };
 
-const STATUSES = ['Applicant', 'Shortlisted', 'Interviewed', 'Selected', 'Onboarded', 'Active', 'Graduated', 'Withdrawn'];
+const STATUSES = ['Applicant', 'Shortlisted', 'Interviewed', 'Reviewing', 'Recommended', 'Selected', 'Onboarded', 'Active', 'Graduated', 'Withdrawn'];
 const STAGES = ['Applied', '1st Filtration', 'Doc Review', 'Needs Assessed', 'Scored', 'Interviewed', 'Final Assessment', 'Selected', 'Onboarded', 'Active', 'Graduated', 'Rejected', 'Withdrew'];
 const FUND_CODES = ['97060', '91763'];
+
+// The post-interview triage flow: every status from Interviewed onwards
+// belongs to the working portfolio that this page is built around.
+const POST_INTERVIEW_STATUSES = new Set(['Interviewed', 'Reviewing', 'Recommended', 'Selected', 'Onboarded', 'Active', 'Graduated']);
 
 const norm = (s?: string) => (s || '').trim().toLowerCase();
 
@@ -91,15 +112,19 @@ function padId(n: string): string {
 
 // Order in which statuses live within the pipeline. Used to compute "the
 // higher of (master.status, override)" so we never demote a company by
-// applying the Interviewed override on top of an Onboarded record.
+// applying the Interviewed override on top of an Onboarded record. Reviewing
+// and Recommended sit between Interviewed and Selected — that's where the
+// committee debate happens before the final cohort is locked.
 const STATUS_ORDER: Record<string, number> = {
   Applicant: 0,
   Shortlisted: 1,
   Interviewed: 2,
-  Selected: 3,
-  Onboarded: 4,
-  Active: 5,
-  Graduated: 6,
+  Reviewing: 3,
+  Recommended: 4,
+  Selected: 5,
+  Onboarded: 6,
+  Active: 7,
+  Graduated: 8,
   Withdrawn: -1,
 };
 function maxStatus(a: string, b: string): string {
@@ -133,10 +158,46 @@ export function CompaniesPage() {
     { userEmail: user?.email }
   );
 
+  // Intervention Assignments tab — drives the per-card pillar dots and the
+  // "(N interventions)" badges on the kanban + roster. The detail page owns
+  // the full CRUD; here we only need to read counts and pillar coverage.
+  const assignments = useSheetDoc<Assignment>(
+    masterSheetId || null,
+    getTab('companies', 'assignments'),
+    'assignment_id',
+    { userEmail: user?.email }
+  );
+
   // Static, hand-maintained list of Cohort 3 interviewed companies (see
   // interviewedSource.ts for the why). Used to overlay the "Interviewed"
   // status onto the master sheet without ever demoting a higher status.
-  const interviewedSet = INTERVIEWED_NAMES;
+  //
+  // When a schedule name doesn't spell-match an applicant in Source Data,
+  // the user can manually alias it to the right company below. Aliases live
+  // in localStorage so they persist across reloads, and the effective
+  // interviewed set is (static list) ∪ (alias targets).
+  const ALIAS_KEY = 'companies.interviewedAliases.v1';
+  const [aliases, setAliases] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem(ALIAS_KEY) || '{}'); }
+    catch { return {}; }
+  });
+  const setAlias = (scheduleName: string, target: string) => {
+    setAliases(prev => {
+      const next = { ...prev };
+      const t = (target || '').trim();
+      if (!t) delete next[scheduleName]; else next[scheduleName] = t;
+      try { localStorage.setItem(ALIAS_KEY, JSON.stringify(next)); } catch { /* quota */ }
+      return next;
+    });
+  };
+  const interviewedSet = useMemo(() => {
+    const s = new Set(INTERVIEWED_NAMES);
+    for (const v of Object.values(aliases)) {
+      const n = norm(v);
+      if (n) s.add(n);
+    }
+    return s;
+  }, [aliases]);
 
   const [query, setQuery] = useState('');
   const [filters, setFilters] = useState<FilterValues>({ pm: [], stage: [], status: [], fund: [] });
@@ -145,11 +206,17 @@ export function CompaniesPage() {
   const [savedView, setSavedView] = useState<'' | 'mine' | 'unassigned' | 'interviewed' | 'active'>('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
-  // The 107 Cohort 3 applicants are still the right *default* surface;
-  // when the team flips the toggle we hide post-selection rows so the
-  // daily roster is just the active portfolio.
-  const [selectedOnly, setSelectedOnly] = useState(false);
-  const SELECTED_STATUSES = ['Selected', 'Onboarded', 'Active', 'Interviewed', 'Graduated'];
+  // Default scope is the post-interview portfolio — the team's day-to-day
+  // work is on companies that already had an interview, where the next move
+  // is "decide whether to recommend, and what interventions to assign."
+  // Flip this toggle to bring the pre-interview applicants back into view
+  // (Applicant / Shortlisted / blank) for an admin-only audit pass.
+  const [includePreInterview, setIncludePreInterview] = useState(false);
+  // Legacy collapse — kept so the existing FilterBar / chip wiring continues
+  // to work, just hidden from the header. Functionally identical to flipping
+  // both knobs to "post-interview only", which is now the default.
+  const [selectedOnly] = useState(false);
+  const SELECTED_STATUSES = ['Selected', 'Onboarded', 'Active', 'Interviewed', 'Reviewing', 'Recommended', 'Graduated'];
 
   const pms = getProfileManagers();
 
@@ -168,6 +235,22 @@ export function CompaniesPage() {
     }
     return m;
   }, [masterE3]);
+
+  // Per-company intervention index: count of assignment rows + the unique
+  // set of pillars covered. Drives the kanban dots and roster badge.
+  const assignmentsByCompany = useMemo(() => {
+    const m = new Map<string, { count: number; pillars: Set<string> }>();
+    for (const a of assignments.rows) {
+      const id = (a.company_id || '').trim();
+      if (!id) continue;
+      let bucket = m.get(id);
+      if (!bucket) { bucket = { count: 0, pillars: new Set() }; m.set(id, bucket); }
+      bucket.count += 1;
+      const pillar = pillarFor(a.intervention_type || '')?.code;
+      if (pillar) bucket.pillars.add(pillar);
+    }
+    return m;
+  }, [assignments.rows]);
 
   // Build the joined set: every applicant, plus any Master-only rows that don't match one.
   const joined = useMemo<Row[]>(() => {
@@ -189,10 +272,12 @@ export function CompaniesPage() {
       const interviewed = isInterviewed(name, interviewedSet);
       const effectiveStatus = interviewed ? maxStatus(baseStatus, 'Interviewed') : baseStatus;
 
+      const companyId = m?.company_id || padId(a.id || '');
+      const aBucket = assignmentsByCompany.get(companyId);
       out.push({
         route_id: a.id || padId(a.id) || key,
         applicant_id: a.id || '',
-        company_id: m?.company_id || padId(a.id || ''),
+        company_id: companyId,
         company_name: name,
         sector: m?.sector || a.businessType || '',
         city: a.city || m?.city || '',
@@ -205,6 +290,8 @@ export function CompaniesPage() {
         profile_manager_email: m?.profile_manager_email || '',
         contact_email: a.contactEmail || a.email || '',
         source: m ? 'both' : 'applicant',
+        intervention_count: aBucket?.count || 0,
+        intervention_pillars: aBucket ? Array.from(aBucket.pillars) : [],
       });
     }
 
@@ -214,6 +301,7 @@ export function CompaniesPage() {
       const baseStatus = m.status?.trim() || '';
       const interviewed = isInterviewed(m.company_name || '', interviewedSet);
       const effectiveStatus = interviewed ? maxStatus(baseStatus || 'Applicant', 'Interviewed') : baseStatus;
+      const aBucket = assignmentsByCompany.get(m.company_id);
       out.push({
         route_id: m.company_id,
         applicant_id: '',
@@ -230,30 +318,36 @@ export function CompaniesPage() {
         profile_manager_email: m.profile_manager_email || '',
         contact_email: '',
         source: 'master',
+        intervention_count: aBucket?.count || 0,
+        intervention_pillars: aBucket ? Array.from(aBucket.pillars) : [],
       });
     }
 
     return out;
-  }, [applicants.rows, masterE3, masterByName, interviewedSet]);
+  }, [applicants.rows, masterE3, masterByName, interviewedSet, assignmentsByCompany]);
 
-  // The Selected-only checkbox is one knob; the saved-view chips above
-  // the tabs are another. We compose them: saved-view first, then the
-  // Selected-only collapse, then the per-column FilterBar filters.
+  // The "include pre-interview" toggle is the primary scope knob; the
+  // saved-view chips and the legacy Selected-only collapse compose on top.
   const userEmail = (user?.email || '').toLowerCase();
+  const scoped = useMemo(() => {
+    if (includePreInterview) return joined;
+    return joined.filter(r => POST_INTERVIEW_STATUSES.has(r.status));
+  }, [joined, includePreInterview]);
+
   const filteredBySavedView = useMemo(() => {
     switch (savedView) {
       case 'mine':
-        return joined.filter(r => (r.profile_manager_email || '').toLowerCase() === userEmail);
+        return scoped.filter(r => (r.profile_manager_email || '').toLowerCase() === userEmail);
       case 'unassigned':
-        return joined.filter(r => !r.profile_manager_email);
+        return scoped.filter(r => !r.profile_manager_email);
       case 'interviewed':
-        return joined.filter(r => isInterviewed(r.company_name, interviewedSet));
+        return scoped.filter(r => isInterviewed(r.company_name, interviewedSet));
       case 'active':
-        return joined.filter(r => r.status === 'Active' || r.status === 'Onboarded');
+        return scoped.filter(r => r.status === 'Active' || r.status === 'Onboarded');
       default:
-        return joined;
+        return scoped;
     }
-  }, [savedView, joined, userEmail, interviewedSet]);
+  }, [savedView, scoped, userEmail, interviewedSet]);
 
   const filteredBySelection = useMemo(() => {
     if (!selectedOnly) return filteredBySavedView;
@@ -394,6 +488,33 @@ export function CompaniesPage() {
         );
       },
     },
+    {
+      key: 'intervention_count',
+      header: 'Interventions',
+      width: '160px',
+      render: r => {
+        if (r.intervention_count === 0) {
+          return <span className="text-xs text-slate-400 italic">none yet</span>;
+        }
+        return (
+          <div
+            className="inline-flex items-center gap-1.5"
+            title={r.intervention_pillars.length ? r.intervention_pillars.join(', ') : undefined}
+          >
+            <span className="text-sm font-semibold text-navy-500 dark:text-slate-100">{r.intervention_count}</span>
+            <div className="flex items-center gap-0.5">
+              {r.intervention_pillars.map(p => (
+                <span
+                  key={p}
+                  title={p}
+                  className={`inline-block h-2 w-2 rounded-full ${PILLAR_DOT_COLOR[p] || 'bg-slate-400'}`}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      },
+    },
   ];
 
   if (!masterSheetId && !selectionSheetId) {
@@ -458,11 +579,13 @@ export function CompaniesPage() {
 
   // Surface every interview-list name that did NOT find a match against any
   // applicant in Source Data. These are either spelling drift (fix the static
-  // list) or genuinely missing applicants (Phase 4 Day 2 had a few with no
-  // info). The badge is a click-to-expand inline diagnostic.
+  // list or alias them inline below) or genuinely missing applicants (Phase 4
+  // Day 2 had a few with no info). Aliases count as matched.
   const unmatchedInterviewed = useMemo(() => {
     const have = new Set(joined.map(r => norm(r.company_name)));
     return INTERVIEWED_RAW.filter(name => {
+      const aliasTarget = aliases[name];
+      if (aliasTarget && have.has(norm(aliasTarget))) return false;
       const k = norm(name);
       if (!k) return false;
       if (have.has(k)) return false;
@@ -472,8 +595,30 @@ export function CompaniesPage() {
       }
       return true;
     });
-  }, [joined]);
+  }, [joined, aliases]);
   const [showUnmatched, setShowUnmatched] = useState(false);
+
+  // All applicant company names sorted, for the alias picker datalist.
+  const applicantOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const r of joined) {
+      const n = (r.company_name || '').trim();
+      if (!n) continue;
+      const k = norm(n);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(n);
+    }
+    return out.sort((a, b) => a.localeCompare(b));
+  }, [joined]);
+
+  // Names that already got an alias the user has set — shown as "mapped" rows
+  // separately so the user can see and clear them.
+  const mappedAliases = useMemo(
+    () => INTERVIEWED_RAW.filter(n => aliases[n]),
+    [aliases]
+  );
 
   const tabs: TabItem[] = [
     { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
@@ -505,35 +650,93 @@ export function CompaniesPage() {
             )}
           </div>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            107 Cohort 3 applicants. Status of "Interviewed" is overlaid from a static list of {INTERVIEWED_RAW.length} companies
-            scheduled across Phases 1–4 (April 2026); edit{' '}
-            <code className="rounded bg-slate-100 px-1 py-0.5 text-[11px] dark:bg-slate-800">interviewedSource.ts</code> to update.
+            Post-interview triage: {INTERVIEWED_RAW.length} companies scheduled across Phases 1–4 (April 2026) flow through
+            Reviewing → Recommended → Selected, then get interventions assigned. Pre-interview applicants are hidden by default —
+            flip <em>Include pre-interview</em> to see all 107.
           </p>
-          {showUnmatched && unmatchedInterviewed.length > 0 && (
-            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
-              <div className="mb-1 font-semibold">
-                {unmatchedInterviewed.length} schedule name{unmatchedInterviewed.length === 1 ? '' : 's'} didn't match any applicant in Source Data:
-              </div>
-              <ul className="ml-4 list-disc space-y-0.5">
-                {unmatchedInterviewed.map(n => (<li key={n}>{n}</li>))}
-              </ul>
-              <div className="mt-1.5 text-[11px] opacity-80">
-                Either the spelling differs from Source Data (fix it in interviewedSource.ts) or the company isn't in the 107.
+          {showUnmatched && (
+            <div className="mt-2 max-w-3xl rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+              <datalist id="applicant-options">
+                {applicantOptions.map(n => (<option key={n} value={n} />))}
+              </datalist>
+
+              {unmatchedInterviewed.length > 0 ? (
+                <>
+                  <div className="mb-2 font-semibold">
+                    {unmatchedInterviewed.length} schedule name{unmatchedInterviewed.length === 1 ? '' : 's'} didn't match any applicant. Pick the right company from Source Data to map them:
+                  </div>
+                  <div className="space-y-1.5">
+                    {unmatchedInterviewed.map(name => (
+                      <div key={name} className="flex flex-wrap items-center gap-2">
+                        <div className="min-w-[14rem] flex-1 truncate font-medium" title={name}>{name}</div>
+                        <span className="text-amber-700 dark:text-amber-300">→</span>
+                        <input
+                          type="text"
+                          list="applicant-options"
+                          placeholder="Type or pick an applicant…"
+                          defaultValue={aliases[name] || ''}
+                          onBlur={e => setAlias(name, e.currentTarget.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                          }}
+                          className="min-w-[16rem] flex-1 rounded border border-amber-300 bg-white px-2 py-1 text-[12px] text-slate-800 placeholder:text-slate-400 focus:border-amber-500 focus:outline-none dark:border-amber-800 dark:bg-slate-900 dark:text-slate-100"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="font-semibold">All schedule names matched. Nothing to reconcile.</div>
+              )}
+
+              {mappedAliases.length > 0 && (
+                <div className="mt-3 border-t border-amber-200 pt-2 dark:border-amber-900">
+                  <div className="mb-1 font-semibold">
+                    {mappedAliases.length} mapped alias{mappedAliases.length === 1 ? '' : 'es'}:
+                  </div>
+                  <div className="space-y-1">
+                    {mappedAliases.map(name => (
+                      <div key={name} className="flex flex-wrap items-center gap-2">
+                        <div className="min-w-[14rem] flex-1 truncate" title={name}>{name}</div>
+                        <span className="text-emerald-700 dark:text-emerald-300">→</span>
+                        <div className="min-w-[16rem] flex-1 truncate font-medium text-emerald-800 dark:text-emerald-200" title={aliases[name]}>
+                          {aliases[name]}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAlias(name, '')}
+                          className="rounded border border-amber-300 px-1.5 py-0.5 text-[11px] hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-2 text-[11px] opacity-80">
+                Aliases are saved per-browser (localStorage). To make them permanent, edit the entry in{' '}
+                <code className="rounded bg-amber-100 px-1 dark:bg-amber-900">interviewedSource.ts</code>
+                {' '}to match Source Data's spelling.
               </div>
             </div>
           )}
         </div>
         <div className="flex items-center gap-3">
-          <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+          <label
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300"
+            title="Default scope is the post-interview portfolio. Flip this to bring the pre-interview applicants back into view."
+          >
             <input
               type="checkbox"
-              checked={selectedOnly}
-              onChange={() => setSelectedOnly(v => !v)}
+              checked={includePreInterview}
+              onChange={() => setIncludePreInterview(v => !v)}
               className="rounded"
             />
-            Selected only
+            Include pre-interview
           </label>
-          <Button variant="ghost" onClick={() => { applicants.refresh(); master.refresh(); }}>
+          <Button variant="ghost" onClick={() => { applicants.refresh(); master.refresh(); assignments.refresh(); }}>
             <RefreshCw className="h-4 w-4" /> Refresh
           </Button>
           <Button
@@ -591,6 +794,7 @@ export function CompaniesPage() {
         <CompanyPipelineKanban
           rows={filteredBySelection}
           onCardClick={r => navigate(`/companies/${encodeURIComponent(r.route_id)}`)}
+          includePreInterview={includePreInterview}
         />
       )}
 
@@ -611,10 +815,11 @@ export function CompaniesPage() {
             <Card accent="teal">
               <div className="flex flex-wrap items-center gap-3">
                 <span className="text-sm font-bold text-navy-500 dark:text-white">{selectedIds.size} selected</span>
-                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Interviewed')} disabled={bulkRunning}>Mark Interviewed</Button>
-                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Selected')} disabled={bulkRunning}>Mark Selected</Button>
-                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Onboarded')} disabled={bulkRunning}>Mark Onboarded</Button>
-                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Active')} disabled={bulkRunning}>Mark Active</Button>
+                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Reviewing')} disabled={bulkRunning}>→ Reviewing</Button>
+                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Recommended')} disabled={bulkRunning}>→ Recommended</Button>
+                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Selected')} disabled={bulkRunning}>→ Selected</Button>
+                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Onboarded')} disabled={bulkRunning}>→ Onboarded</Button>
+                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Active')} disabled={bulkRunning}>→ Active</Button>
                 <Button size="sm" variant="ghost" onClick={handleBulkAssignPM} disabled={bulkRunning}>Assign PM…</Button>
                 <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())} disabled={bulkRunning}>Clear</Button>
               </div>
@@ -660,7 +865,7 @@ export function CompaniesPage() {
               joined.length === 0 ? (
                 <EmptyState
                   title="No companies yet"
-                  description="Once Source Data loads from the selection workbook, the 107 Cohort 3 applicants will show up here."
+                  description={includePreInterview ? "Once Source Data loads from the selection workbook, the 107 Cohort 3 applicants will show up here." : "No post-interview companies match. Toggle 'Include pre-interview' to see all 107 applicants."}
                   icon={<Users className="h-8 w-8" />}
                   action={<Button onClick={() => setCreating(true)}><Plus className="h-4 w-4" /> New Company</Button>}
                 />
@@ -691,10 +896,19 @@ export function CompaniesPage() {
 
 // ----- Pipeline kanban -------------------------------------------------
 
+// The post-interview workflow:
+//   Interviewed   → just had/scheduled interview
+//   Reviewing     → committee actively debating
+//   Recommended   → committee has recommended for the final cohort
+//   Selected      → final cohort locked, interventions getting assigned
+//   Onboarded     → kickoff done, agreements signed
+//   Active        → running interventions
+//   Graduated     → done with the program
+//   Withdrawn     → pulled out (kept visible so we don't lose the trail)
 const PIPELINE_COLUMNS: { id: string; label: string; tone: Tone }[] = [
-  { id: 'Applicant', label: 'Applicant', tone: 'neutral' },
-  { id: 'Shortlisted', label: 'Shortlisted', tone: 'amber' },
   { id: 'Interviewed', label: 'Interviewed', tone: 'teal' },
+  { id: 'Reviewing', label: 'Reviewing', tone: 'amber' },
+  { id: 'Recommended', label: 'Recommended', tone: 'orange' },
   { id: 'Selected', label: 'Selected', tone: 'orange' },
   { id: 'Onboarded', label: 'Onboarded', tone: 'green' },
   { id: 'Active', label: 'Active', tone: 'green' },
@@ -702,17 +916,39 @@ const PIPELINE_COLUMNS: { id: string; label: string; tone: Tone }[] = [
   { id: 'Withdrawn', label: 'Withdrawn', tone: 'red' },
 ];
 
+// Optional pre-interview lane shown above the main board when the user
+// flips "Include pre-interview" in the header. Kept off the main path so
+// the day-to-day workflow isn't cluttered.
+const PRE_INTERVIEW_COLUMNS: { id: string; label: string; tone: Tone }[] = [
+  { id: 'Applicant', label: 'Applicant', tone: 'neutral' },
+  { id: 'Shortlisted', label: 'Shortlisted', tone: 'amber' },
+];
+
+const PILLAR_DOT_COLOR: Record<string, string> = {
+  TTH: 'bg-brand-teal',
+  Upskilling: 'bg-brand-orange',
+  MKG: 'bg-brand-red',
+  MA: 'bg-brand-navy',
+  'C-Suite': 'bg-brand-teal',
+  Conferences: 'bg-brand-orange',
+};
+
 function CompanyPipelineKanban({
   rows,
   onCardClick,
+  includePreInterview,
 }: {
   rows: Row[];
   onCardClick: (r: Row) => void;
+  includePreInterview: boolean;
 }) {
-  const cols: KanbanColumn<string>[] = PIPELINE_COLUMNS.map(c => ({ id: c.id, label: c.label, tone: c.tone }));
+  const allColumns = includePreInterview
+    ? [...PRE_INTERVIEW_COLUMNS, ...PIPELINE_COLUMNS]
+    : PIPELINE_COLUMNS;
+  const cols: KanbanColumn<string>[] = allColumns.map(c => ({ id: c.id, label: c.label, tone: c.tone }));
   const items: Array<KanbanItem<string> & { row: Row }> = rows.map(r => ({
     id: r.route_id || r.company_id,
-    status: r.status || 'Applicant',
+    status: r.status || 'Interviewed',
     row: r,
   }));
   return (
@@ -731,11 +967,26 @@ function CompanyPipelineKanban({
           {item.row.profile_manager_email && (
             <div className="text-2xs text-slate-500">PM: {displayName(item.row.profile_manager_email).split(' ')[0]}</div>
           )}
-          {item.row.fund_code && (
-            <Badge tone={item.row.fund_code === '97060' ? 'teal' : 'amber'}>
-              {item.row.fund_code === '97060' ? 'Dutch' : 'SIDA'}
-            </Badge>
-          )}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {item.row.fund_code && (
+              <Badge tone={item.row.fund_code === '97060' ? 'teal' : 'amber'}>
+                {item.row.fund_code === '97060' ? 'Dutch' : 'SIDA'}
+              </Badge>
+            )}
+            {item.row.intervention_count > 0 ? (
+              <span
+                className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:border-navy-700 dark:bg-navy-800 dark:text-slate-200"
+                title={`${item.row.intervention_count} intervention${item.row.intervention_count === 1 ? '' : 's'}: ${item.row.intervention_pillars.join(', ')}`}
+              >
+                {item.row.intervention_pillars.map(p => (
+                  <span key={p} className={`inline-block h-1.5 w-1.5 rounded-full ${PILLAR_DOT_COLOR[p] || 'bg-slate-400'}`} />
+                ))}
+                {item.row.intervention_count}× int
+              </span>
+            ) : (
+              <span className="text-[10px] font-medium text-slate-400 italic">no interventions yet</span>
+            )}
+          </div>
         </div>
       )}
       emptyHint="Empty"
