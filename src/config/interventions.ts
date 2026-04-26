@@ -41,14 +41,21 @@ export const PILLARS: Pillar[] = [
     label: 'Market Access',
     shortLabel: 'MA',
     color: 'navy',
-    description: 'Entry into new markets, freelancer pipelines, legal.',
+    description: 'Entry into new markets, legal setup, market registration.',
     subInterventions: [
-      'MA-ElevateBridge',
       'MA-Market Registration',
       'MA-MKG Agency',
       'MA-Resource Placement',
       'MA-Legal',
     ],
+  },
+  {
+    code: 'ElevateBridge',
+    label: 'ElevateBridge',
+    shortLabel: 'EB',
+    color: 'orange',
+    description: 'Pre-vetted freelancers act as a company\'s sales funnel — Upwork proposals, social outreach, deal closing.',
+    subInterventions: [],
   },
   {
     code: 'C-Suite',

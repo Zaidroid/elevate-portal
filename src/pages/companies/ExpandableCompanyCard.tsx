@@ -31,6 +31,7 @@ const PILLAR_DOT_COLOR: Record<string, string> = {
   Upskilling: 'bg-brand-orange',
   MKG: 'bg-brand-red',
   MA: 'bg-brand-navy',
+  ElevateBridge: 'bg-amber-500',
   'C-Suite': 'bg-brand-teal',
   Conferences: 'bg-brand-orange',
 };
