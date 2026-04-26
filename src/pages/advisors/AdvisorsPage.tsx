@@ -1,267 +1,285 @@
+// /advisors — native module replacing the standalone Advisors app.
+//
+// Tabs: Pipeline (kanban), Roster (table), Follow-ups, Activity, Dashboard.
+// Bound to the E3 - Non-Technical Advisors workbook via four useSheetDoc
+// instances (advisors, followups, activity, comments). Joining is done
+// client-side in `enrichAdvisors`.
+
 import { useMemo, useState } from 'react';
-import { ExternalLink, Download } from 'lucide-react';
+import {
+  Activity as ActivityIcon,
+  Award,
+  BarChart3,
+  Calendar,
+  Download,
+  ExternalLink,
+  Kanban as KanbanIcon,
+  RefreshCw,
+  Search,
+  Table as TableIcon,
+} from 'lucide-react';
 import { useAuth } from '../../services/auth';
+import { isAdmin } from '../../config/team';
 import { useSheetDoc } from '../../lib/two-way-sync';
 import { getSheetId, getTab } from '../../config/sheets';
-import { Badge, Button, Card, CardHeader, DataTable, FilterBar, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
-import type { Column, FilterGroup, FilterValues } from '../../lib/ui';
+import {
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  DataTable,
+  EmptyState,
+  Tabs,
+  downloadCsv,
+  timestampedFilename,
+  useToast,
+} from '../../lib/ui';
+import type { Column, TabItem, Tone } from '../../lib/ui';
+import { CATEGORY_META } from '../../lib/advisor-scoring';
+import type { AdvisorPipelineId } from '../../lib/advisor-scoring';
+import type {
+  ActivityRow,
+  Advisor,
+  AdvisorComment,
+  FollowUp,
+} from '../../types/advisor';
+import {
+  appendActivity,
+  diffForActivity,
+  enrichAdvisors,
+  matchesQuery,
+  normalizeCountry,
+  scoreFields,
+  type EnrichedAdvisor,
+} from './utils';
+import { AdvisorPipelineKanban } from './AdvisorPipelineKanban';
+import { AdvisorFollowUpsTab } from './AdvisorFollowUpsTab';
+import { AdvisorActivityTab } from './AdvisorActivityTab';
+import { AdvisorDetailDrawer } from './AdvisorDetailDrawer';
+import { AdvisorDashboard } from './AdvisorDashboard';
 
-const ADVISORS_TOOL_URL = 'https://elevate-advisors.zaidlab.xyz';
-
-function buildSsoUrl(baseUrl: string): string {
-  const token = localStorage.getItem('google_access_token');
-  const expiry = localStorage.getItem('token_expiry');
-  const email = localStorage.getItem('user_email');
-  if (!token || !email) return baseUrl;
-  return `${baseUrl}#access_token=${token}&user_email=${encodeURIComponent(email)}&token_expiry=${expiry || ''}`;
-}
-
-// Legacy Google Form headers — exact strings from the source sheet.
-const H = {
-  id: 'advisor_id',
-  name: 'Full Name ',
-  gender: 'Gender',
-  country: 'Country ',
-  email: 'Email',
-  whatsapp: 'WhatsApp Number',
-  linkedin: 'LinkedIn Profile Link (URL)',
-  techRating: '  How would you rate your experience in the tech industry? Ranking from 5 (highest) to 1 (lowest)',
-  ecoRating: 'How would you rate your Knowledge in the Palestinian tech ecosystem? Ranking from 5 (highest) to 1 (lowest)',
-  expAreas: 'Which of the following do you have experience in?',
-  cLevel: 'Do you have experience in working with C-level managers?',
-  position: 'What is your current position?',
-  employer: 'Who is your current employer?',
-  years: 'What is your total years of experience?',
-  paidVol: 'Are you looking for a paid or volunteering opportunity? ',
-  hourly: 'If you are looking for a paid opportunity, please share your expected hourly rate in USD',
-  cv: 'Please upload your CV',
-  assignCompany: 'assignment_company_id',
-  assignIntervention: 'assignment_intervention_type',
-  assignStatus: 'assignment_status',
-  assignNotes: 'assignment_notes',
-} as const;
-
-type Advisor = Record<string, string>;
-
-// Canonical country aliases. Keys are normalized (lowercased, stripped) raw values;
-// values are the canonical display label we want to group under.
-const COUNTRY_ALIASES: Record<string, string> = {
-  'palestine': 'Palestine',
-  'palestinian territory': 'Palestine',
-  'palestinian territories': 'Palestine',
-  'state of palestine': 'Palestine',
-  'occupied palestinian territory': 'Palestine',
-  'west bank': 'Palestine',
-  'gaza': 'Palestine',
-  'gaza strip': 'Palestine',
-  'ps': 'Palestine',
-  'فلسطين': 'Palestine',
-
-  'israel': 'Israel',
-  'il': 'Israel',
-
-  'jordan': 'Jordan',
-  'jo': 'Jordan',
-  'hashemite kingdom of jordan': 'Jordan',
-
-  'united states': 'United States',
-  'united states of america': 'United States',
-  'usa': 'United States',
-  'u.s.a.': 'United States',
-  'u.s.': 'United States',
-  'us': 'United States',
-  'america': 'United States',
-
-  'united kingdom': 'United Kingdom',
-  'uk': 'United Kingdom',
-  'u.k.': 'United Kingdom',
-  'great britain': 'United Kingdom',
-  'britain': 'United Kingdom',
-  'england': 'United Kingdom',
-
-  'united arab emirates': 'United Arab Emirates',
-  'uae': 'United Arab Emirates',
-  'u.a.e.': 'United Arab Emirates',
-  'emirates': 'United Arab Emirates',
-
-  'saudi arabia': 'Saudi Arabia',
-  'ksa': 'Saudi Arabia',
-  'kingdom of saudi arabia': 'Saudi Arabia',
-
-  'egypt': 'Egypt',
-  'arab republic of egypt': 'Egypt',
-
-  'lebanon': 'Lebanon',
-  'turkey': 'Turkey',
-  'türkiye': 'Turkey',
-  'turkiye': 'Turkey',
-  'germany': 'Germany',
-  'deutschland': 'Germany',
-  'netherlands': 'Netherlands',
-  'the netherlands': 'Netherlands',
-  'holland': 'Netherlands',
-  'canada': 'Canada',
-  'qatar': 'Qatar',
-  'kuwait': 'Kuwait',
-  'bahrain': 'Bahrain',
-  'oman': 'Oman',
-  'morocco': 'Morocco',
-  'tunisia': 'Tunisia',
-  'algeria': 'Algeria',
-  'syria': 'Syria',
-  'iraq': 'Iraq',
-  'yemen': 'Yemen',
-  'sweden': 'Sweden',
-  'norway': 'Norway',
-  'denmark': 'Denmark',
-  'finland': 'Finland',
-  'france': 'France',
-  'spain': 'Spain',
-  'italy': 'Italy',
-  'belgium': 'Belgium',
-  'switzerland': 'Switzerland',
-  'austria': 'Austria',
-  'ireland': 'Ireland',
-  'australia': 'Australia',
-  'india': 'India',
-  'pakistan': 'Pakistan',
+const PIPELINE_LABEL_BY_ID: Record<AdvisorPipelineId, string> = {
+  new: 'New',
+  acknowledged: 'Acknowledged',
+  allocated: 'Allocated',
+  intro_sched: 'Intro Scheduled',
+  intro_done: 'Intro Done',
+  assessment: 'Assessment',
+  approved: 'Approved',
+  matched: 'Matched',
+  on_hold: 'On Hold',
+  rejected: 'Rejected',
 };
-
-function normalizeCountry(raw: string | undefined): string {
-  if (!raw) return '';
-  // Lowercase, strip diacritics, collapse whitespace, drop trailing punctuation.
-  const cleaned = raw
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '') // combining diacritics
-    .replace(/[()[\]{}]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[.,;]+$/, '')
-    .toLowerCase();
-  if (!cleaned) return '';
-  if (COUNTRY_ALIASES[cleaned]) return COUNTRY_ALIASES[cleaned];
-  // No alias match: title-case the original trimmed value for display.
-  return raw.trim().replace(/\s+/g, ' ').replace(/\w\S*/g, w =>
-    w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
-  );
-}
 
 export function AdvisorsPage() {
   const { user } = useAuth();
-  const sheetId = getSheetId('advisors');
-  const tab = getTab('advisors', 'advisors');
+  const userEmail = user?.email || '';
+  const canEdit = isAdmin(userEmail) || /@gazaskygeeks\.com$/i.test(userEmail);
+  const toast = useToast();
 
-  const { rows, loading, error, refresh } = useSheetDoc<Advisor>(
-    sheetId || null, tab, H.id, { userEmail: user?.email }
+  const sheetId = getSheetId('advisors');
+  const tabAdvisors = getTab('advisors', 'advisors');
+  const tabFollowups = getTab('advisors', 'followups');
+  const tabActivity = getTab('advisors', 'activity');
+  const tabComments = getTab('advisors', 'comments');
+
+  const advHook = useSheetDoc<Advisor>(sheetId || null, tabAdvisors, 'advisor_id', { userEmail });
+  const fuHook = useSheetDoc<FollowUp>(sheetId || null, tabFollowups, 'followup_id', { userEmail });
+  const actHook = useSheetDoc<ActivityRow>(sheetId || null, tabActivity, 'activity_id', { userEmail });
+  const cmtHook = useSheetDoc<AdvisorComment>(sheetId || null, tabComments, 'comment_id', { userEmail });
+
+  const [tab, setTab] = useState<string>('pipeline');
+  const [query, setQuery] = useState('');
+  const [filterCountry, setFilterCountry] = useState<string>('');
+  const [filterCategory, setFilterCategory] = useState<string>('');
+  const [filterPipeline, setFilterPipeline] = useState<string>('');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const enriched = useMemo(
+    () => enrichAdvisors(advHook.rows, fuHook.rows, cmtHook.rows, actHook.rows),
+    [advHook.rows, fuHook.rows, cmtHook.rows, actHook.rows]
   );
 
-  const [query, setQuery] = useState('');
-  const [filters, setFilters] = useState<FilterValues>({ country: [], paidVol: [], assignment: [] });
-
-  const counts = useMemo(() => {
-    const byCountry = new Map<string, number>();
-    const byPaidVol = new Map<string, number>();
-    const byAssignment = new Map<string, number>();
-    for (const r of rows) {
-      const c = normalizeCountry(r[H.country]);
-      if (c) byCountry.set(c, (byCountry.get(c) || 0) + 1);
-      const pv = (r[H.paidVol] || '').trim();
-      if (pv) byPaidVol.set(pv, (byPaidVol.get(pv) || 0) + 1);
-      const as = (r[H.assignStatus] || '').trim() || '__unassigned__';
-      byAssignment.set(as, (byAssignment.get(as) || 0) + 1);
-    }
-    return { byCountry, byPaidVol, byAssignment };
-  }, [rows]);
-
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const country = filters.country || [];
-    const paidVol = filters.paidVol || [];
-    const assignment = filters.assignment || [];
-    return rows.filter(r => {
-      if (country.length > 0 && !country.includes(normalizeCountry(r[H.country]))) return false;
-      if (paidVol.length > 0 && !paidVol.includes((r[H.paidVol] || '').trim())) return false;
-      if (assignment.length > 0) {
-        const key = (r[H.assignStatus] || '').trim() || '__unassigned__';
-        if (!assignment.includes(key)) return false;
-      }
-      if (!q) return true;
-      return [r[H.name], r[H.email], r[H.position], r[H.employer], r[H.expAreas]]
-        .some(v => (v || '').toLowerCase().includes(q));
+    return enriched.filter(a => {
+      if (filterCountry && normalizeCountry(a.country) !== filterCountry) return false;
+      if (filterCategory && a.stage2.primary !== filterCategory) return false;
+      if (filterPipeline && a.pipeline_status !== filterPipeline) return false;
+      return matchesQuery(a, query);
     });
-  }, [rows, query, filters]);
+  }, [enriched, query, filterCountry, filterCategory, filterPipeline]);
 
-  const filterGroups: FilterGroup[] = useMemo(() => {
-    const countryOpts = Array.from(counts.byCountry.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([value, count]) => ({ value, label: value, count }));
-    const paidVolOpts = Array.from(counts.byPaidVol.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([value, count]) => ({ value, label: value, count }));
-    const assignmentOpts = [
-      { value: '__unassigned__', label: 'Unassigned', count: counts.byAssignment.get('__unassigned__') || 0 },
-      ...Array.from(counts.byAssignment.entries())
-        .filter(([k]) => k !== '__unassigned__')
-        .sort((a, b) => b[1] - a[1])
-        .map(([value, count]) => ({ value, label: value, count })),
-    ];
-    return [
-      { key: 'country', label: 'Country', options: countryOpts },
-      { key: 'paidVol', label: 'Paid / Volunteer', options: paidVolOpts },
-      { key: 'assignment', label: 'Assignment', options: assignmentOpts },
-    ];
-  }, [counts]);
+  const countries = useMemo(() => {
+    const set = new Set<string>();
+    for (const a of enriched) {
+      const c = normalizeCountry(a.country);
+      if (c) set.add(c);
+    }
+    return Array.from(set).sort();
+  }, [enriched]);
 
-  const columns: Column<Advisor>[] = [
-    {
-      key: H.name,
-      header: 'Advisor',
-      render: r => (
-        <div className="flex items-center gap-3">
-          <AdvisorAvatar name={r[H.name] || ''} />
-          <div className="min-w-0">
-            <div className="truncate font-semibold text-navy-500 dark:text-white">{r[H.name] || '—'}</div>
-            <div className="truncate text-xs text-slate-500">
-              {[r[H.position], r[H.employer]].filter(Boolean).join(' · ') || '—'}
-            </div>
-          </div>
-        </div>
-      ),
-    },
-    {
-      key: H.country,
-      header: 'Country',
-      width: '140px',
-      render: r => {
-        const n = normalizeCountry(r[H.country]);
-        return n ? <span>{n}</span> : <span className="text-slate-400">—</span>;
-      },
-    },
-    { key: H.years, header: 'Years', width: '80px' },
-    {
-      key: H.paidVol,
-      header: 'Basis',
-      width: '120px',
-      render: r => {
-        const v = (r[H.paidVol] || '').trim();
-        if (!v) return <span className="text-slate-400">—</span>;
-        const paid = /paid/i.test(v);
-        return <Badge tone={paid ? 'amber' : 'teal'}>{paid ? 'Paid' : 'Volunteer'}</Badge>;
-      },
-    },
-    {
-      key: H.assignStatus,
-      header: 'Assignment',
-      render: r => r[H.assignStatus]
-        ? <Badge tone={statusTone(r[H.assignStatus])}>{r[H.assignStatus]}</Badge>
-        : <span className="text-xs text-slate-400">Unassigned</span>,
-    },
-  ];
+  const selected = useMemo(
+    () => enriched.find(a => a.advisor_id === selectedId) || null,
+    [enriched, selectedId]
+  );
+
+  const handleMovePipeline = async (advisorId: string, next: AdvisorPipelineId) => {
+    const adv = enriched.find(a => a.advisor_id === advisorId);
+    if (!adv) return;
+    const nextLabel = PIPELINE_LABEL_BY_ID[next];
+    if (adv.pipeline_status === nextLabel) return;
+    try {
+      await advHook.updateRow(advisorId, { pipeline_status: nextLabel } as Partial<Advisor>);
+      if (sheetId) {
+        await appendActivity(sheetId, tabActivity, {
+          user_email: userEmail,
+          advisor_id: advisorId,
+          action: 'status_change',
+          field: 'pipeline_status',
+          old_value: adv.pipeline_status,
+          new_value: nextLabel,
+        });
+        await actHook.refresh();
+      }
+      toast.success(`${adv.full_name || advisorId} → ${nextLabel}`);
+    } catch (err) {
+      toast.error(`Move failed: ${(err as Error).message}`);
+    }
+  };
+
+  const handleTrackerSave = async (updates: Partial<EnrichedAdvisor>) => {
+    if (!selected || !sheetId) return;
+    const allowed: Partial<Advisor> = {
+      pipeline_status: updates.pipeline_status,
+      assignee_email: updates.assignee_email,
+      received_ack: updates.received_ack,
+      intro_scheduled_date: updates.intro_scheduled_date,
+      intro_done_date: updates.intro_done_date,
+      assessment_date: updates.assessment_date,
+      decision_date: updates.decision_date,
+      tracker_notes: updates.tracker_notes,
+      assignment_company_id: updates.assignment_company_id,
+      assignment_intervention_type: updates.assignment_intervention_type,
+      assignment_status: updates.assignment_status,
+      assignment_notes: updates.assignment_notes,
+    };
+    const scored = scoreFields({ ...selected, ...allowed });
+    const merged: Partial<Advisor> = { ...allowed, ...scored };
+    const diff = diffForActivity(selected, merged);
+    try {
+      await advHook.updateRow(selected.advisor_id, merged);
+      for (const d of diff) {
+        await appendActivity(sheetId, tabActivity, {
+          user_email: userEmail,
+          advisor_id: selected.advisor_id,
+          action: 'tracker_edit',
+          field: d.field,
+          old_value: d.old,
+          new_value: d.next,
+        });
+      }
+      await actHook.refresh();
+      toast.success('Tracker saved');
+    } catch (err) {
+      toast.error(`Save failed: ${(err as Error).message}`);
+    }
+  };
+
+  const handleCreateFollowUp = async (fu: Partial<FollowUp>) => {
+    if (!fu.advisor_id) return;
+    const id = `FU-${Date.now()}`;
+    try {
+      await fuHook.createRow({
+        ...fu,
+        followup_id: id,
+        created_by: userEmail,
+        created_at: new Date().toISOString(),
+        completed_at: '',
+        status: fu.status || 'Open',
+      } as Partial<FollowUp>);
+      if (sheetId) {
+        await appendActivity(sheetId, tabActivity, {
+          user_email: userEmail,
+          advisor_id: fu.advisor_id,
+          action: 'followup',
+          field: 'create',
+          new_value: `${fu.type || 'Follow-up'} due ${fu.due_date || ''}`,
+        });
+        await actHook.refresh();
+      }
+      toast.success('Follow-up created');
+    } catch (err) {
+      toast.error(`Create failed: ${(err as Error).message}`);
+    }
+  };
+
+  const handleMarkFollowUpDone = async (followupId: string) => {
+    const fu = fuHook.rows.find(f => f.followup_id === followupId);
+    if (!fu) return;
+    try {
+      await fuHook.updateRow(followupId, {
+        status: 'Done',
+        completed_at: new Date().toISOString(),
+      } as Partial<FollowUp>);
+      if (sheetId) {
+        await appendActivity(sheetId, tabActivity, {
+          user_email: userEmail,
+          advisor_id: fu.advisor_id,
+          action: 'followup',
+          field: 'status',
+          old_value: fu.status,
+          new_value: 'Done',
+        });
+        await actHook.refresh();
+      }
+      toast.success('Follow-up marked done');
+    } catch (err) {
+      toast.error(`Update failed: ${(err as Error).message}`);
+    }
+  };
+
+  const handleSnoozeFollowUp = async (followupId: string) => {
+    const fu = fuHook.rows.find(f => f.followup_id === followupId);
+    if (!fu) return;
+    try {
+      await fuHook.updateRow(followupId, { status: 'Snoozed' } as Partial<FollowUp>);
+      toast.success('Snoozed');
+    } catch (err) {
+      toast.error(`Update failed: ${(err as Error).message}`);
+    }
+  };
+
+  const handleAddComment = async (body: string) => {
+    if (!selected) return;
+    const id = `CMT-${Date.now()}`;
+    try {
+      await cmtHook.createRow({
+        comment_id: id,
+        advisor_id: selected.advisor_id,
+        author_email: userEmail,
+        body,
+        created_at: new Date().toISOString(),
+      } as Partial<AdvisorComment>);
+      if (sheetId) {
+        await appendActivity(sheetId, tabActivity, {
+          user_email: userEmail,
+          advisor_id: selected.advisor_id,
+          action: 'comment',
+          field: 'body',
+          new_value: body.slice(0, 80),
+        });
+        await actHook.refresh();
+      }
+      toast.success('Comment posted');
+    } catch (err) {
+      toast.error(`Post failed: ${(err as Error).message}`);
+    }
+  };
 
   if (!sheetId) {
     return (
       <Card>
-        <CardHeader title="Non-Technical Advisors" />
+        <CardHeader title="Advisors" />
         <p className="text-sm text-slate-500">
           Set <code className="rounded bg-slate-100 px-1">VITE_SHEET_ADVISORS</code> in your environment.
         </p>
@@ -269,32 +287,50 @@ export function AdvisorsPage() {
     );
   }
 
+  const error = advHook.error || fuHook.error || actHook.error || cmtHook.error;
+  const loading = advHook.loading;
+
+  const tabs: TabItem[] = [
+    { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: enriched.length },
+    { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: filtered.length },
+    {
+      value: 'followups',
+      label: 'Follow-ups',
+      icon: <Calendar className="h-4 w-4" />,
+      count: fuHook.rows.filter(f => f.status === 'Open').length,
+    },
+    {
+      value: 'activity',
+      label: 'Activity',
+      icon: <ActivityIcon className="h-4 w-4" />,
+      count: actHook.rows.length,
+    },
+    { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
+  ];
+
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex items-center justify-between">
+      <header className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Advisors</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Advisors</h1>
+            <Badge tone="teal">{enriched.length}</Badge>
+          </div>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Read-only summary. Assignments, matching, and editing live in the Advisors tool.
+            Triage non-technical advisors. Stage 1 + Stage 2 scoring, kanban, follow-ups, audit.
           </p>
         </div>
-        <div className="flex gap-3">
-          <Button variant="ghost" onClick={refresh}>Refresh</Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="ghost" onClick={() => { advHook.refresh(); fuHook.refresh(); actHook.refresh(); cmtHook.refresh(); }}>
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </Button>
           <Button
             variant="ghost"
-            onClick={() => downloadCsv(timestampedFilename('advisors'), filtered)}
             disabled={filtered.length === 0}
+            onClick={() => downloadCsv(timestampedFilename('advisors'), filtered.map(toCsvRow))}
           >
-            <Download className="h-4 w-4" /> Export
+            <Download className="h-4 w-4" /> Export CSV
           </Button>
-          <a
-            href={buildSsoUrl(ADVISORS_TOOL_URL)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-2 rounded-lg bg-brand-red px-3.5 py-2 text-sm font-semibold text-white shadow-brand-red transition-colors hover:bg-brand-red-dark"
-          >
-            Open Advisors Tool <ExternalLink className="h-4 w-4" />
-          </a>
         </div>
       </header>
 
@@ -304,50 +340,246 @@ export function AdvisorsPage() {
         </Card>
       )}
 
-      <FilterBar
-        searchValue={query}
-        onSearchChange={setQuery}
-        searchPlaceholder="Search by name, email, position, employer, expertise…"
-        groups={filterGroups}
-        values={filters}
-        onValuesChange={setFilters}
-        total={rows.length}
-        filtered={filtered.length}
-        resultNoun="advisors"
+      <Card>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+          <div className="relative md:col-span-2">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search by name, email, country, position, employer, company id…"
+              className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-10 pr-4 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-600 dark:text-white"
+            />
+          </div>
+          <select
+            value={filterCountry}
+            onChange={e => setFilterCountry(e.target.value)}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-600 dark:text-white"
+          >
+            <option value="">All countries</option>
+            {countries.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <select
+            value={filterCategory}
+            onChange={e => setFilterCategory(e.target.value)}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-600 dark:text-white"
+          >
+            <option value="">All categories</option>
+            {Object.keys(CATEGORY_META).map(c => <option key={c} value={c}>{CATEGORY_META[c].label}</option>)}
+          </select>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-xs uppercase tracking-wider text-slate-500">Pipeline:</span>
+          <button
+            onClick={() => setFilterPipeline('')}
+            className={`rounded-full px-3 py-1 text-xs font-semibold ${filterPipeline === '' ? 'bg-navy-500 text-white' : 'bg-slate-100 text-slate-600 dark:bg-navy-700 dark:text-slate-200'}`}
+          >
+            All
+          </button>
+          {Object.values(PIPELINE_LABEL_BY_ID).map(label => (
+            <button
+              key={label}
+              onClick={() => setFilterPipeline(label)}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${filterPipeline === label ? 'bg-navy-500 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-navy-700 dark:text-slate-200'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </Card>
+
+      <Tabs items={tabs} value={tab} onChange={setTab} />
+
+      {loading && enriched.length === 0 && (
+        <Card>
+          <EmptyState
+            icon={<RefreshCw className="h-6 w-6 animate-spin" />}
+            title="Loading advisors…"
+            description="Fetching from Google Sheets."
+          />
+        </Card>
+      )}
+
+      {tab === 'pipeline' && (
+        <AdvisorPipelineKanban
+          advisors={filtered}
+          readOnly={!canEdit}
+          onMove={handleMovePipeline}
+          onCardClick={a => setSelectedId(a.advisor_id)}
+        />
+      )}
+
+      {tab === 'roster' && (
+        <RosterTable advisors={filtered} onOpen={a => setSelectedId(a.advisor_id)} />
+      )}
+
+      {tab === 'followups' && (
+        <AdvisorFollowUpsTab
+          followups={fuHook.rows}
+          advisors={enriched}
+          userEmail={userEmail}
+          canEdit={canEdit}
+          onCreate={handleCreateFollowUp}
+          onMarkDone={handleMarkFollowUpDone}
+          onSnooze={handleSnoozeFollowUp}
+          onOpenAdvisor={a => setSelectedId(a.advisor_id)}
+        />
+      )}
+
+      {tab === 'activity' && (
+        <AdvisorActivityTab
+          activity={actHook.rows}
+          advisors={enriched}
+          onOpenAdvisor={a => setSelectedId(a.advisor_id)}
+        />
+      )}
+
+      {tab === 'dashboard' && <AdvisorDashboard advisors={enriched} />}
+
+      <AdvisorDetailDrawer
+        advisor={selected}
+        open={!!selected}
+        canEdit={canEdit}
+        userEmail={userEmail}
+        onClose={() => setSelectedId(null)}
+        onTrackerSave={handleTrackerSave}
+        onCreateFollowUp={handleCreateFollowUp}
+        onMarkFollowUpDone={handleMarkFollowUpDone}
+        onAddComment={handleAddComment}
       />
-
-      <DataTable columns={columns} rows={filtered} loading={loading} />
     </div>
   );
 }
 
-const AVATAR_TONES = [
-  'bg-brand-teal/15 text-brand-teal',
-  'bg-brand-red/15 text-brand-red',
-  'bg-brand-orange/15 text-brand-orange',
-  'bg-navy-500/15 text-navy-500 dark:text-slate-100',
-  'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300',
-  'bg-sky-500/15 text-sky-700 dark:text-sky-300',
-];
+function RosterTable({
+  advisors,
+  onOpen,
+}: {
+  advisors: EnrichedAdvisor[];
+  onOpen: (a: EnrichedAdvisor) => void;
+}) {
+  const columns: Column<EnrichedAdvisor>[] = [
+    {
+      key: 'full_name',
+      header: 'Name',
+      render: a => <span className="font-semibold">{a.full_name || '(unnamed)'}</span>,
+    },
+    { key: 'country', header: 'Country' },
+    {
+      key: 'position',
+      header: 'Position',
+      render: a => <span className="text-xs text-slate-500">{[a.position, a.employer].filter(Boolean).join(' @ ')}</span>,
+    },
+    {
+      key: 'stage1_score',
+      header: 'S1',
+      render: a => <Badge tone={a.stage1.pass ? 'green' : 'red'}>{a.stage1.total}</Badge>,
+    },
+    {
+      key: 'stage2_category',
+      header: 'Category',
+      render: a => {
+        const meta = CATEGORY_META[a.stage2.primary] || CATEGORY_META.Unqualified;
+        return <Badge tone={catTone(meta.tone)}>{meta.label}</Badge>;
+      },
+    },
+    {
+      key: 'pipeline_status',
+      header: 'Pipeline',
+      render: a => <Badge tone={pipelineTone(a.pipeline_status)}>{a.pipeline_status || 'New'}</Badge>,
+    },
+    {
+      key: 'open_followups',
+      header: 'Follow-ups',
+      render: a =>
+        a.open_followups > 0 ? (
+          <Badge tone={a.overdue_followups > 0 ? 'red' : 'orange'}>
+            {a.open_followups} open{a.overdue_followups > 0 ? ` · ${a.overdue_followups} overdue` : ''}
+          </Badge>
+        ) : <span className="text-xs text-slate-400">—</span>,
+    },
+    {
+      key: 'linkedin',
+      header: 'LinkedIn',
+      width: '60px',
+      render: a => a.linkedin ? (
+        <a
+          href={a.linkedin.startsWith('http') ? a.linkedin : `https://${a.linkedin}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={e => e.stopPropagation()}
+          className="text-brand-teal hover:underline"
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+        </a>
+      ) : null,
+    },
+  ];
 
-function toneFor(seed: string): string {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  return AVATAR_TONES[h % AVATAR_TONES.length];
+  if (advisors.length === 0) {
+    return (
+      <Card>
+        <EmptyState
+          icon={<Award className="h-6 w-6" />}
+          title="No advisors match the current filters"
+          description="Loosen the filter or clear the search box."
+        />
+      </Card>
+    );
+  }
+
+  return <DataTable columns={columns} rows={advisors} onRowClick={onOpen} />;
 }
 
-function initialsOf(name: string): string {
-  const parts = (name || '').trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '·';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
+const TONE_MAP: Record<string, Tone> = {
+  slate: 'neutral',
+  navy: 'neutral',
+  red: 'red',
+  teal: 'teal',
+  orange: 'orange',
+  amber: 'amber',
+  green: 'green',
+};
+
+function catTone(tone: string): Tone {
+  return TONE_MAP[tone] || 'neutral';
 }
 
-function AdvisorAvatar({ name }: { name: string }) {
-  const tone = toneFor(name || '·');
-  return (
-    <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-xs font-bold ${tone}`}>
-      {initialsOf(name)}
-    </div>
-  );
+function pipelineTone(s: string | undefined): Tone {
+  switch ((s || 'New')) {
+    case 'Approved':
+    case 'Matched': return 'green';
+    case 'Acknowledged':
+    case 'Allocated':
+    case 'Intro Scheduled':
+    case 'Intro Done':
+    case 'Assessment': return 'amber';
+    case 'Rejected': return 'red';
+    case 'On Hold': return 'neutral';
+    default: return 'neutral';
+  }
+}
+
+function toCsvRow(a: EnrichedAdvisor): Record<string, string> {
+  return {
+    advisor_id: a.advisor_id,
+    full_name: a.full_name,
+    email: a.email,
+    country: a.country,
+    position: a.position,
+    employer: a.employer,
+    pipeline_status: a.pipeline_status,
+    stage1_score: String(a.stage1.total),
+    stage1_pass: a.stage1.pass ? 'TRUE' : 'FALSE',
+    stage2_category: a.stage2.primary,
+    stage2_score: a.stage2.primary === 'Unqualified' ? '0' : String(
+      a.stage2[a.stage2.primary.toLowerCase() as 'ceo' | 'cto' | 'coo' | 'marketing' | 'ai']
+    ),
+    assignee_email: a.assignee_email,
+    assignment_company_id: a.assignment_company_id,
+    assignment_intervention_type: a.assignment_intervention_type,
+    assignment_status: a.assignment_status,
+    open_followups: String(a.open_followups),
+    overdue_followups: String(a.overdue_followups),
+  };
 }
