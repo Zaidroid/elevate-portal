@@ -7,10 +7,11 @@
 //   Comments — thread
 
 import { useEffect, useMemo, useState } from 'react';
-import { Award, ClipboardCheck, FileText, MessageSquare, ListChecks, Activity as ActivityIcon, ExternalLink } from 'lucide-react';
+import { ArrowRight, Award, ClipboardCheck, FileText, MessageSquare, ListChecks, Activity as ActivityIcon, ExternalLink, Sparkles } from 'lucide-react';
 import { Badge, Button, Drawer, Tabs } from '../../lib/ui';
 import type { TabItem, Tone } from '../../lib/ui';
-import { CATEGORY_META, PIPELINE_COLUMNS } from '../../lib/advisor-scoring';
+import { CATEGORY_META, NEXT_ACTION, PIPELINE_COLUMNS } from '../../lib/advisor-scoring';
+import type { AdvisorPipelineId } from '../../lib/advisor-scoring';
 import type { FollowUp } from '../../types/advisor';
 import type { EnrichedAdvisor } from './utils';
 
@@ -101,6 +102,11 @@ export function AdvisorDetailDrawer({
       <Tabs items={tabs} value={tab} onChange={setTab} />
 
       <div className="mt-4 space-y-4">
+        {canEdit && advisor.pipeline_status !== 'Archived' && (
+          <NextActionCard advisor={advisor} onAdvance={async (nextLabel) => {
+            await onTrackerSave({ pipeline_status: nextLabel } as Partial<EnrichedAdvisor>);
+          }} />
+        )}
         {tab === 'profile' && <ProfileTab advisor={advisor} />}
         {tab === 'score' && <ScoreTab advisor={advisor} />}
         {tab === 'tracker' && (
@@ -121,6 +127,99 @@ export function AdvisorDetailDrawer({
         )}
       </div>
     </Drawer>
+  );
+}
+
+// ----- Suggested next action -----
+
+const STATUS_TO_ID: Record<string, AdvisorPipelineId> = {
+  'New': 'new',
+  'Acknowledged': 'acknowledged',
+  'Allocated': 'allocated',
+  'Intro Scheduled': 'intro_sched',
+  'Intro Done': 'intro_done',
+  'Assessment': 'assessment',
+  'Approved': 'approved',
+  'Matched': 'matched',
+  'On Hold': 'on_hold',
+  'Rejected': 'rejected',
+};
+
+const ID_TO_LABEL: Record<AdvisorPipelineId, string> = {
+  new: 'New',
+  acknowledged: 'Acknowledged',
+  allocated: 'Allocated',
+  intro_sched: 'Intro Scheduled',
+  intro_done: 'Intro Done',
+  assessment: 'Assessment',
+  approved: 'Approved',
+  matched: 'Matched',
+  on_hold: 'On Hold',
+  rejected: 'Rejected',
+};
+
+function NextActionCard({
+  advisor,
+  onAdvance,
+}: {
+  advisor: EnrichedAdvisor;
+  onAdvance: (nextLabel: string) => Promise<void>;
+}) {
+  const [advancing, setAdvancing] = useState(false);
+  const currentId = STATUS_TO_ID[advisor.pipeline_status || 'New'] || 'new';
+  const action = NEXT_ACTION[currentId];
+  if (!action) return null;
+  const nextLabel = action.nextStatus ? ID_TO_LABEL[action.nextStatus] : null;
+
+  // Smart suggestions baked into the card.
+  const tips: string[] = [];
+  if (currentId === 'new' && advisor.stage1.pass && parseFloat(advisor.tech_rating || '0') >= 4) {
+    tips.push('Stage 1 passes with tech rating ≥4 — fast-track to Acknowledged.');
+  }
+  if (currentId === 'allocated' && !advisor.assignee_email) {
+    tips.push('Set an assignee_email in the Tracker tab before scheduling the intro.');
+  }
+  if (currentId === 'intro_done' && advisor.followups_for.length === 0) {
+    tips.push('Create a follow-up in 7 days to nudge the assessment.');
+  }
+  if (currentId === 'approved' && !advisor.assignment_company_id) {
+    tips.push('Set assignment_company_id in the Tracker tab to mark as Matched.');
+  }
+  if (currentId === 'on_hold') {
+    tips.push('Holding > 14 days? Decide: re-activate or move to Rejected.');
+  }
+
+  return (
+    <div className="rounded-xl border border-brand-red/30 bg-brand-red/5 p-3 dark:bg-brand-red/10">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-brand-red">
+            <Sparkles className="h-3.5 w-3.5" />
+            Suggested next step
+          </div>
+          <div className="mt-0.5 text-sm font-bold text-navy-500 dark:text-white">{action.label}</div>
+          <div className="mt-0.5 text-xs text-slate-600 dark:text-slate-300">{action.intent}</div>
+          {tips.length > 0 && (
+            <ul className="mt-2 space-y-0.5 text-xs text-slate-500 dark:text-slate-400">
+              {tips.map((t, i) => <li key={i}>• {t}</li>)}
+            </ul>
+          )}
+        </div>
+        {nextLabel && (
+          <Button
+            size="sm"
+            disabled={advancing}
+            onClick={async () => {
+              setAdvancing(true);
+              try { await onAdvance(nextLabel); } finally { setAdvancing(false); }
+            }}
+          >
+            <ArrowRight className="h-3.5 w-3.5" />
+            {advancing ? '…' : `Move to ${nextLabel}`}
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
 

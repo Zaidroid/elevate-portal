@@ -170,6 +170,9 @@ export const CATEGORY_META: Record<
 
 // Pipeline column definitions used by the portal Advisors kanban. Order
 // matches the standalone app's PipelineView so muscle memory carries over.
+// `Archived` is intentionally excluded from the kanban — archived advisors
+// are pre-Cohort 3 historicals or anything pulled out of the active funnel,
+// shown only when "Show archived" is toggled in the page header.
 export const PIPELINE_COLUMNS: { id: AdvisorPipelineId; label: string; tone: string }[] = [
   { id: 'new', label: 'New', tone: 'slate' },
   { id: 'acknowledged', label: 'Acknowledged', tone: 'teal' },
@@ -182,6 +185,59 @@ export const PIPELINE_COLUMNS: { id: AdvisorPipelineId; label: string; tone: str
   { id: 'on_hold', label: 'On Hold', tone: 'slate' },
   { id: 'rejected', label: 'Rejected', tone: 'red' },
 ];
+
+// Workflow guidance: for each pipeline status, the team member's next move.
+// Surfaced as a pill on each kanban card and as a "Suggested next action"
+// card at the top of the detail drawer.
+export const NEXT_ACTION: Record<AdvisorPipelineId, { label: string; intent: string; nextStatus?: AdvisorPipelineId }> = {
+  new: {
+    label: 'Acknowledge',
+    intent: 'Send the welcome email and confirm receipt',
+    nextStatus: 'acknowledged',
+  },
+  acknowledged: {
+    label: 'Allocate',
+    intent: 'Assign to a Profile Manager who owns the next steps',
+    nextStatus: 'allocated',
+  },
+  allocated: {
+    label: 'Schedule intro',
+    intent: 'Book the 30-minute intro call with the assignee',
+    nextStatus: 'intro_sched',
+  },
+  intro_sched: {
+    label: 'Run intro call',
+    intent: 'Have the call, capture notes, then move to Intro Done',
+    nextStatus: 'intro_done',
+  },
+  intro_done: {
+    label: 'Move to assessment',
+    intent: 'Schedule the assessment session or async review',
+    nextStatus: 'assessment',
+  },
+  assessment: {
+    label: 'Decide',
+    intent: 'Approve, reject, or hold based on assessment outcome',
+    nextStatus: 'approved',
+  },
+  approved: {
+    label: 'Match to a company',
+    intent: 'Find the right Elevate company; set assignment fields',
+    nextStatus: 'matched',
+  },
+  matched: {
+    label: 'Monitor engagement',
+    intent: 'Track the engagement; create follow-ups if anything stalls',
+  },
+  on_hold: {
+    label: 'Review weekly',
+    intent: 'Re-activate or move to Rejected to clear the backlog',
+  },
+  rejected: {
+    label: 'Archive',
+    intent: 'No further action — keep the record for reference',
+  },
+};
 
 export type AdvisorPipelineId =
   | 'new'

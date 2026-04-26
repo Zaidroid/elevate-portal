@@ -130,6 +130,14 @@ export const SHEETS: Record<string, ModuleConfig> = {
       lookups: 'Lookups',
     },
   },
+  // Live Google Form responses sheet — read-only, the source of truth for
+  // new advisor submissions. The portal periodically pulls new rows and
+  // appends them to the Advisors tab in the workbook above.
+  advisorsFormResponses: {
+    label: 'Non-Technical Advisors Responses (form)',
+    sheetId: env('VITE_SHEET_ADVISORS_FORM_RESPONSES'),
+    tabs: { responses: 'Form Responses 1' },
+  },
 };
 
 export type ModuleKey = keyof typeof SHEETS;

@@ -8,14 +8,18 @@
 import { useMemo, useState } from 'react';
 import {
   Activity as ActivityIcon,
+  AlertCircle,
+  Archive,
   Award,
   BarChart3,
   Calendar,
+  CloudDownload,
   Download,
   ExternalLink,
   Kanban as KanbanIcon,
   RefreshCw,
   Search,
+  Sparkles,
   Table as TableIcon,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
@@ -57,6 +61,7 @@ import { AdvisorFollowUpsTab } from './AdvisorFollowUpsTab';
 import { AdvisorActivityTab } from './AdvisorActivityTab';
 import { AdvisorDetailDrawer } from './AdvisorDetailDrawer';
 import { AdvisorDashboard } from './AdvisorDashboard';
+import { importNewFormResponses } from './importFromFormResponses';
 
 const PIPELINE_LABEL_BY_ID: Record<AdvisorPipelineId, string> = {
   new: 'New',
@@ -93,6 +98,10 @@ export function AdvisorsPage() {
   const [filterCountry, setFilterCountry] = useState<string>('');
   const [filterCategory, setFilterCategory] = useState<string>('');
   const [filterPipeline, setFilterPipeline] = useState<string>('');
+  // Default view hides Archived (pre-Cohort 3 historicals + parked rows).
+  // Admin toggles it on to inspect the archive.
+  const [showArchived, setShowArchived] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const enriched = useMemo(
@@ -100,14 +109,30 @@ export function AdvisorsPage() {
     [advHook.rows, fuHook.rows, cmtHook.rows, actHook.rows]
   );
 
+  // Active = everything not archived. The kanban + roster default to this.
+  const active = useMemo(
+    () => showArchived ? enriched : enriched.filter(a => a.pipeline_status !== 'Archived'),
+    [enriched, showArchived]
+  );
+
+  const archivedCount = useMemo(
+    () => enriched.filter(a => a.pipeline_status === 'Archived').length,
+    [enriched]
+  );
+
+  const newEntries = useMemo(
+    () => active.filter(a => (a.pipeline_status || 'New') === 'New'),
+    [active]
+  );
+
   const filtered = useMemo(() => {
-    return enriched.filter(a => {
+    return active.filter(a => {
       if (filterCountry && normalizeCountry(a.country) !== filterCountry) return false;
       if (filterCategory && a.stage2.primary !== filterCategory) return false;
       if (filterPipeline && a.pipeline_status !== filterPipeline) return false;
       return matchesQuery(a, query);
     });
-  }, [enriched, query, filterCountry, filterCategory, filterPipeline]);
+  }, [active, query, filterCountry, filterCategory, filterPipeline]);
 
   const countries = useMemo(() => {
     const set = new Set<string>();
@@ -249,6 +274,53 @@ export function AdvisorsPage() {
     }
   };
 
+  const handleImportFromForm = async () => {
+    if (!sheetId) return;
+    const formSheetId = getSheetId('advisorsFormResponses');
+    const formTab = getTab('advisorsFormResponses', 'responses');
+    if (!formSheetId) {
+      toast.error('Set VITE_SHEET_ADVISORS_FORM_RESPONSES in your environment to enable form import.');
+      return;
+    }
+    setImporting(true);
+    try {
+      const result = await importNewFormResponses({
+        formSheetId,
+        formTabName: formTab,
+        destSheetId: sheetId,
+        destTabName: tabAdvisors,
+        destHeaders: advHook.headers,
+        existingAdvisors: advHook.rows,
+        userEmail,
+      });
+      if (result.errors.length > 0) {
+        toast.error(`Import error: ${result.errors[0]}`);
+      } else if (result.imported === 0) {
+        toast.success(`Form has ${result.fetched} entries · ${result.alreadyKnown} already in tracker · 0 new`);
+      } else {
+        toast.success(`Imported ${result.imported} new entries (${result.archived} archived as pre-2026)`);
+      }
+      await advHook.refresh();
+      if (sheetId && result.imported > 0) {
+        // Append a single ActivityLog row summarising the import so the audit
+        // trail captures who pulled when.
+        await appendActivity(sheetId, tabActivity, {
+          user_email: userEmail,
+          advisor_id: '',
+          action: 'form_import',
+          field: 'count',
+          new_value: String(result.imported),
+          details: `${result.fetched} fetched, ${result.alreadyKnown} dupes, ${result.archived} archived`,
+        });
+        await actHook.refresh();
+      }
+    } catch (err) {
+      toast.error(`Import failed: ${(err as Error).message}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const handleAddComment = async (body: string) => {
     if (!selected) return;
     const id = `CMT-${Date.now()}`;
@@ -291,7 +363,7 @@ export function AdvisorsPage() {
   const loading = advHook.loading;
 
   const tabs: TabItem[] = [
-    { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: enriched.length },
+    { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: active.length },
     { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: filtered.length },
     {
       value: 'followups',
@@ -314,13 +386,25 @@ export function AdvisorsPage() {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Advisors</h1>
-            <Badge tone="teal">{enriched.length}</Badge>
+            <Badge tone="teal">{active.length} active</Badge>
+            {archivedCount > 0 && (
+              <Badge tone="neutral">{archivedCount} archived</Badge>
+            )}
           </div>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Triage non-technical advisors. Stage 1 + Stage 2 scoring, kanban, follow-ups, audit.
+            Triage Cohort 3 advisors (post-2026). Pre-2026 entries are archived; toggle below to see them.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {canEdit && (
+            <Button onClick={handleImportFromForm} disabled={importing} variant="primary">
+              <CloudDownload className={`h-4 w-4 ${importing ? 'animate-pulse' : ''}`} />
+              {importing ? 'Pulling…' : 'Pull from form'}
+            </Button>
+          )}
+          <Button variant="ghost" onClick={() => setShowArchived(v => !v)}>
+            <Archive className="h-4 w-4" /> {showArchived ? 'Hide archived' : 'Show archived'}
+          </Button>
           <Button variant="ghost" onClick={() => { advHook.refresh(); fuHook.refresh(); actHook.refresh(); cmtHook.refresh(); }}>
             <RefreshCw className="h-4 w-4" /> Refresh
           </Button>
@@ -333,6 +417,36 @@ export function AdvisorsPage() {
           </Button>
         </div>
       </header>
+
+      {newEntries.length > 0 && (
+        <Card accent="red">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="rounded-full bg-brand-red/15 p-2 text-brand-red">
+                <Sparkles className="h-5 w-5" />
+              </div>
+              <div>
+                <div className="text-base font-bold text-navy-500 dark:text-white">
+                  {newEntries.length} new {newEntries.length === 1 ? 'entry' : 'entries'} waiting for triage
+                </div>
+                <div className="text-xs text-slate-500 dark:text-slate-400">
+                  These came in via the application form and have not been acknowledged yet.
+                  Open each card and run through Acknowledge → Allocate → Intro.
+                </div>
+              </div>
+            </div>
+            <Button
+              variant="primary"
+              onClick={() => {
+                setTab('pipeline');
+                setFilterPipeline('New');
+              }}
+            >
+              <AlertCircle className="h-4 w-4" /> Triage now
+            </Button>
+          </div>
+        </Card>
+      )}
 
       {error && (
         <Card className="border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950">
@@ -385,6 +499,14 @@ export function AdvisorsPage() {
               {label}
             </button>
           ))}
+          {showArchived && (
+            <button
+              onClick={() => setFilterPipeline('Archived')}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${filterPipeline === 'Archived' ? 'bg-slate-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-navy-700 dark:text-slate-200'}`}
+            >
+              Archived
+            </button>
+          )}
         </div>
       </Card>
 

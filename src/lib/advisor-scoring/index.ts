@@ -11,6 +11,7 @@ export {
   DEFAULT_CATEGORY_AI,
   CATEGORY_META,
   PIPELINE_COLUMNS,
+  NEXT_ACTION,
 } from './config';
 export type { AdvisorPipelineId } from './config';
 export { computeStage1, computeStage2, scoreAdvisor } from './score';

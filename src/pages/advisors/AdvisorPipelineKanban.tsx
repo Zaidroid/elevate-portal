@@ -4,9 +4,10 @@
 import { Kanban, Badge } from '../../lib/ui';
 import type { KanbanColumn, KanbanItem } from '../../lib/ui';
 import type { Tone } from '../../lib/ui';
-import { CATEGORY_META, PIPELINE_COLUMNS } from '../../lib/advisor-scoring';
+import { CATEGORY_META, NEXT_ACTION, PIPELINE_COLUMNS } from '../../lib/advisor-scoring';
 import type { AdvisorPipelineId } from '../../lib/advisor-scoring';
 import type { EnrichedAdvisor } from './utils';
+import { ArrowRight } from 'lucide-react';
 
 type AdvItem = KanbanItem<AdvisorPipelineId> & {
   advisor: EnrichedAdvisor;
@@ -40,11 +41,15 @@ export function AdvisorPipelineKanban({
     description: c.id === 'on_hold' ? 'Idle — review weekly' : undefined,
   }));
 
-  const items: AdvItem[] = advisors.map(a => ({
-    id: a.advisor_id,
-    status: (normalizeStatus(a.pipeline_status) as AdvisorPipelineId),
-    advisor: a,
-  }));
+  // Drop archived advisors entirely — they should not appear in the pipeline.
+  // The roster tab still shows them when "Show archived" is on.
+  const items: AdvItem[] = advisors
+    .filter(a => a.pipeline_status !== 'Archived')
+    .map(a => ({
+      id: a.advisor_id,
+      status: (normalizeStatus(a.pipeline_status) as AdvisorPipelineId),
+      advisor: a,
+    }));
 
   return (
     <Kanban<AdvisorPipelineId, AdvItem>
@@ -61,12 +66,18 @@ export function AdvisorPipelineKanban({
 
 function AdvisorCard({ advisor }: { advisor: EnrichedAdvisor }) {
   const cat = CATEGORY_META[advisor.stage2.primary] || CATEGORY_META.Unqualified;
+  const isNew = (advisor.pipeline_status || 'New') === 'New';
+  const status = normalizeStatus(advisor.pipeline_status);
+  const nextAction = NEXT_ACTION[status];
   return (
-    <div className="space-y-2">
+    <div className={`space-y-2 ${isNew ? '-m-1 rounded-lg p-1 ring-2 ring-brand-red/40' : ''}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-bold text-navy-500 dark:text-white">
-            {advisor.full_name || '(unnamed)'}
+          <div className="flex items-center gap-1.5">
+            {isNew && <span className="h-1.5 w-1.5 rounded-full bg-brand-red animate-pulse" />}
+            <div className="truncate text-sm font-bold text-navy-500 dark:text-white">
+              {advisor.full_name || '(unnamed)'}
+            </div>
           </div>
           <div className="truncate text-[11px] text-slate-500 dark:text-slate-400">
             {[advisor.position, advisor.employer].filter(Boolean).join(' @ ')}
@@ -76,8 +87,14 @@ function AdvisorCard({ advisor }: { advisor: EnrichedAdvisor }) {
       </div>
       <div className="flex items-center justify-between text-[11px] text-slate-500">
         <span>{advisor.country || '—'}</span>
-        <span className="font-mono">S1 {advisor.stage1.total}</span>
+        <span className="font-mono">S1 {advisor.stage1.total}{advisor.stage1.pass ? ' ✓' : ''}</span>
       </div>
+      {nextAction && (
+        <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold text-slate-600 dark:border-navy-700 dark:bg-navy-700 dark:text-slate-300">
+          <ArrowRight className="h-3 w-3" />
+          <span className="truncate">{nextAction.label}</span>
+        </div>
+      )}
       {(advisor.open_followups > 0 || advisor.overdue_followups > 0) && (
         <div className="flex flex-wrap gap-1">
           {advisor.overdue_followups > 0 && (
