@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   BarChart3,
+  Bell,
   Briefcase,
   Building2,
   ChevronRight,
@@ -67,7 +68,9 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Insights',
     items: [
+      { to: '/alerts', label: 'Alerts', icon: <Bell className="h-[17px] w-[17px]" /> },
       { to: '/reports', label: 'Reports', icon: <BarChart3 className="h-[17px] w-[17px]" /> },
+      { to: '/logframes', label: 'Logframes', icon: <BarChart3 className="h-[17px] w-[17px]" /> },
       { to: '/team', label: 'Team roster', icon: <Users className="h-[17px] w-[17px]" />, adminOnly: true },
     ],
   },
@@ -75,6 +78,7 @@ const NAV_GROUPS: NavGroup[] = [
     label: 'Admin',
     items: [
       { to: '/import', label: 'Bulk import', icon: <Upload className="h-[17px] w-[17px]" />, adminOnly: true },
+      { to: '/admin/lookups', label: 'Lookups', icon: <ClipboardList className="h-[17px] w-[17px]" />, adminOnly: true },
     ],
   },
 ];

@@ -120,7 +120,15 @@ export const SHEETS: Record<string, ModuleConfig> = {
   advisors: {
     label: 'E3 - Non-Technical Advisors',
     sheetId: env('VITE_SHEET_ADVISORS'),
-    tabs: { advisors: 'Advisors', mentors: 'Mentors', lookups: 'Lookups' },
+    tabs: {
+      dashboard: 'Dashboard',
+      advisors: 'Advisors',
+      followups: 'FollowUps',
+      activity: 'ActivityLog',
+      comments: 'Comments',
+      mentors: 'Mentors',
+      lookups: 'Lookups',
+    },
   },
 };
 

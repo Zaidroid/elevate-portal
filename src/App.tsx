@@ -16,6 +16,9 @@ import { ReportsPage } from './pages/reports/ReportsPage';
 import { FreelancersPage } from './pages/freelancers/FreelancersPage';
 import { AdvisorsPage } from './pages/advisors/AdvisorsPage';
 import { TeamPage } from './pages/team/TeamPage';
+import { AlertsPage } from './pages/alerts/AlertsPage';
+import { LookupsPage } from './pages/admin/LookupsPage';
+import { LogframesPage } from './pages/logframes/LogframesPage';
 import { BridgePage } from './pages/link/BridgePage';
 // Lazy: ImportPage pulls in xlsx (~350 KB), keep it out of the main bundle.
 const ImportPage = lazy(() => import('./pages/import/ImportPage').then(m => ({ default: m.ImportPage })));
@@ -179,6 +182,9 @@ function AuthGate({
           <Route path="/advisors" element={<AdvisorsPage />} />
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/team" element={<TeamPage />} />
+          <Route path="/alerts" element={<AlertsPage />} />
+          <Route path="/admin/lookups" element={<LookupsPage />} />
+          <Route path="/logframes" element={<LogframesPage />} />
           <Route path="/link/:app" element={<BridgePage />} />
           <Route
             path="/import"
