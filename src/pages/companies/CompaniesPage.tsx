@@ -1,12 +1,37 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Users, Download } from 'lucide-react';
+import {
+  AlertTriangle,
+  BarChart3,
+  Download,
+  Kanban as KanbanIcon,
+  Plus,
+  RefreshCw,
+  Table as TableIcon,
+  Users,
+} from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { useSheetDoc } from '../../lib/two-way-sync';
 import { getSheetId, getTab } from '../../config/sheets';
-import { Badge, Button, Card, CardHeader, DataTable, Drawer, EmptyState, FilterBar, statusTone, useToast, downloadCsv, timestampedFilename } from '../../lib/ui';
-import type { Column, FilterGroup, FilterValues } from '../../lib/ui';
-import { displayName, getProfileManagers } from '../../config/team';
+import {
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  DataTable,
+  Drawer,
+  EmptyState,
+  FilterBar,
+  Kanban,
+  Tabs,
+  statusTone,
+  useToast,
+  downloadCsv,
+  timestampedFilename,
+} from '../../lib/ui';
+import type { Column, FilterGroup, FilterValues, KanbanColumn, KanbanItem, TabItem, Tone } from '../../lib/ui';
+import { displayName, getProfileManagers, isAdmin } from '../../config/team';
+import { fetchInterviewedCompanies, isInterviewed } from './interviewedSource';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
 // Company schema so keys are camelCase.
@@ -65,15 +90,36 @@ function padId(n: string): string {
   return Number.isFinite(num) && num > 0 ? `A-${num.toString().padStart(4, '0')}` : '';
 }
 
+// Order in which statuses live within the pipeline. Used to compute "the
+// higher of (master.status, override)" so we never demote a company by
+// applying the Interviewed override on top of an Onboarded record.
+const STATUS_ORDER: Record<string, number> = {
+  Applicant: 0,
+  Shortlisted: 1,
+  Interviewed: 2,
+  Selected: 3,
+  Onboarded: 4,
+  Active: 5,
+  Graduated: 6,
+  Withdrawn: -1,
+};
+function maxStatus(a: string, b: string): string {
+  const ra = STATUS_ORDER[a] ?? 0;
+  const rb = STATUS_ORDER[b] ?? 0;
+  return ra >= rb ? a : b;
+}
+
 export function CompaniesPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const toast = useToast();
+  const admin = user ? isAdmin(user.email) : false;
 
   const masterSheetId = getSheetId('companies');
   const selectionSheetId = getSheetId('selection');
   const masterTab = getTab('companies', 'companies');
   const sourceTab = getTab('selection', 'sourceData');
+  const interviewedSheetId = getSheetId('companiesInterviewed');
 
   const master = useSheetDoc<Master>(
     masterSheetId || null,
@@ -89,14 +135,35 @@ export function CompaniesPage() {
     { userEmail: user?.email }
   );
 
+  // Read-only set of company names that have been interviewed. Auto-loads
+  // on mount; surfaces errors but never blocks the page.
+  const [interviewedSet, setInterviewedSet] = useState<Set<string>>(new Set());
+  const [interviewedTabs, setInterviewedTabs] = useState<string[]>([]);
+  const [interviewedErrors, setInterviewedErrors] = useState<string[]>([]);
+  useEffect(() => {
+    if (!interviewedSheetId) return;
+    let cancelled = false;
+    (async () => {
+      const r = await fetchInterviewedCompanies(interviewedSheetId);
+      if (cancelled) return;
+      setInterviewedSet(r.names);
+      setInterviewedTabs(r.tabs);
+      setInterviewedErrors(r.errors);
+    })();
+    return () => { cancelled = true; };
+  }, [interviewedSheetId]);
+
   const [query, setQuery] = useState('');
   const [filters, setFilters] = useState<FilterValues>({ pm: [], stage: [], status: [], fund: [] });
   const [creating, setCreating] = useState(false);
-  // Cohort 3 went through filtration + interview cycles already. Default
-  // the page to the post-selection set so the team's daily view is the
-  // active roster, not the raw applicant pool. Toggle off to inspect the
-  // full master + applicant join.
-  const [selectedOnly, setSelectedOnly] = useState(true);
+  const [view, setView] = useState<'dashboard' | 'pipeline' | 'roster'>('dashboard');
+  const [savedView, setSavedView] = useState<'' | 'mine' | 'unassigned' | 'interviewed' | 'active'>('');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkRunning, setBulkRunning] = useState(false);
+  // The 107 Cohort 3 applicants are still the right *default* surface;
+  // when the team flips the toggle we hide post-selection rows so the
+  // daily roster is just the active portfolio.
+  const [selectedOnly, setSelectedOnly] = useState(false);
   const SELECTED_STATUSES = ['Selected', 'Onboarded', 'Active', 'Interviewed', 'Graduated'];
 
   const pms = getProfileManagers();
@@ -128,6 +195,15 @@ export function CompaniesPage() {
       const m = key ? masterByName.get(key) : undefined;
       if (m?.company_id) seenMasterIds.add(m.company_id);
 
+      // Status resolution:
+      // 1) Start with master.status (fallback to 'Applicant' when blank)
+      // 2) If the company name is in the interviewed source, lift to at
+      //    least 'Interviewed' (never demote a higher status like Onboarded
+      //    or Active that the master already has)
+      const baseStatus = m?.status?.trim() || 'Applicant';
+      const interviewed = isInterviewed(name, interviewedSet);
+      const effectiveStatus = interviewed ? maxStatus(baseStatus, 'Interviewed') : baseStatus;
+
       out.push({
         route_id: a.id || padId(a.id) || key,
         applicant_id: a.id || '',
@@ -140,7 +216,7 @@ export function CompaniesPage() {
         readiness_score: a.readinessScore || '',
         fund_code: m?.fund_code || '',
         stage: m?.stage || 'Applied',
-        status: m?.status || 'Applicant',
+        status: effectiveStatus,
         profile_manager_email: m?.profile_manager_email || '',
         contact_email: a.contactEmail || a.email || '',
         source: m ? 'both' : 'applicant',
@@ -150,6 +226,9 @@ export function CompaniesPage() {
     // Include Master rows that don't correspond to any applicant (admin-added companies).
     for (const m of masterE3) {
       if (!m.company_id || seenMasterIds.has(m.company_id)) continue;
+      const baseStatus = m.status?.trim() || '';
+      const interviewed = isInterviewed(m.company_name || '', interviewedSet);
+      const effectiveStatus = interviewed ? maxStatus(baseStatus || 'Applicant', 'Interviewed') : baseStatus;
       out.push({
         route_id: m.company_id,
         applicant_id: '',
@@ -162,7 +241,7 @@ export function CompaniesPage() {
         readiness_score: '',
         fund_code: m.fund_code || '',
         stage: m.stage || '',
-        status: m.status || '',
+        status: effectiveStatus,
         profile_manager_email: m.profile_manager_email || '',
         contact_email: '',
         source: 'master',
@@ -170,12 +249,31 @@ export function CompaniesPage() {
     }
 
     return out;
-  }, [applicants.rows, masterE3, masterByName]);
+  }, [applicants.rows, masterE3, masterByName, interviewedSet]);
+
+  // The Selected-only checkbox is one knob; the saved-view chips above
+  // the tabs are another. We compose them: saved-view first, then the
+  // Selected-only collapse, then the per-column FilterBar filters.
+  const userEmail = (user?.email || '').toLowerCase();
+  const filteredBySavedView = useMemo(() => {
+    switch (savedView) {
+      case 'mine':
+        return joined.filter(r => (r.profile_manager_email || '').toLowerCase() === userEmail);
+      case 'unassigned':
+        return joined.filter(r => !r.profile_manager_email);
+      case 'interviewed':
+        return joined.filter(r => isInterviewed(r.company_name, interviewedSet));
+      case 'active':
+        return joined.filter(r => r.status === 'Active' || r.status === 'Onboarded');
+      default:
+        return joined;
+    }
+  }, [savedView, joined, userEmail, interviewedSet]);
 
   const filteredBySelection = useMemo(() => {
-    if (!selectedOnly) return joined;
-    return joined.filter(r => SELECTED_STATUSES.includes(r.status));
-  }, [joined, selectedOnly]);
+    if (!selectedOnly) return filteredBySavedView;
+    return filteredBySavedView.filter(r => SELECTED_STATUSES.includes(r.status));
+  }, [filteredBySavedView, selectedOnly]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -328,16 +426,71 @@ export function CompaniesPage() {
   const loading = applicants.loading || master.loading;
   const error = applicants.error || master.error;
 
+  // Bulk actions on selected rows.
+  const handleBulkSetStatus = async (status: string) => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!window.confirm(`Set status to "${status}" for ${ids.length} compan${ids.length === 1 ? 'y' : 'ies'}?`)) return;
+    setBulkRunning(true);
+    let ok = 0;
+    try {
+      for (const id of ids) {
+        const m = master.rows.find(r => r.company_id === id);
+        if (!m) continue;
+        try { await master.updateRow(id, { status } as Partial<Master>); ok += 1; }
+        catch (err) { console.warn('[companies] bulk status skipped', id, err); }
+      }
+      toast.success('Bulk update', `${ok} of ${ids.length} updated to ${status}`);
+      setSelectedIds(new Set());
+    } finally {
+      setBulkRunning(false);
+    }
+  };
+
+  const handleBulkAssignPM = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const pmEmail = window.prompt('Profile Manager email (e.g. doaa@gazaskygeeks.com):');
+    if (!pmEmail) return;
+    setBulkRunning(true);
+    let ok = 0;
+    try {
+      for (const id of ids) {
+        try { await master.updateRow(id, { profile_manager_email: pmEmail } as Partial<Master>); ok += 1; }
+        catch (err) { console.warn('[companies] bulk PM skipped', id, err); }
+      }
+      toast.success('Bulk assign', `${ok} of ${ids.length} assigned to ${pmEmail}`);
+      setSelectedIds(new Set());
+    } finally {
+      setBulkRunning(false);
+    }
+  };
+
+  const interviewedCount = useMemo(
+    () => joined.filter(r => isInterviewed(r.company_name, interviewedSet)).length,
+    [joined, interviewedSet]
+  );
+
+  const tabs: TabItem[] = [
+    { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
+    { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: counts.total },
+    { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: counts.filtered },
+  ];
+
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Companies</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Companies</h1>
+            <Badge tone="teal">{joined.length} cohort 3</Badge>
+            {interviewedSet.size > 0 && (
+              <Badge tone="amber">{interviewedCount} interviewed</Badge>
+            )}
+          </div>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Cohort 3 only. {selectedOnly
-              ? <>Showing the post-selection roster ({filteredBySelection.length} of {joined.length}). Toggle "Selected only" to see all applicants.</>
-              : <>{applicants.rows.length} applicants, {masterE3.length} master records. Showing {counts.filtered} of {counts.total}.</>
-            }
+            107 Cohort 3 applicants. Status of "Interviewed" is sourced from the team's interviewed-companies sheet
+            ({interviewedTabs.length > 0 ? `${interviewedSet.size} names from ${interviewedTabs.length} tab${interviewedTabs.length === 1 ? '' : 's'}` : 'not yet loaded'}).
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -351,7 +504,7 @@ export function CompaniesPage() {
             Selected only
           </label>
           <Button variant="ghost" onClick={() => { applicants.refresh(); master.refresh(); }}>
-            Refresh
+            <RefreshCw className="h-4 w-4" /> Refresh
           </Button>
           <Button
             variant="ghost"
@@ -371,37 +524,132 @@ export function CompaniesPage() {
           <p className="text-sm text-red-700 dark:text-red-300">Failed to load: {error.message}</p>
         </Card>
       )}
+      {interviewedErrors.length > 0 && (
+        <Card className="border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950">
+          <p className="text-xs text-amber-800 dark:text-amber-200">
+            <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+            Couldn't load the interviewed-companies sheet: {interviewedErrors[0]}
+          </p>
+        </Card>
+      )}
 
-      <FilterBar
-        searchValue={query}
-        onSearchChange={setQuery}
-        searchPlaceholder="Search by company, sector, city, governorate…"
-        groups={filterGroups}
-        values={filters}
-        onValuesChange={setFilters}
-        total={counts.total}
-        filtered={counts.filtered}
-        resultNoun="companies"
-      />
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs uppercase tracking-wider text-slate-500">Quick views:</span>
+        {([
+          { id: '', label: 'All' },
+          { id: 'mine', label: 'My portfolio' },
+          { id: 'interviewed', label: `Interviewed (${interviewedCount})` },
+          { id: 'active', label: `Active + Onboarded (${joined.filter(r => r.status === 'Active' || r.status === 'Onboarded').length})` },
+          { id: 'unassigned', label: `Unassigned (${joined.filter(r => !r.profile_manager_email).length})` },
+        ] as const).map(v => (
+          <button
+            key={v.id}
+            onClick={() => setSavedView(v.id as typeof savedView)}
+            className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+              savedView === v.id
+                ? 'bg-brand-teal text-white'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-navy-700 dark:text-slate-200'
+            }`}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
 
-      <DataTable
-        columns={columns}
-        rows={filtered}
-        loading={loading}
-        onRowClick={r => navigate(`/companies/${encodeURIComponent(r.route_id)}`)}
-        emptyState={
-          joined.length === 0 ? (
-            <EmptyState
-              title="No companies yet"
-              description="Once Source Data loads from the selection workbook, the 107 Cohort 3 applicants will show up here."
-              icon={<Users className="h-8 w-8" />}
-              action={<Button onClick={() => setCreating(true)}><Plus className="h-4 w-4" /> New Company</Button>}
-            />
-          ) : (
-            'No matches for your filters.'
-          )
-        }
-      />
+      <Tabs items={tabs} value={view} onChange={v => setView(v as typeof view)} />
+
+      {view === 'dashboard' && (
+        <CompanyDashboard
+          rows={filteredBySavedView}
+          interviewedCount={interviewedCount}
+          loading={loading}
+        />
+      )}
+
+      {view === 'pipeline' && (
+        <CompanyPipelineKanban
+          rows={filteredBySelection}
+          onCardClick={r => navigate(`/companies/${encodeURIComponent(r.route_id)}`)}
+        />
+      )}
+
+      {view === 'roster' && (
+        <>
+          <FilterBar
+            searchValue={query}
+            onSearchChange={setQuery}
+            searchPlaceholder="Search by company, sector, city, governorate…"
+            groups={filterGroups}
+            values={filters}
+            onValuesChange={setFilters}
+            total={counts.total}
+            filtered={counts.filtered}
+            resultNoun="companies"
+          />
+          {selectedIds.size > 0 && admin && (
+            <Card accent="teal">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-sm font-bold text-navy-500 dark:text-white">{selectedIds.size} selected</span>
+                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Interviewed')} disabled={bulkRunning}>Mark Interviewed</Button>
+                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Selected')} disabled={bulkRunning}>Mark Selected</Button>
+                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Onboarded')} disabled={bulkRunning}>Mark Onboarded</Button>
+                <Button size="sm" variant="ghost" onClick={() => handleBulkSetStatus('Active')} disabled={bulkRunning}>Mark Active</Button>
+                <Button size="sm" variant="ghost" onClick={handleBulkAssignPM} disabled={bulkRunning}>Assign PM…</Button>
+                <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())} disabled={bulkRunning}>Clear</Button>
+              </div>
+            </Card>
+          )}
+          <DataTable
+            columns={admin
+              ? [{
+                  key: '_select',
+                  header: (
+                    <input
+                      type="checkbox"
+                      checked={filtered.length > 0 && filtered.every(r => selectedIds.has(r.company_id))}
+                      ref={el => { if (el) el.indeterminate = filtered.some(r => selectedIds.has(r.company_id)) && !filtered.every(r => selectedIds.has(r.company_id)); }}
+                      onChange={() => {
+                        const next = new Set(selectedIds);
+                        const allSel = filtered.every(r => selectedIds.has(r.company_id));
+                        if (allSel) for (const r of filtered) next.delete(r.company_id);
+                        else for (const r of filtered) next.add(r.company_id);
+                        setSelectedIds(next);
+                      }}
+                    />
+                  ),
+                  width: '36px',
+                  render: (r: Row) => (
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(r.company_id)}
+                      onClick={e => e.stopPropagation()}
+                      onChange={() => {
+                        const next = new Set(selectedIds);
+                        if (next.has(r.company_id)) next.delete(r.company_id); else next.add(r.company_id);
+                        setSelectedIds(next);
+                      }}
+                    />
+                  ),
+                } satisfies Column<Row>, ...columns]
+              : columns}
+            rows={filtered}
+            loading={loading}
+            onRowClick={r => navigate(`/companies/${encodeURIComponent(r.route_id)}`)}
+            emptyState={
+              joined.length === 0 ? (
+                <EmptyState
+                  title="No companies yet"
+                  description="Once Source Data loads from the selection workbook, the 107 Cohort 3 applicants will show up here."
+                  icon={<Users className="h-8 w-8" />}
+                  action={<Button onClick={() => setCreating(true)}><Plus className="h-4 w-4" /> New Company</Button>}
+                />
+              ) : (
+                'No matches for your filters.'
+              )
+            }
+          />
+        </>
+      )}
 
       <CreateCompanyDrawer
         open={creating}
@@ -416,6 +664,211 @@ export function CompaniesPage() {
           }
         }}
       />
+    </div>
+  );
+}
+
+// ----- Pipeline kanban -------------------------------------------------
+
+const PIPELINE_COLUMNS: { id: string; label: string; tone: Tone }[] = [
+  { id: 'Applicant', label: 'Applicant', tone: 'neutral' },
+  { id: 'Shortlisted', label: 'Shortlisted', tone: 'amber' },
+  { id: 'Interviewed', label: 'Interviewed', tone: 'teal' },
+  { id: 'Selected', label: 'Selected', tone: 'orange' },
+  { id: 'Onboarded', label: 'Onboarded', tone: 'green' },
+  { id: 'Active', label: 'Active', tone: 'green' },
+  { id: 'Graduated', label: 'Graduated', tone: 'neutral' },
+  { id: 'Withdrawn', label: 'Withdrawn', tone: 'red' },
+];
+
+function CompanyPipelineKanban({
+  rows,
+  onCardClick,
+}: {
+  rows: Row[];
+  onCardClick: (r: Row) => void;
+}) {
+  const cols: KanbanColumn<string>[] = PIPELINE_COLUMNS.map(c => ({ id: c.id, label: c.label, tone: c.tone }));
+  const items: Array<KanbanItem<string> & { row: Row }> = rows.map(r => ({
+    id: r.route_id || r.company_id,
+    status: r.status || 'Applicant',
+    row: r,
+  }));
+  return (
+    <Kanban<string, KanbanItem<string> & { row: Row }>
+      columns={cols}
+      items={items}
+      readOnly
+      onStatusChange={async () => {}}
+      onCardClick={item => onCardClick(item.row)}
+      renderCard={item => (
+        <div className="space-y-1">
+          <div className="truncate text-sm font-bold text-navy-500 dark:text-white">{item.row.company_name || '—'}</div>
+          <div className="truncate text-2xs text-slate-500">
+            {[item.row.sector, item.row.governorate].filter(Boolean).join(' · ') || '—'}
+          </div>
+          {item.row.profile_manager_email && (
+            <div className="text-2xs text-slate-500">PM: {displayName(item.row.profile_manager_email).split(' ')[0]}</div>
+          )}
+          {item.row.fund_code && (
+            <Badge tone={item.row.fund_code === '97060' ? 'teal' : 'amber'}>
+              {item.row.fund_code === '97060' ? 'Dutch' : 'SIDA'}
+            </Badge>
+          )}
+        </div>
+      )}
+      emptyHint="Empty"
+    />
+  );
+}
+
+// ----- Dashboard --------------------------------------------------------
+
+function CompanyDashboard({
+  rows,
+  interviewedCount,
+  loading,
+}: {
+  rows: Row[];
+  interviewedCount: number;
+  loading: boolean;
+}) {
+  const stats = useMemo(() => {
+    const byStatus: Record<string, number> = {};
+    const byPM: Record<string, number> = {};
+    const byFund: Record<string, number> = {};
+    const bySector: Record<string, number> = {};
+    let unassigned = 0;
+    for (const r of rows) {
+      const s = r.status || 'Applicant';
+      byStatus[s] = (byStatus[s] || 0) + 1;
+      const pm = r.profile_manager_email || '__unassigned__';
+      byPM[pm] = (byPM[pm] || 0) + 1;
+      if (!r.profile_manager_email) unassigned += 1;
+      if (r.fund_code) byFund[r.fund_code] = (byFund[r.fund_code] || 0) + 1;
+      if (r.sector) bySector[r.sector] = (bySector[r.sector] || 0) + 1;
+    }
+    return {
+      total: rows.length,
+      byStatus,
+      byPM,
+      byFund,
+      bySector,
+      unassigned,
+    };
+  }, [rows]);
+
+  if (loading && rows.length === 0) {
+    return (
+      <Card>
+        <EmptyState icon={<RefreshCw className="h-6 w-6 animate-spin" />} title="Loading…" description="Reading from Master + Source Data + Interviewed sources." />
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <Stat label="Total" value={stats.total} tone="navy" />
+        <Stat label="Interviewed" value={interviewedCount} tone="teal" sub="From the read-only source" />
+        <Stat label="Onboarded + Active" value={(stats.byStatus['Onboarded'] || 0) + (stats.byStatus['Active'] || 0)} tone="green" />
+        <Stat label="Unassigned" value={stats.unassigned} tone={stats.unassigned > 0 ? 'amber' : 'green'} sub="Need a Profile Manager" />
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader title="By status" subtitle="Pipeline distribution" />
+          <FunnelList rows={PIPELINE_COLUMNS.map(c => ({ label: c.label, value: stats.byStatus[c.id] || 0, tone: c.tone }))} max={Math.max(1, ...Object.values(stats.byStatus))} />
+        </Card>
+        <Card>
+          <CardHeader title="By PM" subtitle="Workload per Profile Manager" />
+          {Object.keys(stats.byPM).length === 0 ? (
+            <p className="text-xs text-slate-500">No PMs assigned yet.</p>
+          ) : (
+            <ul className="space-y-2">
+              {Object.entries(stats.byPM).sort((a, b) => b[1] - a[1]).map(([pm, n]) => (
+                <li key={pm} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-navy-700">
+                  <span className="truncate font-semibold text-navy-500 dark:text-slate-100">
+                    {pm === '__unassigned__' ? 'Unassigned' : displayName(pm)}
+                  </span>
+                  <Badge tone={pm === '__unassigned__' ? 'amber' : 'navy' as Tone}>{n}</Badge>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+        <Card>
+          <CardHeader title="By fund" subtitle="Dutch (97060) vs SIDA (91763)" />
+          <ul className="space-y-2">
+            <li className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-navy-700">
+              <span className="font-semibold">Dutch (97060)</span>
+              <Badge tone="teal">{stats.byFund['97060'] || 0}</Badge>
+            </li>
+            <li className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-navy-700">
+              <span className="font-semibold">SIDA (91763)</span>
+              <Badge tone="amber">{stats.byFund['91763'] || 0}</Badge>
+            </li>
+            <li className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-navy-700">
+              <span className="font-semibold">Not yet set</span>
+              <Badge tone="neutral">{stats.total - (stats.byFund['97060'] || 0) - (stats.byFund['91763'] || 0)}</Badge>
+            </li>
+          </ul>
+        </Card>
+        <Card>
+          <CardHeader title="Top sectors" subtitle="Most-represented sectors in this view" />
+          {Object.keys(stats.bySector).length === 0 ? (
+            <p className="text-xs text-slate-500">No sector data yet.</p>
+          ) : (
+            <FunnelList
+              rows={Object.entries(stats.bySector).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([s, n]) => ({ label: s, value: n, tone: 'teal' as Tone }))}
+              max={Math.max(1, ...Object.values(stats.bySector))}
+            />
+          )}
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, sub, tone }: { label: string; value: number | string; sub?: string; tone: 'navy' | 'teal' | 'green' | 'amber' }) {
+  const tones: Record<string, string> = {
+    navy: 'bg-navy-500/5 text-navy-500 dark:text-white',
+    teal: 'bg-brand-teal/10 text-brand-teal',
+    green: 'bg-emerald-500/10 text-emerald-700',
+    amber: 'bg-amber-500/10 text-amber-700',
+  };
+  return (
+    <div className={`rounded-xl p-4 ${tones[tone]}`}>
+      <div className="mb-1 text-xs font-bold uppercase tracking-wider opacity-80">{label}</div>
+      <div className="text-3xl font-extrabold tracking-tight">{value}</div>
+      {sub && <div className="mt-1 text-xs opacity-70">{sub}</div>}
+    </div>
+  );
+}
+
+function FunnelList({ rows, max }: { rows: { label: string; value: number; tone: Tone }[]; max: number }) {
+  const toneBg: Record<string, string> = {
+    red: 'bg-brand-red',
+    teal: 'bg-brand-teal',
+    orange: 'bg-brand-orange',
+    amber: 'bg-amber-500',
+    green: 'bg-emerald-500',
+    neutral: 'bg-slate-400',
+  };
+  return (
+    <div className="space-y-2">
+      {rows.map(row => {
+        const pct = max > 0 ? Math.max(2, Math.round((row.value / max) * 100)) : 0;
+        return (
+          <div key={row.label} className="flex items-center gap-3">
+            <div className="w-32 truncate text-xs font-semibold text-navy-500 dark:text-slate-200">{row.label}</div>
+            <div className="relative h-3 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
+              <div className={`h-full rounded-full ${toneBg[row.tone] || 'bg-slate-400'}`} style={{ width: `${pct}%` }} />
+            </div>
+            <div className="w-10 text-right text-xs font-bold text-navy-500 dark:text-slate-200">{row.value}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }

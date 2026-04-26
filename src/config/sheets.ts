@@ -108,6 +108,14 @@ export const SHEETS: Record<string, ModuleConfig> = {
     sheetId: env('VITE_SHEET_PAYMENTS_SOURCE'),
     tabs: {},
   },
+  // Read-only list of Cohort 3 companies that have completed interviews.
+  // The Companies page joins this against the 107 applicants in Source Data
+  // and overrides the status to "Interviewed" (or higher) for any name match.
+  companiesInterviewed: {
+    label: 'Cohort 3 Interviewed Companies (read-only)',
+    sheetId: env('VITE_SHEET_COMPANIES_INTERVIEWED'),
+    tabs: {},
+  },
   teamRoster: {
     label: 'E3 - Team Roster',
     sheetId: env('VITE_SHEET_TEAM_ROSTER'),
