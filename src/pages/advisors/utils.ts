@@ -1,6 +1,7 @@
 // Advisors module helpers: scoring write-back, activity log appender,
 // derived enrichment that joins follow-ups + comments + activity onto an
-// advisor row, formatting + filtering.
+// advisor row, formatting + filtering, SLA computation, conflict-of-interest
+// detection.
 
 import { appendRows } from '../../lib/sheets/client';
 import { computeStage1, computeStage2 } from '../../lib/advisor-scoring';
@@ -13,6 +14,74 @@ import type {
   Stage2Score,
 } from '../../types/advisor';
 
+// ----- SLA / stuck tracking ----------------------------------------------
+
+// Days an advisor is expected to spend in each pipeline status before the UI
+// flags them as "stuck". Conservative defaults; tune in config later.
+export const SLA_DAYS: Record<string, number> = {
+  New: 3,
+  Acknowledged: 7,
+  Allocated: 14,
+  'Intro Scheduled': 14,
+  'Intro Done': 14,
+  Assessment: 14,
+  Approved: 30,
+  Matched: 365,
+  'On Hold': 14,
+  Rejected: 9999,
+  Archived: 9999,
+};
+
+export function daysSinceIso(iso: string): number {
+  if (!iso) return -1;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return -1;
+  return Math.max(0, Math.floor((Date.now() - t) / 86400000));
+}
+
+// Find the timestamp of the most recent status_change activity for an advisor;
+// fall back to updated_at, or empty string if neither exists. Used to compute
+// days_in_status.
+function lastStatusChangeIso(adv: Advisor, activity: ActivityRow[]): string {
+  let latest = '';
+  for (const a of activity) {
+    if (a.advisor_id !== adv.advisor_id) continue;
+    if (a.action !== 'status_change') continue;
+    if (!latest || (a.timestamp || '') > latest) latest = a.timestamp || '';
+  }
+  if (latest) return latest;
+  return adv.updated_at || '';
+}
+
+// ----- Conflict of interest ----------------------------------------------
+
+// Compare advisor.employer against company names. Loose match — strip
+// punctuation, lowercase, and check substring both ways. Returns the
+// matching company_id (or empty string).
+export function detectConflict(
+  employer: string,
+  companies: Array<{ company_id: string; company_name: string }>
+): { company_id: string; company_name: string } | null {
+  const norm = (s: string) =>
+    (s || '')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const e = norm(employer);
+  if (e.length < 3) return null;
+  for (const c of companies) {
+    const n = norm(c.company_name);
+    if (!n) continue;
+    if (e === n || e.includes(n) || n.includes(e)) {
+      return { company_id: c.company_id, company_name: c.company_name };
+    }
+  }
+  return null;
+}
+
+// ----- Enrichment --------------------------------------------------------
+
 export type EnrichedAdvisor = Advisor & {
   stage1: Stage1Score;
   stage2: Stage2Score;
@@ -21,13 +90,25 @@ export type EnrichedAdvisor = Advisor & {
   activity_for: ActivityRow[];
   open_followups: number;
   overdue_followups: number;
+  // SLA: how long this advisor has been in the current status, and whether
+  // that exceeds the expected duration for this status.
+  days_in_status: number;
+  is_stuck: boolean;
+  // Conflict of interest: set when advisor.employer matches a Cohort 3
+  // company name (close enough). Reviewers should not match this advisor
+  // to that company.
+  conflict_company_id?: string;
+  conflict_company_name?: string;
 };
+
+export type CompanyLite = { company_id: string; company_name: string; sector?: string; governorate?: string; status?: string };
 
 export function enrichAdvisors(
   advisors: Advisor[],
   followups: FollowUp[],
   comments: AdvisorComment[],
-  activity: ActivityRow[]
+  activity: ActivityRow[],
+  companies: CompanyLite[] = []
 ): EnrichedAdvisor[] {
   const todayIso = new Date().toISOString().slice(0, 10);
   const fByAdv = new Map<string, FollowUp[]>();
@@ -53,6 +134,18 @@ export function enrichAdvisors(
     const fs = fByAdv.get(adv.advisor_id) || [];
     const open = fs.filter(f => f.status === 'Open');
     const overdue = open.filter(f => f.due_date && f.due_date < todayIso);
+
+    const lastChange = lastStatusChangeIso(adv, activity);
+    const dis = daysSinceIso(lastChange);
+    const status = adv.pipeline_status || 'New';
+    const sla = SLA_DAYS[status] ?? 9999;
+    const stuck = dis > sla;
+
+    const conflict =
+      adv.employer && companies.length > 0
+        ? detectConflict(adv.employer, companies)
+        : null;
+
     return {
       ...adv,
       stage1,
@@ -62,6 +155,10 @@ export function enrichAdvisors(
       activity_for: aByAdv.get(adv.advisor_id) || [],
       open_followups: open.length,
       overdue_followups: overdue.length,
+      days_in_status: dis,
+      is_stuck: stuck,
+      conflict_company_id: conflict?.company_id,
+      conflict_company_name: conflict?.company_name,
     };
   });
 }
@@ -168,4 +265,17 @@ export const COUNTRY_NORMALIZE: Record<string, string> = {
 export function normalizeCountry(c: string): string {
   const k = (c || '').trim().toLowerCase();
   return COUNTRY_NORMALIZE[k] || (c || '').trim();
+}
+
+// ----- Mentions --------------------------------------------------------
+
+// Pulls every @user@domain string out of a comment body. Used by the
+// Alerts inbox to surface mentions targeted at the current viewer.
+export function extractMentions(body: string): string[] {
+  if (!body) return [];
+  const out: string[] = [];
+  const re = /@([\w.+-]+@[\w-]+(?:\.[\w-]+)+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body)) !== null) out.push(m[1].toLowerCase());
+  return Array.from(new Set(out));
 }

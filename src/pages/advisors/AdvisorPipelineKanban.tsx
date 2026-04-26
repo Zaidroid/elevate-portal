@@ -89,6 +89,16 @@ function AdvisorCard({ advisor }: { advisor: EnrichedAdvisor }) {
         <span>{advisor.country || '—'}</span>
         <span className="font-mono">S1 {advisor.stage1.total}{advisor.stage1.pass ? ' ✓' : ''}</span>
       </div>
+      {(advisor.is_stuck || advisor.conflict_company_id) && (
+        <div className="flex flex-wrap gap-1">
+          {advisor.is_stuck && (
+            <Badge tone="red">Stuck {advisor.days_in_status}d</Badge>
+          )}
+          {advisor.conflict_company_id && (
+            <Badge tone="amber">COI: {advisor.conflict_company_name}</Badge>
+          )}
+        </div>
+      )}
       {nextAction && (
         <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold text-slate-600 dark:border-navy-700 dark:bg-navy-700 dark:text-slate-300">
           <ArrowRight className="h-3 w-3" />

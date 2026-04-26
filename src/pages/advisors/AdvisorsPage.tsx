@@ -55,6 +55,7 @@ import {
   matchesQuery,
   normalizeCountry,
   scoreFields,
+  type CompanyLite,
   type EnrichedAdvisor,
 } from './utils';
 import { AdvisorPipelineKanban } from './AdvisorPipelineKanban';
@@ -95,11 +96,45 @@ export function AdvisorsPage() {
   const actHook = useSheetDoc<ActivityRow>(sheetId || null, tabActivity, 'activity_id', { userEmail });
   const cmtHook = useSheetDoc<AdvisorComment>(sheetId || null, tabComments, 'comment_id', { userEmail });
 
+  // Companies — needed for conflict-of-interest detection and smart-match
+  // suggestions in the detail drawer.
+  const companiesId = getSheetId('companies');
+  const { rows: companyRows } = useSheetDoc<Record<string, string>>(
+    companiesId || null,
+    getTab('companies', 'companies'),
+    'company_id'
+  );
+  const companies = useMemo<CompanyLite[]>(
+    () => companyRows.map(c => ({
+      company_id: c.company_id,
+      company_name: c.company_name,
+      sector: c.sector,
+      governorate: c.governorate,
+      status: c.status,
+    })),
+    [companyRows]
+  );
+
   const [tab, setTab] = useState<string>('dashboard');
   const [query, setQuery] = useState('');
   const [filterCountry, setFilterCountry] = useState<string>('');
   const [filterCategory, setFilterCategory] = useState<string>('');
   const [filterPipeline, setFilterPipeline] = useState<string>('');
+  // Saved view: one-click preset that overrides individual filters with
+  // a more expressive predicate (e.g. "stuck > SLA" or "matched this month")
+  // that the basic chips cannot express.
+  const [savedView, setSavedView] = useState<'' | 'mine' | 'stuck' | 's1_fails' | 'matched_month' | 'with_followup'>('');
+  // Bulk selection on Roster — list of selected advisor_ids.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkRunning, setBulkRunning] = useState(false);
+  // Admin opt-in: auto-acknowledge new entries that pass Stage 1 strongly.
+  const [autoAck, setAutoAck] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('advisors:autoAck') === '1';
+    } catch {
+      return false;
+    }
+  });
   // Default view hides Archived (pre-Cohort 3 historicals + parked rows).
   // Admin toggles it on to inspect the archive.
   const [showArchived, setShowArchived] = useState(false);
@@ -110,8 +145,8 @@ export function AdvisorsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const enriched = useMemo(
-    () => enrichAdvisors(advHook.rows, fuHook.rows, cmtHook.rows, actHook.rows),
-    [advHook.rows, fuHook.rows, cmtHook.rows, actHook.rows]
+    () => enrichAdvisors(advHook.rows, fuHook.rows, cmtHook.rows, actHook.rows, companies),
+    [advHook.rows, fuHook.rows, cmtHook.rows, actHook.rows, companies]
   );
 
   // Active = everything not archived. The kanban + roster default to this.
@@ -130,6 +165,26 @@ export function AdvisorsPage() {
     [active]
   );
 
+  // Saved-view predicate. When a saved view is set, it overrides individual
+  // filter chips entirely — easier to reason about than mixing them.
+  const savedViewPredicate = useCallback((a: EnrichedAdvisor): boolean => {
+    const monthPrefix = new Date().toISOString().slice(0, 7);
+    switch (savedView) {
+      case 'mine':
+        return (a.assignee_email || '').toLowerCase() === userEmail.toLowerCase();
+      case 'stuck':
+        return a.is_stuck;
+      case 's1_fails':
+        return !a.stage1.pass;
+      case 'matched_month':
+        return a.pipeline_status === 'Matched' && (a.decision_date || a.updated_at || '').startsWith(monthPrefix);
+      case 'with_followup':
+        return a.open_followups > 0;
+      default:
+        return true;
+    }
+  }, [savedView, userEmail]);
+
   // The kanban already buckets by pipeline_status into columns, so the
   // pipeline-filter chip would just hide other columns and — more
   // importantly — make a dragged card disappear the moment its status no
@@ -137,11 +192,12 @@ export function AdvisorsPage() {
   // roster/follow-ups/activity views.
   const kanbanItems = useMemo(() => {
     return active.filter(a => {
+      if (savedView && !savedViewPredicate(a)) return false;
       if (filterCountry && normalizeCountry(a.country) !== filterCountry) return false;
       if (filterCategory && a.stage2.primary !== filterCategory) return false;
       return matchesQuery(a, query);
     });
-  }, [active, query, filterCountry, filterCategory]);
+  }, [active, query, filterCountry, filterCategory, savedView, savedViewPredicate]);
 
   const filtered = useMemo(() => {
     if (!filterPipeline) return kanbanItems;
@@ -167,6 +223,24 @@ export function AdvisorsPage() {
     if (!adv) return;
     const nextLabel = PIPELINE_LABEL_BY_ID[next];
     if (adv.pipeline_status === nextLabel) return;
+
+    // Stage gate: moving an advisor INTO Approved or Rejected requires a
+    // documented reason. Prompt for it; if the user cancels, abort the
+    // transition entirely. The reason gets posted as a comment so the
+    // audit trail captures *why*, not just what changed.
+    let justification: string | null = null;
+    if (nextLabel === 'Approved' || nextLabel === 'Rejected') {
+      justification = window.prompt(
+        `Moving ${adv.full_name || advisorId} to "${nextLabel}". Please write a short justification (this will be posted as a comment).`,
+        ''
+      );
+      if (justification === null) return; // user cancelled
+      if (justification.trim().length < 5) {
+        toast.error('Justification must be at least 5 characters');
+        return;
+      }
+    }
+
     try {
       await advHook.updateRow(advisorId, { pipeline_status: nextLabel } as Partial<Advisor>);
       if (sheetId) {
@@ -177,7 +251,17 @@ export function AdvisorsPage() {
           field: 'pipeline_status',
           old_value: adv.pipeline_status,
           new_value: nextLabel,
+          details: justification || '',
         });
+        if (justification) {
+          await cmtHook.createRow({
+            comment_id: `CMT-${Date.now()}`,
+            advisor_id: advisorId,
+            author_email: userEmail,
+            body: `[${nextLabel}] ${justification}`,
+            created_at: new Date().toISOString(),
+          } as Partial<AdvisorComment>);
+        }
         await actHook.refresh();
       }
       toast.success(`${adv.full_name || advisorId} → ${nextLabel}`);
@@ -386,6 +470,129 @@ export function AdvisorsPage() {
     } finally {
       setDedupRunning(false);
     }
+  };
+
+  // Bulk actions on selected Roster rows.
+  const handleBulkMove = async (target: AdvisorPipelineId | 'Archived') => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!window.confirm(`Move ${ids.length} advisor${ids.length === 1 ? '' : 's'} to ${target === 'Archived' ? 'Archived' : PIPELINE_LABEL_BY_ID[target]}?`)) return;
+    setBulkRunning(true);
+    let ok = 0;
+    const targetLabel = target === 'Archived' ? 'Archived' : PIPELINE_LABEL_BY_ID[target];
+    try {
+      for (const id of ids) {
+        const adv = enriched.find(a => a.advisor_id === id);
+        if (!adv || adv.pipeline_status === targetLabel) continue;
+        try {
+          await advHook.updateRow(id, { pipeline_status: targetLabel } as Partial<Advisor>);
+          if (sheetId) {
+            await appendActivity(sheetId, tabActivity, {
+              user_email: userEmail,
+              advisor_id: id,
+              action: 'status_change',
+              field: 'pipeline_status',
+              old_value: adv.pipeline_status,
+              new_value: targetLabel,
+              details: 'bulk_action',
+            });
+          }
+          ok += 1;
+        } catch (err) {
+          console.warn('[advisors] bulk move skipped', id, err);
+        }
+      }
+      toast.success(`Bulk moved ${ok} of ${ids.length} to ${targetLabel}`);
+      await actHook.refresh();
+      setSelectedIds(new Set());
+    } finally {
+      setBulkRunning(false);
+    }
+  };
+
+  const handleBulkAssign = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const assignee = window.prompt('Assignee email (e.g. doaa@gazaskygeeks.com):');
+    if (!assignee) return;
+    setBulkRunning(true);
+    let ok = 0;
+    try {
+      for (const id of ids) {
+        try {
+          await advHook.updateRow(id, { assignee_email: assignee } as Partial<Advisor>);
+          if (sheetId) {
+            await appendActivity(sheetId, tabActivity, {
+              user_email: userEmail,
+              advisor_id: id,
+              action: 'tracker_edit',
+              field: 'assignee_email',
+              new_value: assignee,
+              details: 'bulk_action',
+            });
+          }
+          ok += 1;
+        } catch (err) {
+          console.warn('[advisors] bulk assign skipped', id, err);
+        }
+      }
+      toast.success(`Assigned ${ok} of ${ids.length} to ${assignee}`);
+      await actHook.refresh();
+      setSelectedIds(new Set());
+    } finally {
+      setBulkRunning(false);
+    }
+  };
+
+  // Auto-acknowledge: scan for advisors with pipeline_status='New' that
+  // pass a strong-fit threshold and auto-advance to 'Acknowledged'. Runs
+  // each time the advisor list updates while autoAck is on. Records a
+  // "auto_ack" activity row so the team can audit the automation.
+  const autoAckRunning = useRef(false);
+  useEffect(() => {
+    if (!autoAck || !canEdit || !sheetId) return;
+    if (autoAckRunning.current) return;
+    autoAckRunning.current = true;
+    (async () => {
+      try {
+        const candidates = enriched.filter(a =>
+          a.pipeline_status === 'New' &&
+          a.stage1.pass &&
+          a.stage1.total >= 70 &&
+          parseFloat(a.tech_rating || '0') >= 4
+        );
+        if (candidates.length === 0) return;
+        for (const adv of candidates) {
+          try {
+            await advHook.updateRow(adv.advisor_id, { pipeline_status: 'Acknowledged' } as Partial<Advisor>);
+            await appendActivity(sheetId, tabActivity, {
+              user_email: 'auto-ack',
+              advisor_id: adv.advisor_id,
+              action: 'status_change',
+              field: 'pipeline_status',
+              old_value: 'New',
+              new_value: 'Acknowledged',
+              details: `auto-ack: S1=${adv.stage1.total} tech=${adv.tech_rating}`,
+            });
+          } catch (err) {
+            console.warn('[advisors] auto-ack skipped', adv.advisor_id, err);
+          }
+        }
+        toast.success(`Auto-acknowledged ${candidates.length} strong Stage 1 fit${candidates.length === 1 ? '' : 's'}`);
+        await actHook.refresh();
+      } finally {
+        autoAckRunning.current = false;
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoAck, advHook.rows.length]);
+
+  const toggleAutoAck = () => {
+    setAutoAck(v => {
+      const next = !v;
+      try { localStorage.setItem('advisors:autoAck', next ? '1' : '0'); } catch {}
+      return next;
+    });
   };
 
   // Auto-poll: pull from the linked Google Form responses sheet on a 5-min
@@ -605,6 +812,41 @@ export function AdvisorsPage() {
         </div>
       </Card>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs uppercase tracking-wider text-slate-500">Quick views:</span>
+        {([
+          { id: '', label: 'All' },
+          { id: 'mine', label: 'My active' },
+          { id: 'stuck', label: `Stuck (${active.filter(a => a.is_stuck).length})` },
+          { id: 's1_fails', label: 'S1 fails' },
+          { id: 'with_followup', label: 'With follow-ups' },
+          { id: 'matched_month', label: 'Matched this month' },
+        ] as const).map(v => (
+          <button
+            key={v.id}
+            onClick={() => setSavedView(v.id as typeof savedView)}
+            className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+              savedView === v.id
+                ? 'bg-brand-teal text-white'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-navy-700 dark:text-slate-200'
+            }`}
+          >
+            {v.label}
+          </button>
+        ))}
+        {canEdit && (
+          <label className="ml-auto inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+            <input
+              type="checkbox"
+              checked={autoAck}
+              onChange={toggleAutoAck}
+              className="rounded"
+            />
+            Auto-acknowledge strong fits
+          </label>
+        )}
+      </div>
+
       <Tabs items={tabs} value={tab} onChange={setTab} />
 
       {loading && enriched.length === 0 && (
@@ -627,7 +869,16 @@ export function AdvisorsPage() {
       )}
 
       {tab === 'roster' && (
-        <RosterTable advisors={filtered} onOpen={a => setSelectedId(a.advisor_id)} />
+        <RosterTable
+          advisors={filtered}
+          selectedIds={selectedIds}
+          setSelectedIds={setSelectedIds}
+          canEdit={canEdit}
+          bulkRunning={bulkRunning}
+          onBulkMove={handleBulkMove}
+          onBulkAssign={handleBulkAssign}
+          onOpen={a => setSelectedId(a.advisor_id)}
+        />
       )}
 
       {tab === 'followups' && (
@@ -651,13 +902,15 @@ export function AdvisorsPage() {
         />
       )}
 
-      {tab === 'dashboard' && <AdvisorDashboard advisors={enriched} />}
+      {tab === 'dashboard' && <AdvisorDashboard advisors={enriched} activity={actHook.rows} />}
 
       <AdvisorDetailDrawer
         advisor={selected}
         open={!!selected}
         canEdit={canEdit}
         userEmail={userEmail}
+        userName={user?.name}
+        companies={companies}
         onClose={() => setSelectedId(null)}
         onTrackerSave={handleTrackerSave}
         onCreateFollowUp={handleCreateFollowUp}
@@ -670,16 +923,76 @@ export function AdvisorsPage() {
 
 function RosterTable({
   advisors,
+  selectedIds,
+  setSelectedIds,
+  canEdit,
+  bulkRunning,
+  onBulkMove,
+  onBulkAssign,
   onOpen,
 }: {
   advisors: EnrichedAdvisor[];
+  selectedIds: Set<string>;
+  setSelectedIds: (s: Set<string>) => void;
+  canEdit: boolean;
+  bulkRunning: boolean;
+  onBulkMove: (target: AdvisorPipelineId | 'Archived') => Promise<void>;
+  onBulkAssign: () => Promise<void>;
   onOpen: (a: EnrichedAdvisor) => void;
 }) {
+  const allChecked = advisors.length > 0 && advisors.every(a => selectedIds.has(a.advisor_id));
+  const someChecked = !allChecked && advisors.some(a => selectedIds.has(a.advisor_id));
+
+  const toggleAll = () => {
+    const next = new Set(selectedIds);
+    if (allChecked) {
+      for (const a of advisors) next.delete(a.advisor_id);
+    } else {
+      for (const a of advisors) next.add(a.advisor_id);
+    }
+    setSelectedIds(next);
+  };
+
+  const toggleOne = (id: string) => {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelectedIds(next);
+  };
+
   const columns: Column<EnrichedAdvisor>[] = [
+    ...(canEdit ? [{
+      key: '_select',
+      header: (
+        <input
+          type="checkbox"
+          checked={allChecked}
+          ref={el => { if (el) el.indeterminate = someChecked; }}
+          onChange={toggleAll}
+          aria-label="Select all"
+        />
+      ),
+      width: '36px',
+      render: (a: EnrichedAdvisor) => (
+        <input
+          type="checkbox"
+          checked={selectedIds.has(a.advisor_id)}
+          onClick={e => e.stopPropagation()}
+          onChange={() => toggleOne(a.advisor_id)}
+          aria-label={`Select ${a.full_name}`}
+        />
+      ),
+    }] satisfies Column<EnrichedAdvisor>[] : []),
     {
       key: 'full_name',
       header: 'Name',
-      render: a => <span className="font-semibold">{a.full_name || '(unnamed)'}</span>,
+      render: a => (
+        <div className="flex items-center gap-1.5">
+          <span className="font-semibold">{a.full_name || '(unnamed)'}</span>
+          {a.is_stuck && <Badge tone="red">stuck {a.days_in_status}d</Badge>}
+          {a.conflict_company_id && <Badge tone="amber">COI</Badge>}
+        </div>
+      ),
     },
     { key: 'country', header: 'Country' },
     {
@@ -704,6 +1017,12 @@ function RosterTable({
       key: 'pipeline_status',
       header: 'Pipeline',
       render: a => <Badge tone={pipelineTone(a.pipeline_status)}>{a.pipeline_status || 'New'}</Badge>,
+    },
+    {
+      key: 'days_in_status',
+      header: 'Days',
+      width: '70px',
+      render: a => <span className={`font-mono text-xs ${a.is_stuck ? 'text-brand-red font-bold' : 'text-slate-500'}`}>{a.days_in_status >= 0 ? a.days_in_status : '—'}</span>,
     },
     {
       key: 'open_followups',
@@ -745,7 +1064,26 @@ function RosterTable({
     );
   }
 
-  return <DataTable columns={columns} rows={advisors} onRowClick={onOpen} />;
+  return (
+    <div className="space-y-3">
+      {selectedIds.size > 0 && canEdit && (
+        <Card accent="teal">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm font-bold text-navy-500 dark:text-white">
+              {selectedIds.size} selected
+            </span>
+            <Button size="sm" variant="ghost" onClick={() => onBulkMove('acknowledged')} disabled={bulkRunning}>Acknowledge</Button>
+            <Button size="sm" variant="ghost" onClick={() => onBulkMove('allocated')} disabled={bulkRunning}>Allocate</Button>
+            <Button size="sm" variant="ghost" onClick={onBulkAssign} disabled={bulkRunning}>Set assignee…</Button>
+            <Button size="sm" variant="ghost" onClick={() => onBulkMove('on_hold')} disabled={bulkRunning}>Move to On Hold</Button>
+            <Button size="sm" variant="ghost" onClick={() => onBulkMove('Archived')} disabled={bulkRunning}>Archive</Button>
+            <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())} disabled={bulkRunning}>Clear</Button>
+          </div>
+        </Card>
+      )}
+      <DataTable columns={columns} rows={advisors} onRowClick={onOpen} />
+    </div>
+  );
 }
 
 const TONE_MAP: Record<string, Tone> = {

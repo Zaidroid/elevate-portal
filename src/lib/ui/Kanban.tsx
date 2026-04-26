@@ -103,15 +103,18 @@ export function Kanban<S extends string, T extends KanbanItem<S>>({
   );
 
   return (
-    <div className={`overflow-x-auto pb-4 ${className}`}>
-      <div className="flex min-w-max gap-3">
+    <div className={`pb-4 md:overflow-x-auto ${className}`}>
+      {/* On md+ screens: horizontal columns. Below md: vertical stack — each
+          column collapses into a full-width card so the user can still see
+          status grouping without horizontal scroll on a phone. */}
+      <div className="flex flex-col gap-3 md:flex-row md:min-w-max">
         {visibleCols.map(col => {
           const colItems = grouped[col.id] || [];
           const isActive = dropTarget === col.id;
           return (
             <div
               key={col.id}
-              className={`flex max-h-[70vh] w-[280px] flex-shrink-0 flex-col rounded-2xl border bg-slate-50 transition-colors dark:bg-navy-700 ${
+              className={`flex w-full md:w-[280px] flex-shrink-0 flex-col rounded-2xl border bg-slate-50 transition-colors md:max-h-[70vh] dark:bg-navy-700 ${
                 isActive
                   ? 'border-brand-teal bg-brand-teal/5'
                   : 'border-slate-200 dark:border-navy-600'
@@ -137,7 +140,7 @@ export function Kanban<S extends string, T extends KanbanItem<S>>({
                 )}
               </div>
 
-              <div className="flex-1 space-y-2 overflow-y-auto p-2">
+              <div className="flex-1 space-y-2 p-2 md:overflow-y-auto">
                 {colItems.length === 0 ? (
                   <div className="py-8 text-center text-[11px] text-slate-400 dark:text-slate-500">
                     {emptyHint}

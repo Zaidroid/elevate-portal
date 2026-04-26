@@ -7,13 +7,15 @@
 //   Comments — thread
 
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Award, ClipboardCheck, FileText, MessageSquare, ListChecks, Activity as ActivityIcon, ExternalLink, Sparkles } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Award, CalendarPlus, ClipboardCheck, Download, FileText, Mail, MessageSquare, ListChecks, Activity as ActivityIcon, ExternalLink, Sparkles, Building2 } from 'lucide-react';
 import { Badge, Button, Drawer, Tabs } from '../../lib/ui';
 import type { TabItem, Tone } from '../../lib/ui';
 import { CATEGORY_META, NEXT_ACTION, PIPELINE_COLUMNS } from '../../lib/advisor-scoring';
 import type { AdvisorPipelineId } from '../../lib/advisor-scoring';
 import type { FollowUp } from '../../types/advisor';
-import type { EnrichedAdvisor } from './utils';
+import type { CompanyLite, EnrichedAdvisor } from './utils';
+import { renderTemplate, suggestedTemplate, templateMailto, TEMPLATE_LABELS, type TemplateKey } from './emailTemplates';
+import { advisorToMarkdown, downloadMarkdown, googleCalendarUrl, suggestMatches } from './smartMatch';
 
 const inputClass =
   'w-full rounded-lg border border-slate-200 bg-brand-editable/40 px-3 py-2 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-700 dark:text-white';
@@ -33,6 +35,8 @@ export function AdvisorDetailDrawer({
   open,
   canEdit,
   userEmail,
+  userName,
+  companies = [],
   onClose,
   onTrackerSave,
   onCreateFollowUp,
@@ -43,6 +47,8 @@ export function AdvisorDetailDrawer({
   open: boolean;
   canEdit: boolean;
   userEmail: string;
+  userName?: string;
+  companies?: CompanyLite[];
   onClose: () => void;
   onTrackerSave: (updates: Partial<EnrichedAdvisor>) => Promise<void>;
   onCreateFollowUp: (fu: Partial<FollowUp>) => Promise<void>;
@@ -102,10 +108,53 @@ export function AdvisorDetailDrawer({
       <Tabs items={tabs} value={tab} onChange={setTab} />
 
       <div className="mt-4 space-y-4">
+        {advisor.conflict_company_id && (
+          <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-700 dark:bg-amber-950/40">
+            <div className="flex items-center gap-2 text-amber-800 dark:text-amber-200">
+              <AlertTriangle className="h-4 w-4" />
+              <span className="font-bold">Possible conflict of interest</span>
+            </div>
+            <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+              Advisor's employer "{advisor.employer}" looks like Cohort 3 company "{advisor.conflict_company_name}".
+              Do not match this advisor to that company.
+            </p>
+          </div>
+        )}
+        {advisor.is_stuck && advisor.pipeline_status !== 'Archived' && (
+          <div className="rounded-xl border border-red-200 bg-red-50/60 p-3 text-sm dark:border-red-900 dark:bg-red-950/30">
+            <div className="flex items-center gap-2 text-brand-red">
+              <AlertTriangle className="h-4 w-4" />
+              <span className="font-bold">Stuck for {advisor.days_in_status} days in "{advisor.pipeline_status}"</span>
+            </div>
+            <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+              This is past the SLA for the current stage. Advance, reassign, or move to On Hold.
+            </p>
+          </div>
+        )}
         {canEdit && advisor.pipeline_status !== 'Archived' && (
-          <NextActionCard advisor={advisor} onAdvance={async (nextLabel) => {
-            await onTrackerSave({ pipeline_status: nextLabel } as Partial<EnrichedAdvisor>);
-          }} />
+          <NextActionCard
+            advisor={advisor}
+            userEmail={userEmail}
+            userName={userName}
+            companies={companies}
+            onAdvance={async (nextLabel) => {
+              await onTrackerSave({ pipeline_status: nextLabel } as Partial<EnrichedAdvisor>);
+            }}
+          />
+        )}
+        {advisor.pipeline_status === 'Approved' && companies.length > 0 && canEdit && (
+          <SmartMatchCard
+            advisor={advisor}
+            companies={companies}
+            onMatch={async (companyId, intervention) => {
+              await onTrackerSave({
+                assignment_company_id: companyId,
+                assignment_intervention_type: intervention,
+                assignment_status: 'Planned',
+                pipeline_status: 'Matched',
+              } as Partial<EnrichedAdvisor>);
+            }}
+          />
         )}
         {tab === 'profile' && <ProfileTab advisor={advisor} />}
         {tab === 'score' && <ScoreTab advisor={advisor} />}
@@ -160,9 +209,15 @@ const ID_TO_LABEL: Record<AdvisorPipelineId, string> = {
 
 function NextActionCard({
   advisor,
+  userEmail,
+  userName,
+  companies,
   onAdvance,
 }: {
   advisor: EnrichedAdvisor;
+  userEmail: string;
+  userName?: string;
+  companies: CompanyLite[];
   onAdvance: (nextLabel: string) => Promise<void>;
 }) {
   const [advancing, setAdvancing] = useState(false);
@@ -170,6 +225,16 @@ function NextActionCard({
   const action = NEXT_ACTION[currentId];
   if (!action) return null;
   const nextLabel = action.nextStatus ? ID_TO_LABEL[action.nextStatus] : null;
+  const tplKey: TemplateKey = suggestedTemplate(advisor.pipeline_status || 'New');
+  const matchedCompany = advisor.assignment_company_id
+    ? companies.find(c => c.company_id === advisor.assignment_company_id)
+    : undefined;
+  const rendered = renderTemplate(tplKey, {
+    advisor: { full_name: advisor.full_name, email: advisor.email, position: advisor.position, employer: advisor.employer, country: advisor.country },
+    sender: { name: userName, email: userEmail },
+    company: matchedCompany ? { company_name: matchedCompany.company_name } : undefined,
+  });
+  const mailto = templateMailto(rendered);
 
   // Smart suggestions baked into the card.
   const tips: string[] = [];
@@ -205,20 +270,90 @@ function NextActionCard({
             </ul>
           )}
         </div>
-        {nextLabel && (
-          <Button
-            size="sm"
-            disabled={advancing}
-            onClick={async () => {
-              setAdvancing(true);
-              try { await onAdvance(nextLabel); } finally { setAdvancing(false); }
-            }}
-          >
-            <ArrowRight className="h-3.5 w-3.5" />
-            {advancing ? '…' : `Move to ${nextLabel}`}
-          </Button>
-        )}
+        <div className="flex flex-shrink-0 flex-col items-end gap-2">
+          {nextLabel && (
+            <Button
+              size="sm"
+              disabled={advancing}
+              onClick={async () => {
+                setAdvancing(true);
+                try { await onAdvance(nextLabel); } finally { setAdvancing(false); }
+              }}
+            >
+              <ArrowRight className="h-3.5 w-3.5" />
+              {advancing ? '…' : `Move to ${nextLabel}`}
+            </Button>
+          )}
+          {advisor.email && (
+            <a
+              href={mailto}
+              className="inline-flex items-center gap-1 rounded-lg border border-brand-teal/40 bg-brand-teal/10 px-3 py-1.5 text-xs font-semibold text-brand-teal transition-colors hover:bg-brand-teal hover:text-white"
+            >
+              <Mail className="h-3 w-3" />
+              {TEMPLATE_LABELS[tplKey]}
+            </a>
+          )}
+        </div>
       </div>
+    </div>
+  );
+}
+
+function SmartMatchCard({
+  advisor,
+  companies,
+  onMatch,
+}: {
+  advisor: EnrichedAdvisor;
+  companies: CompanyLite[];
+  onMatch: (companyId: string, intervention: string) => Promise<void>;
+}) {
+  const matches = useMemo(() => suggestMatches(advisor, companies, 3), [advisor, companies]);
+  const [matching, setMatching] = useState<string | null>(null);
+  if (matches.length === 0) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 dark:border-navy-700 dark:bg-navy-700/30">
+        <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-500">
+          <Building2 className="h-3.5 w-3.5" /> Smart match
+        </div>
+        <p className="mt-1 text-xs text-slate-500">No strong company fits found. Try setting an assignment manually in the Tracker tab.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 dark:border-emerald-900 dark:bg-emerald-950/30">
+      <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-emerald-700">
+        <Building2 className="h-3.5 w-3.5" /> Suggested matches
+      </div>
+      <ul className="mt-2 space-y-2">
+        {matches.map(m => (
+          <li key={m.company.company_id} className="flex items-start justify-between gap-3 rounded-lg bg-white p-2 dark:bg-navy-700">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-bold text-navy-500 dark:text-white">{m.company.company_name}</div>
+              <div className="text-2xs text-slate-500">
+                {m.company.sector || '—'}{m.company.governorate ? ` · ${m.company.governorate}` : ''} · score {m.score}
+              </div>
+              <ul className="mt-1 space-y-0.5 text-2xs text-slate-500">
+                {m.reasons.map((r, i) => <li key={i}>• {r}</li>)}
+              </ul>
+            </div>
+            <Button
+              size="sm"
+              disabled={matching === m.company.company_id}
+              onClick={async () => {
+                setMatching(m.company.company_id);
+                try {
+                  await onMatch(m.company.company_id, advisor.assignment_intervention_type || 'C-Suite');
+                } finally {
+                  setMatching(null);
+                }
+              }}
+            >
+              {matching === m.company.company_id ? '…' : 'Match'}
+            </Button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -226,6 +361,11 @@ function NextActionCard({
 // ----- Sub-tabs -----
 
 function ProfileTab({ advisor }: { advisor: EnrichedAdvisor }) {
+  const handleExport = () => {
+    const md = advisorToMarkdown(advisor);
+    const safeName = (advisor.full_name || advisor.advisor_id).replace(/[^\w-]+/g, '_');
+    downloadMarkdown(`advisor_${safeName}.md`, md);
+  };
   const fields: Array<[string, string]> = [
     ['Email', advisor.email],
     ['WhatsApp', advisor.whatsapp],
@@ -249,8 +389,14 @@ function ProfileTab({ advisor }: { advisor: EnrichedAdvisor }) {
     ['Notes', advisor.notes],
   ];
   return (
-    <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm md:grid-cols-2">
-      {fields.map(([label, value]) =>
+    <>
+      <div className="mb-3 flex justify-end">
+        <Button variant="ghost" size="sm" onClick={handleExport}>
+          <Download className="h-3.5 w-3.5" /> Export profile (.md)
+        </Button>
+      </div>
+      <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm md:grid-cols-2">
+        {fields.map(([label, value]) =>
         value ? (
           <div key={label} className="border-b border-slate-100 pb-1.5 last:border-0 dark:border-navy-700">
             <dt className="text-2xs font-semibold uppercase tracking-wider text-slate-400">{label}</dt>
@@ -271,7 +417,8 @@ function ProfileTab({ advisor }: { advisor: EnrichedAdvisor }) {
           </div>
         ) : null
       )}
-    </dl>
+      </dl>
+    </>
   );
 }
 
@@ -451,6 +598,28 @@ function TrackerTab({
           />
         </Field>
       </div>
+      {(draft.intro_scheduled_date || advisor.intro_scheduled_date) && advisor.email && (
+        <div className="rounded-lg border border-brand-teal/30 bg-brand-teal/5 p-3 text-xs">
+          <div className="mb-1 font-bold uppercase tracking-wider text-brand-teal">Calendar</div>
+          <p className="text-slate-600 dark:text-slate-300">
+            Intro is scheduled for <span className="font-mono">{draft.intro_scheduled_date || advisor.intro_scheduled_date}</span>.
+            Open Google Calendar to confirm the invite (advisor + assignee pre-filled).
+          </p>
+          <a
+            href={googleCalendarUrl({
+              title: `GSG Elevate intro · ${advisor.full_name || advisor.email || advisor.advisor_id}`,
+              description: `Advisor intro call. Position: ${advisor.position || ''} at ${advisor.employer || ''}.\n\nLinkedIn: ${advisor.linkedin || '—'}\nCV: ${advisor.cv_link || '—'}`,
+              date: (draft.intro_scheduled_date || advisor.intro_scheduled_date) as string,
+              guests: [advisor.email, draft.assignee_email || advisor.assignee_email || ''].filter(Boolean) as string[],
+            })}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-2 inline-flex items-center gap-1 rounded-md bg-brand-teal px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-teal-dark"
+          >
+            <CalendarPlus className="h-3 w-3" /> Add to Google Calendar
+          </a>
+        </div>
+      )}
       <Field label="Tracker notes">
         <textarea
           disabled={!canEdit}
@@ -624,39 +793,100 @@ function FollowUpsTab({
 }
 
 function ActivityTab({ advisor }: { advisor: EnrichedAdvisor }) {
-  const sorted = useMemo(() => {
-    return [...advisor.activity_for].sort((a, b) =>
+  // Group events by calendar date so the eye can scan "today / yesterday /
+  // last week" buckets. Within a day, newest first.
+  const groups = useMemo(() => {
+    const sorted = [...advisor.activity_for].sort((a, b) =>
       (b.timestamp || '').localeCompare(a.timestamp || '')
     );
+    const out: Array<{ day: string; rows: typeof sorted }> = [];
+    for (const r of sorted) {
+      const day = (r.timestamp || '').slice(0, 10) || 'Unknown';
+      const last = out[out.length - 1];
+      if (last && last.day === day) last.rows.push(r);
+      else out.push({ day, rows: [r] });
+    }
+    return out;
   }, [advisor.activity_for]);
 
-  if (sorted.length === 0) {
+  if (groups.length === 0) {
     return <p className="text-xs text-slate-500">No activity recorded for this advisor yet.</p>;
   }
 
   return (
-    <ol className="relative space-y-3 border-l border-slate-200 pl-4 dark:border-navy-700">
-      {sorted.map(a => (
-        <li key={a.activity_id || `${a.timestamp}-${a.field}`} className="relative">
-          <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-brand-teal" />
-          <div className="text-xs text-slate-500">
-            <span className="font-mono">{(a.timestamp || '').slice(0, 19).replace('T', ' ')}</span>
-            <span className="mx-1">·</span>
-            <span>{a.user_email || '—'}</span>
-            <span className="mx-1">·</span>
-            <Badge tone="neutral">{a.action}</Badge>
+    <div className="space-y-4">
+      {groups.map(g => (
+        <section key={g.day}>
+          <div className="mb-2 flex items-center gap-2">
+            <span className="font-mono text-xs font-bold text-navy-500 dark:text-slate-200">{relativeDay(g.day)}</span>
+            <span className="text-2xs text-slate-400">{g.day}</span>
+            <span className="ml-auto rounded-full bg-slate-100 px-2 py-0.5 text-2xs font-semibold text-slate-500 dark:bg-navy-700 dark:text-slate-300">
+              {g.rows.length} event{g.rows.length === 1 ? '' : 's'}
+            </span>
           </div>
-          <p className="mt-1 text-sm text-navy-500 dark:text-slate-200">
-            {a.field && <span className="font-mono text-xs">{a.field}: </span>}
-            {a.old_value && <span className="text-slate-400 line-through">{a.old_value}</span>}
-            {a.old_value && a.new_value && <span className="mx-1">→</span>}
-            <span>{a.new_value}</span>
-          </p>
-          {a.details && <p className="mt-0.5 text-xs text-slate-500">{a.details}</p>}
-        </li>
+          <ol className="relative space-y-2 border-l border-slate-200 pl-4 dark:border-navy-700">
+            {g.rows.map(a => (
+              <li key={a.activity_id || `${a.timestamp}-${a.field}`} className="relative">
+                <span className={`absolute -left-[21px] top-1.5 h-2 w-2 rounded-full ${actionDot(a.action)}`} />
+                <div className="text-2xs text-slate-500">
+                  <span className="font-mono">{(a.timestamp || '').slice(11, 19)}</span>
+                  <span className="mx-1">·</span>
+                  <span>{initialsOf(a.user_email || '')}</span>
+                  <span className="mx-1">·</span>
+                  <Badge tone={actionTone(a.action)}>{a.action}</Badge>
+                </div>
+                <p className="mt-0.5 text-sm text-navy-500 dark:text-slate-200">
+                  {a.field && <span className="font-mono text-xs">{a.field}: </span>}
+                  {a.old_value && <span className="text-slate-400 line-through">{a.old_value}</span>}
+                  {a.old_value && a.new_value && <span className="mx-1">→</span>}
+                  <span>{a.new_value}</span>
+                </p>
+                {a.details && <p className="mt-0.5 text-xs italic text-slate-500">{a.details}</p>}
+              </li>
+            ))}
+          </ol>
+        </section>
       ))}
-    </ol>
+    </div>
   );
+}
+
+function relativeDay(iso: string): string {
+  if (!iso) return '';
+  const today = new Date().toISOString().slice(0, 10);
+  if (iso === today) return 'Today';
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  if (iso === yesterday) return 'Yesterday';
+  const days = Math.floor((Date.parse(today) - Date.parse(iso)) / 86400000);
+  if (days < 7 && days > 0) return `${days} days ago`;
+  return iso;
+}
+
+function initialsOf(email: string): string {
+  if (!email) return '—';
+  const local = email.split('@')[0];
+  return local.slice(0, 2).toUpperCase();
+}
+
+function actionDot(action: string): string {
+  switch (action) {
+    case 'status_change': return 'bg-brand-red';
+    case 'tracker_edit': return 'bg-brand-teal';
+    case 'comment': return 'bg-amber-500';
+    case 'followup': return 'bg-emerald-500';
+    case 'form_import': return 'bg-navy-500';
+    default: return 'bg-slate-400';
+  }
+}
+
+function actionTone(action: string): Tone {
+  switch (action) {
+    case 'status_change': return 'red';
+    case 'tracker_edit': return 'teal';
+    case 'comment': return 'amber';
+    case 'followup': return 'green';
+    default: return 'neutral';
+  }
 }
 
 function CommentsTab({

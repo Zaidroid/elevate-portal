@@ -1,8 +1,12 @@
 import type { ReactNode } from 'react';
 
 export type Column<T> = {
-  key: keyof T & string;
-  header: string;
+  // Either a real field key (so the default `String(row[key])` rendering
+  // works) or an arbitrary id string for synthetic columns (selection
+  // checkboxes, action buttons, computed values) that must always supply
+  // a `render` function.
+  key: (keyof T & string) | string;
+  header: ReactNode;
   width?: string;
   render?: (row: T) => ReactNode;
 };
@@ -63,7 +67,7 @@ export function DataTable<T extends Record<string, unknown>>({
                 >
                   {columns.map(col => (
                     <td key={col.key} className="px-4 py-3 text-navy-500 dark:text-slate-100">
-                      {col.render ? col.render(row) : String(row[col.key] ?? '')}
+                      {col.render ? col.render(row) : String((row as Record<string, unknown>)[col.key] ?? '')}
                     </td>
                   ))}
                 </tr>

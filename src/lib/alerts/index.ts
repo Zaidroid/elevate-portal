@@ -9,7 +9,9 @@ export type AlertKind =
   | 'payment_pending_approval'
   | 'followup_overdue'
   | 'agreement_unsigned'
-  | 'conf_visa_pending';
+  | 'conf_visa_pending'
+  | 'advisor_mention'
+  | 'advisor_stuck';
 
 export type Alert = {
   id: string;
@@ -29,6 +31,10 @@ export type AlertInputs = {
   agreements: Row[];
   followups: Row[];
   confTracker: Row[];
+  advisorComments?: Row[];     // for @-mention alerts
+  advisors?: Row[];            // for @-mentions display + stuck alerts
+  advisorActivity?: Row[];     // for stuck alerts (latest status_change ts)
+  userEmail?: string;          // for filtering @-mentions to current user
   isAdmin: boolean;
 };
 
@@ -134,6 +140,71 @@ export function computeAlerts(inputs: AlertInputs): Alert[] {
         due: updated,
         href: '/docs',
       });
+    }
+  }
+
+  // Advisor @-mentions in comments → alert the mentioned user.
+  if (inputs.advisorComments && inputs.userEmail) {
+    const me = inputs.userEmail.toLowerCase();
+    const advisorById = new Map<string, Row>();
+    for (const a of inputs.advisors || []) {
+      if (a.advisor_id) advisorById.set(a.advisor_id, a);
+    }
+    for (const c of inputs.advisorComments) {
+      const body = c.body || '';
+      const re = /@([\w.+-]+@[\w-]+(?:\.[\w-]+)+)/g;
+      let m: RegExpExecArray | null;
+      const mentioned: string[] = [];
+      while ((m = re.exec(body)) !== null) mentioned.push(m[1].toLowerCase());
+      if (!mentioned.includes(me)) continue;
+      const adv = advisorById.get(c.advisor_id || '');
+      const advName = adv?.full_name || adv?.email || c.advisor_id || 'an advisor';
+      out.push({
+        id: `adv-mention-${c.comment_id || `${c.advisor_id}-${c.created_at}`}`,
+        kind: 'advisor_mention',
+        severity: 'amber',
+        title: `${c.author_email || 'Someone'} mentioned you on ${advName}`,
+        detail: body.slice(0, 120),
+        due: (c.created_at || '').slice(0, 10),
+        href: '/advisors',
+      });
+    }
+  }
+
+  // Stuck advisors (>14 days past status SLA) — only for the user who owns
+  // them (assignee_email match). Avoids spamming everyone.
+  if (inputs.advisors && inputs.userEmail && inputs.advisorActivity) {
+    const me = inputs.userEmail.toLowerCase();
+    const lastChangeByAdv = new Map<string, string>();
+    for (const a of inputs.advisorActivity) {
+      if (a.action !== 'status_change') continue;
+      const cur = lastChangeByAdv.get(a.advisor_id || '');
+      if (!cur || (a.timestamp || '') > cur) lastChangeByAdv.set(a.advisor_id || '', a.timestamp || '');
+    }
+    const SLA: Record<string, number> = {
+      New: 3, Acknowledged: 7, Allocated: 14, 'Intro Scheduled': 14,
+      'Intro Done': 14, Assessment: 14, Approved: 30, 'On Hold': 14,
+    };
+    for (const adv of inputs.advisors) {
+      if ((adv.assignee_email || '').toLowerCase() !== me) continue;
+      const status = adv.pipeline_status || 'New';
+      if (status === 'Archived' || status === 'Rejected' || status === 'Matched') continue;
+      const sla = SLA[status] ?? 9999;
+      const lc = lastChangeByAdv.get(adv.advisor_id || '') || adv.updated_at || '';
+      const t = Date.parse(lc);
+      if (!Number.isFinite(t)) continue;
+      const days = Math.floor((Date.now() - t) / DAY_MS);
+      if (days > sla + 7) { // only alert when notably past SLA
+        out.push({
+          id: `adv-stuck-${adv.advisor_id}`,
+          kind: 'advisor_stuck',
+          severity: 'amber',
+          title: `${adv.full_name || adv.email || adv.advisor_id} stuck ${days}d in ${status}`,
+          detail: `Past SLA (${sla}d). Advance, reassign, or move to On Hold.`,
+          due: lc.slice(0, 10),
+          href: '/advisors',
+        });
+      }
     }
   }
 

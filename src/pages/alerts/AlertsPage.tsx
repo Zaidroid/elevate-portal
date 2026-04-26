@@ -7,7 +7,9 @@ import { Link } from 'react-router-dom';
 import {
   AlertTriangle,
   ArrowRight,
+  AtSign,
   Bell,
+  Clock,
   ClipboardList,
   FileText,
   ListChecks,
@@ -30,6 +32,8 @@ const KIND_ICON: Record<AlertKind, React.ReactNode> = {
   followup_overdue: <ListChecks className="h-4 w-4" />,
   agreement_unsigned: <FileText className="h-4 w-4" />,
   conf_visa_pending: <Plane className="h-4 w-4" />,
+  advisor_mention: <AtSign className="h-4 w-4" />,
+  advisor_stuck: <Clock className="h-4 w-4" />,
 };
 
 export function AlertsPage() {
@@ -49,6 +53,9 @@ export function AlertsPage() {
   const { rows: payments } = useSheetDoc<Row>(paymentsId || null, getTab('payments', 'payments'), 'payment_id');
   const { rows: agreements } = useSheetDoc<Row>(docsId || null, getTab('docs', 'agreements'), 'agreement_id');
   const { rows: followups } = useSheetDoc<Row>(advisorsId || null, getTab('advisors', 'followups'), 'followup_id');
+  const { rows: advisorRows } = useSheetDoc<Row>(advisorsId || null, getTab('advisors', 'advisors'), 'advisor_id');
+  const { rows: advisorComments } = useSheetDoc<Row>(advisorsId || null, getTab('advisors', 'comments'), 'comment_id');
+  const { rows: advisorActivity } = useSheetDoc<Row>(advisorsId || null, getTab('advisors', 'activity'), 'activity_id');
   const { rows: confTracker } = useSheetDoc<Row>(conferencesId || null, getTab('conferences', 'tracker'), 'tracker_id');
 
   const alerts = useMemo(
@@ -58,9 +65,13 @@ export function AlertsPage() {
       agreements,
       followups,
       confTracker,
+      advisorComments,
+      advisors: advisorRows,
+      advisorActivity,
+      userEmail: user?.email,
       isAdmin: admin,
     }),
-    [q1, q2, q3, q4, payments, agreements, followups, confTracker, admin]
+    [q1, q2, q3, q4, payments, agreements, followups, confTracker, advisorComments, advisorRows, advisorActivity, user?.email, admin]
   );
 
   const counts = alertCounts(alerts);
@@ -72,14 +83,18 @@ export function AlertsPage() {
       followup_overdue: [],
       agreement_unsigned: [],
       conf_visa_pending: [],
+      advisor_mention: [],
+      advisor_stuck: [],
     };
     for (const a of alerts) m[a.kind].push(a);
     return m;
   }, [alerts]);
 
   const sections: Array<{ kind: AlertKind; title: string; subtitle: string }> = [
+    { kind: 'advisor_mention', title: 'Comments mentioning you', subtitle: 'Recent advisor comments where you were @-mentioned' },
     { kind: 'pr_overdue', title: 'Past-due PRs', subtitle: 'Procurement deadlines that have already slipped' },
     { kind: 'followup_overdue', title: 'Overdue follow-ups', subtitle: 'Advisor follow-ups that should have been handled' },
+    { kind: 'advisor_stuck', title: 'Your advisors stuck past SLA', subtitle: 'Advisors assigned to you that have not moved in over a week past expected time' },
     { kind: 'pr_due_soon', title: 'PRs due this week', subtitle: 'Submit before the SLA window closes' },
     { kind: 'payment_pending_approval', title: 'Payments pending approval', subtitle: admin ? 'Awaiting your approval' : '' },
     { kind: 'agreement_unsigned', title: 'Agreements stuck in "Sent"', subtitle: 'Sent more than 14 days ago, no signature on file yet' },
