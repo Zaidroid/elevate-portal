@@ -200,43 +200,62 @@ export function useSheetDoc<T extends Row>(
       if (localIdx < 0) throw new Error(`Row not found in local state: ${rowKey}=${key}`);
       const localRow = current[localIdx];
 
-      // Resolve the row on the server by key, not by cached index. This survives
-      // inserts/deletes other users made between polls.
-      const resolved = await resolveRow(sheetId, tabName, rowKey, key);
-      if (!resolved) {
-        throw new Error(`Row ${key} no longer exists on the sheet`);
-      }
-
-      // Conflict check: if updated_at on the server differs from what we loaded,
-      // reject the write. Callers can catch SheetConflictError and present a
-      // merge dialog.
-      if (
-        resolved.headers.includes('updated_at') &&
-        resolved.current.updated_at &&
-        localRow.updated_at &&
-        resolved.current.updated_at !== localRow.updated_at
-      ) {
-        throw new SheetConflictError(resolved.current, localRow, updates as Row);
-      }
-
       const now = new Date().toISOString();
-      const merged: T = {
-        ...resolved.current,
-        ...updates,
-        ...(resolved.headers.includes('updated_at') ? { updated_at: now } : {}),
-        ...(resolved.headers.includes('updated_by') && userEmail ? { updated_by: userEmail } : {}),
-      } as T;
 
-      // Optimistic local update using the server's row shape so we don't lose
-      // fields that were only present on the server.
+      // Apply the optimistic update FIRST, before any network call, so the UI
+      // reflects the change instantly. We roll this back if the server write
+      // fails. Without this, dragging a kanban card freezes for the duration
+      // of the resolveRow + updateRange round-trip (often >1s on a cold sheet).
+      const optimistic: T = {
+        ...localRow,
+        ...updates,
+        ...(hdrs.includes('updated_at') ? { updated_at: now } : {}),
+        ...(hdrs.includes('updated_by') && userEmail ? { updated_by: userEmail } : {}),
+      } as T;
       const prevRows = current;
       const nextRows = [...current];
-      nextRows[localIdx] = merged;
+      nextRows[localIdx] = optimistic;
       setRows(nextRows);
 
-      const lastCol = colLetter(resolved.headers.length - 1);
-      const a1 = `${tabName}!A${resolved.rowNumber}:${lastCol}${resolved.rowNumber}`;
       try {
+        // Resolve the row on the server by key, not by cached index. This
+        // survives inserts/deletes other users made between polls.
+        const resolved = await resolveRow(sheetId, tabName, rowKey, key);
+        if (!resolved) {
+          throw new Error(`Row ${key} no longer exists on the sheet`);
+        }
+
+        // Conflict check: if updated_at on the server differs from what we
+        // loaded, reject the write. Callers can catch SheetConflictError.
+        if (
+          resolved.headers.includes('updated_at') &&
+          resolved.current.updated_at &&
+          localRow.updated_at &&
+          resolved.current.updated_at !== localRow.updated_at
+        ) {
+          throw new SheetConflictError(resolved.current, localRow, updates as Row);
+        }
+
+        // Re-merge against the server-resolved shape so we do not drop fields
+        // that exist on the server but not in our local cache.
+        const merged: T = {
+          ...resolved.current,
+          ...updates,
+          ...(resolved.headers.includes('updated_at') ? { updated_at: now } : {}),
+          ...(resolved.headers.includes('updated_by') && userEmail ? { updated_by: userEmail } : {}),
+        } as T;
+
+        // Reflect the server-resolved shape in local state (replaces the
+        // optimistic merge that may have been missing server-only fields).
+        const reconciled = [...stateRef.current.rows];
+        const reIdx = reconciled.findIndex(r => r[rowKey] === key);
+        if (reIdx >= 0) {
+          reconciled[reIdx] = merged;
+          setRows(reconciled);
+        }
+
+        const lastCol = colLetter(resolved.headers.length - 1);
+        const a1 = `${tabName}!A${resolved.rowNumber}:${lastCol}${resolved.rowNumber}`;
         await updateRange(sheetId, a1, [objectToRow(resolved.headers, merged)]);
       } catch (err) {
         setRows(prevRows);

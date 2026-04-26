@@ -37,7 +37,11 @@ async function request<T>(url: string, options: RequestInit = {}, retries = 3): 
     throw new Error('Session expired');
   }
 
-  if (res.status === 429 && retries > 0) {
+  // Retry transient server errors (rate limit, gateway errors, brief
+  // unavailability). Sheets returns 500/502/503 occasionally during write
+  // bursts even under quota; treating them like 429 with backoff is the
+  // recommended pattern.
+  if ((res.status === 429 || res.status === 500 || res.status === 502 || res.status === 503) && retries > 0) {
     const delay = Math.pow(2, 4 - retries) * 500;
     await new Promise(r => setTimeout(r, delay));
     return request<T>(url, options, retries - 1);
