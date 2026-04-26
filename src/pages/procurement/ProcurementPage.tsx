@@ -6,6 +6,7 @@ import { useSheetDoc } from '../../lib/two-way-sync';
 import { getSheetId, getTab } from '../../config/sheets';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
+import { SourceComparisonView } from './SourceComparisonView';
 
 type Quarter = 'q1' | 'q2' | 'q3' | 'q4';
 
@@ -64,11 +65,14 @@ function thresholdTone(cls: string): 'neutral' | 'teal' | 'amber' | 'red' | 'gre
   }
 }
 
+type ViewMode = Quarter | 'source';
+
 export function ProcurementPage() {
   const { user } = useAuth();
   const sheetId = getSheetId('procurement');
-  const [quarter, setQuarter] = useState<Quarter>('q1');
-  const tab = getTab('procurement', quarter);
+  const [view, setView] = useState<ViewMode>('q1');
+  const isQuarter = view !== 'source';
+  const tab = getTab('procurement', isQuarter ? view : 'q1');
 
   const { rows, loading, error, refresh, updateRow, createRow } = useSheetDoc<PR>(
     sheetId || null,
@@ -76,6 +80,22 @@ export function ProcurementPage() {
     'pr_id',
     { userEmail: user?.email }
   );
+
+  // For the source comparison view we need ALL E3 quarters merged so we can
+  // match source rows against any of them. Pull the other three quarters
+  // alongside the active one.
+  const otherQuarters: Quarter[] = (['q1', 'q2', 'q3', 'q4'] as Quarter[]).filter(q => q !== (isQuarter ? view : 'q1'));
+  const q1Hook = useSheetDoc<PR>(sheetId || null, getTab('procurement', 'q1'), 'pr_id', { userEmail: user?.email });
+  const q2Hook = useSheetDoc<PR>(sheetId || null, getTab('procurement', 'q2'), 'pr_id', { userEmail: user?.email });
+  const q3Hook = useSheetDoc<PR>(sheetId || null, getTab('procurement', 'q3'), 'pr_id', { userEmail: user?.email });
+  const q4Hook = useSheetDoc<PR>(sheetId || null, getTab('procurement', 'q4'), 'pr_id', { userEmail: user?.email });
+  const allE3Rows = useMemo(() => [
+    ...q1Hook.rows, ...q2Hook.rows, ...q3Hook.rows, ...q4Hook.rows,
+  ], [q1Hook.rows, q2Hook.rows, q3Hook.rows, q4Hook.rows]);
+  // Suppress lint for the unused otherQuarters guard (kept for potential
+  // future use when we want to be explicit about which hooks fire on
+  // which view).
+  void otherQuarters;
 
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<PR | null>(null);
@@ -134,7 +154,7 @@ export function ProcurementPage() {
           <Button variant="ghost" onClick={refresh}>Refresh</Button>
           <Button
             variant="ghost"
-            onClick={() => downloadCsv(timestampedFilename(`procurement_${quarter}`), filtered)}
+            onClick={() => downloadCsv(timestampedFilename(`procurement_${isQuarter ? view : 'q1'}`), filtered)}
             disabled={filtered.length === 0}
           >
             <Download className="h-4 w-4" /> Export
@@ -149,9 +169,9 @@ export function ProcurementPage() {
         {(Object.keys(QUARTER_LABELS) as Quarter[]).map(q => (
           <button
             key={q}
-            onClick={() => setQuarter(q)}
+            onClick={() => setView(q)}
             className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-              quarter === q
+              view === q
                 ? 'bg-brand-red text-white'
                 : 'text-navy-500 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-navy-700'
             }`}
@@ -159,25 +179,41 @@ export function ProcurementPage() {
             {QUARTER_LABELS[q]}
           </button>
         ))}
+        <button
+          onClick={() => setView('source')}
+          className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+            view === 'source'
+              ? 'bg-navy-500 text-white'
+              : 'text-navy-500 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-navy-700'
+          }`}
+          title="Read-only view of the GSG team's procurement plan, compared to our E3 output"
+        >
+          Team source ▸ E3
+        </button>
       </div>
 
-      {error && (
+      {error && view !== 'source' && (
         <Card className="border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950">
           <p className="text-sm text-red-700 dark:text-red-300">Failed to load: {error.message}</p>
         </Card>
       )}
 
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-        <input
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          placeholder="Search by PR, activity, company, status..."
-          className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-600 dark:text-white"
-        />
-      </div>
-
-      <DataTable columns={columns} rows={filtered} loading={loading} onRowClick={r => setSelected(r)} />
+      {view === 'source' ? (
+        <SourceComparisonView e3Rows={allE3Rows} />
+      ) : (
+        <>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search by PR, activity, company, status..."
+              className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-600 dark:text-white"
+            />
+          </div>
+          <DataTable columns={columns} rows={filtered} loading={loading} onRowClick={r => setSelected(r)} />
+        </>
+      )}
 
       <PRDrawer
         pr={selected}

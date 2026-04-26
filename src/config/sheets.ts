@@ -95,6 +95,19 @@ export const SHEETS: Record<string, ModuleConfig> = {
     sheetId: env('VITE_SHEET_FREELANCERS_FORM_RESPONSES'),
     tabs: { responses: 'Form Responses 1' },
   },
+  // Read-only source sheets — the team / audit teams write here, the
+  // portal reads and surfaces them next to our E3 derived output for
+  // comparison. The portal NEVER writes back.
+  procurementSource: {
+    label: 'GSG Procurement Plan (team source, read-only)',
+    sheetId: env('VITE_SHEET_PROCUREMENT_SOURCE'),
+    tabs: {}, // tabs are discovered at runtime — one per month
+  },
+  paymentsSource: {
+    label: 'GSG Payment Tracker (legacy, read-only)',
+    sheetId: env('VITE_SHEET_PAYMENTS_SOURCE'),
+    tabs: {},
+  },
   teamRoster: {
     label: 'E3 - Team Roster',
     sheetId: env('VITE_SHEET_TEAM_ROSTER'),

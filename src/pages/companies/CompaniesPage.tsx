@@ -92,6 +92,12 @@ export function CompaniesPage() {
   const [query, setQuery] = useState('');
   const [filters, setFilters] = useState<FilterValues>({ pm: [], stage: [], status: [], fund: [] });
   const [creating, setCreating] = useState(false);
+  // Cohort 3 went through filtration + interview cycles already. Default
+  // the page to the post-selection set so the team's daily view is the
+  // active roster, not the raw applicant pool. Toggle off to inspect the
+  // full master + applicant join.
+  const [selectedOnly, setSelectedOnly] = useState(true);
+  const SELECTED_STATUSES = ['Selected', 'Onboarded', 'Active', 'Interviewed', 'Graduated'];
 
   const pms = getProfileManagers();
 
@@ -166,13 +172,18 @@ export function CompaniesPage() {
     return out;
   }, [applicants.rows, masterE3, masterByName]);
 
+  const filteredBySelection = useMemo(() => {
+    if (!selectedOnly) return joined;
+    return joined.filter(r => SELECTED_STATUSES.includes(r.status));
+  }, [joined, selectedOnly]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const pm = filters.pm || [];
     const stage = filters.stage || [];
     const status = filters.status || [];
     const fund = filters.fund || [];
-    return joined.filter(r => {
+    return filteredBySelection.filter(r => {
       if (pm.length > 0) {
         const key = r.profile_manager_email || '__unassigned__';
         if (!pm.includes(key)) return false;
@@ -186,7 +197,7 @@ export function CompaniesPage() {
       }
       return true;
     });
-  }, [joined, query, filters]);
+  }, [filteredBySelection, query, filters]);
 
   const counts = useMemo(() => {
     const byPm = new Map<string, number>();
@@ -323,17 +334,29 @@ export function CompaniesPage() {
         <div>
           <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Companies</h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Cohort 3 only. {applicants.rows.length} applicants, {masterE3.length} master records. Showing {counts.filtered} of {counts.total}.
+            Cohort 3 only. {selectedOnly
+              ? <>Showing the post-selection roster ({filteredBySelection.length} of {joined.length}). Toggle "Selected only" to see all applicants.</>
+              : <>{applicants.rows.length} applicants, {masterE3.length} master records. Showing {counts.filtered} of {counts.total}.</>
+            }
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+            <input
+              type="checkbox"
+              checked={selectedOnly}
+              onChange={() => setSelectedOnly(v => !v)}
+              className="rounded"
+            />
+            Selected only
+          </label>
           <Button variant="ghost" onClick={() => { applicants.refresh(); master.refresh(); }}>
             Refresh
           </Button>
           <Button
             variant="ghost"
-            onClick={() => downloadCsv(timestampedFilename('companies'), joined as unknown as Record<string, unknown>[])}
-            disabled={joined.length === 0}
+            onClick={() => downloadCsv(timestampedFilename('companies'), filteredBySelection as unknown as Record<string, unknown>[])}
+            disabled={filteredBySelection.length === 0}
           >
             <Download className="h-4 w-4" /> Export
           </Button>
