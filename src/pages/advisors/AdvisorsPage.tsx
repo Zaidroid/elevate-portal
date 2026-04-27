@@ -55,6 +55,7 @@ import {
   matchesQuery,
   normalizeCountry,
   scoreFields,
+  detectDuplicateAdvisors,
   type CompanyLite,
   type EnrichedAdvisor,
 } from './utils';
@@ -65,6 +66,22 @@ import { AdvisorDetailDrawer } from './AdvisorDetailDrawer';
 import { AdvisorDashboard } from './AdvisorDashboard';
 import { importNewFormResponses } from './importFromFormResponses';
 import { deduplicateAdvisors } from './deduplicateAdvisors';
+
+// Best-effort year extractor. Handles ISO ('2026-01-15...'), US-locale
+// ('1/15/2026'), and 'Jan 15, 2026'-ish forms. Returns 0 when nothing
+// useful comes back, which makes the call site tolerant to missing /
+// malformed timestamps.
+function parsedYear(s: string): number {
+  if (!s) return 0;
+  // Try ISO first.
+  const isoMatch = s.match(/^(\d{4})-\d{2}-\d{2}/);
+  if (isoMatch) return parseInt(isoMatch[1], 10);
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) return d.getFullYear();
+  // Last-ditch: any 4-digit run that looks like a year.
+  const m = s.match(/\b(20\d{2})\b/);
+  return m ? parseInt(m[1], 10) : 0;
+}
 
 const PIPELINE_LABEL_BY_ID: Record<AdvisorPipelineId, string> = {
   new: 'New',
@@ -149,11 +166,38 @@ export function AdvisorsPage() {
     [advHook.rows, fuHook.rows, cmtHook.rows, actHook.rows, companies]
   );
 
-  // Active = everything not archived. The kanban + roster default to this.
-  const active = useMemo(
-    () => showArchived ? enriched : enriched.filter(a => a.pipeline_status !== 'Archived'),
-    [enriched, showArchived]
-  );
+  // Duplicate / orphan detection. Surfaces a banner the team can act on.
+  // The dedupe-at-render in enrichAdvisors keeps the kanban sane even
+  // when the sheet has duplicates, but the underlying sheet is still
+  // broken until someone runs the Deduplicate action — this surfaces
+  // that.
+  const duplicates = useMemo(() => detectDuplicateAdvisors(advHook.rows), [advHook.rows]);
+  const dupRowCount = useMemo(() => {
+    let n = 0;
+    for (const g of duplicates) {
+      if (g.reason === 'no_id') n += g.rows.length;
+      else n += g.rows.length - 1;     // each group has 1 keeper, the rest are extras
+    }
+    return n;
+  }, [duplicates]);
+
+  // Active = post-2026 + not archived. Pre-2026 entries (legacy imports
+  // that didn't get archived during migration) are hidden by default so
+  // they don't pollute the kanban with random old names. Show archived
+  // toggle brings the full set back.
+  const active = useMemo(() => {
+    if (showArchived) return enriched;
+    return enriched.filter(a => {
+      if (a.pipeline_status === 'Archived') return false;
+      // The form-response timestamp is when this advisor applied. Reject
+      // obvious pre-2026 entries (legacy imports that didn't get archived
+      // during migration). Empty / unparseable timestamps pass through —
+      // we'd rather show them than hide silently.
+      const ts = (a.timestamp || '').trim();
+      if (ts && parsedYear(ts) > 0 && parsedYear(ts) < 2026) return false;
+      return true;
+    });
+  }, [enriched, showArchived]);
 
   const archivedCount = useMemo(
     () => enriched.filter(a => a.pipeline_status === 'Archived').length,
@@ -724,6 +768,30 @@ export function AdvisorsPage() {
           </Button>
         </div>
       </header>
+
+      {dupRowCount > 0 && canEdit && (
+        <Card className="border-2 border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/30">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-extrabold text-amber-900 dark:text-amber-200">
+                {dupRowCount} duplicate / orphan row{dupRowCount === 1 ? '' : 's'} detected on the Advisors sheet
+              </h3>
+              <p className="mt-0.5 text-xs text-amber-800 dark:text-amber-300">
+                {duplicates.filter(g => g.reason === 'advisor_id').length} groups share an advisor_id ·{' '}
+                {duplicates.filter(g => g.reason === 'email').length} groups share an email ·{' '}
+                {duplicates.find(g => g.reason === 'no_id')?.rows.length || 0} rows have no advisor_id.
+                The kanban already keeps the latest row per advisor_id at render time so duplicates won't pile up — but the
+                underlying sheet stays inconsistent until you run Dedupe. Status updates and drag/drop on duplicate rows can
+                appear to revert because the API only updates one of them.
+              </p>
+            </div>
+            <Button onClick={handleDeduplicate} disabled={dedupRunning}>
+              <Trash2 className={`h-4 w-4 ${dedupRunning ? 'animate-pulse' : ''}`} />
+              {dedupRunning ? 'Deduping…' : 'Run dedupe'}
+            </Button>
+          </div>
+        </Card>
+      )}
 
       {newEntries.length > 0 && (
         <Card accent="red">

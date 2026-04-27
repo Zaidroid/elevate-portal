@@ -103,6 +103,62 @@ export type EnrichedAdvisor = Advisor & {
 
 export type CompanyLite = { company_id: string; company_name: string; sector?: string; governorate?: string; status?: string };
 
+// Detect duplicate advisor rows on the sheet. Each entry lists the rows
+// that share the same key so the UI can surface a banner + run the
+// Deduplicate action against them. Empty advisor_id rows are grouped
+// under '__no_id__' since they cannot be acted on reliably and should
+// be cleaned up.
+export type DuplicateGroup = { key: string; rows: Advisor[]; reason: 'advisor_id' | 'email' | 'no_id' };
+
+export function detectDuplicateAdvisors(advisors: Advisor[]): DuplicateGroup[] {
+  const byId = new Map<string, Advisor[]>();
+  const byEmail = new Map<string, Advisor[]>();
+  const noId: Advisor[] = [];
+  for (const a of advisors) {
+    const id = (a.advisor_id || '').trim();
+    if (!id) { noId.push(a); continue; }
+    const arr = byId.get(id) || [];
+    arr.push(a);
+    byId.set(id, arr);
+    const e = (a.email || '').toLowerCase().trim();
+    if (e) {
+      const earr = byEmail.get(e) || [];
+      earr.push(a);
+      byEmail.set(e, earr);
+    }
+  }
+  const out: DuplicateGroup[] = [];
+  for (const [k, rs] of byId) if (rs.length > 1) out.push({ key: k, rows: rs, reason: 'advisor_id' });
+  // Email duplicates only count when the IDs differ (otherwise they're the same advisor_id duplicates already reported).
+  for (const [k, rs] of byEmail) {
+    const distinctIds = new Set(rs.map(r => (r.advisor_id || '').trim()));
+    if (rs.length > 1 && distinctIds.size > 1) out.push({ key: k, rows: rs, reason: 'email' });
+  }
+  if (noId.length > 0) out.push({ key: '__no_id__', rows: noId, reason: 'no_id' });
+  return out;
+}
+
+// Dedupe advisor rows by advisor_id. When duplicates exist, keep the row
+// with the most recent updated_at (or, lacking updated_at, the last one
+// in the list since the sheet returns rows in row-order). Rows with an
+// empty advisor_id are dropped entirely from the rendered list — they
+// cannot be acted on (updateRow needs a stable key) and the
+// detectDuplicateAdvisors banner will flag them so the team can clean
+// them up.
+function dedupeAdvisorRows(advisors: Advisor[]): Advisor[] {
+  const winners = new Map<string, Advisor>();
+  for (const a of advisors) {
+    const id = (a.advisor_id || '').trim();
+    if (!id) continue;
+    const existing = winners.get(id);
+    if (!existing) { winners.set(id, a); continue; }
+    const existingTs = existing.updated_at || '';
+    const newTs = a.updated_at || '';
+    if (newTs >= existingTs) winners.set(id, a);
+  }
+  return Array.from(winners.values());
+}
+
 export function enrichAdvisors(
   advisors: Advisor[],
   followups: FollowUp[],
@@ -126,7 +182,7 @@ export function enrichAdvisors(
     if (!aByAdv.has(a.advisor_id)) aByAdv.set(a.advisor_id, []);
     aByAdv.get(a.advisor_id)!.push(a);
   }
-  return advisors.map(adv => {
+  return dedupeAdvisorRows(advisors).map(adv => {
     const stage1 = computeStage1(adv);
     const stage2 = stage1.pass
       ? computeStage2(adv)
