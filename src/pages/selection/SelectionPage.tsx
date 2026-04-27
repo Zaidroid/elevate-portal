@@ -1242,11 +1242,17 @@ function FinalCohortBoard({
     return m;
   }, [reviews]);
 
+  // "Selected" scope = any company that anyone wants to lock work on:
+  // already has assignments, master flagged it Selected/Recommended,
+  // OR at least one reviewer voted Recommend. Strict consensus was too
+  // narrow — a single Hold/Waitlist vote alongside multiple Recommends
+  // turned consensus to "Mixed" and silently dropped the company from
+  // Stage 2, even though the team clearly wants to discuss it.
   const isSelected = (c: ReviewableCompany): boolean => {
     if (assignsByCompany.has(c.company_id)) return true;
     if (c.status === 'Selected' || c.status === 'Recommended') return true;
-    const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
-    return s.consensus === 'Recommend';
+    const rs = reviewsByCompany.get(c.company_id) || [];
+    return rs.some(r => r.decision === 'Recommend');
   };
 
   const visibleCompanies = useMemo(() => {
