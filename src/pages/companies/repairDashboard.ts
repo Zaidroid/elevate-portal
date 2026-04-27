@@ -92,6 +92,15 @@ function buildDashboardRows(): (string | number | boolean)[][] {
   return rows;
 }
 
+function colLetter(n: number): string {
+  let s = '';
+  while (n >= 0) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+  }
+  return s;
+}
+
 export async function repairDashboard(sheetId: string): Promise<RepairResult> {
   const errors: string[] = [];
   // Make sure a Dashboard tab exists; if not, create one with a single
@@ -99,38 +108,39 @@ export async function repairDashboard(sheetId: string): Promise<RepairResult> {
   await ensureSchema(sheetId, 'Dashboard', ['Companies Master Dashboard']);
 
   const rows = buildDashboardRows();
-  // Pad each row to a consistent column width so the sheet doesn't
-  // leave stale data in cells we didn't write to.
-  const maxCols = Math.max(0, ...rows.map(r => r.length));
+  const maxCols = Math.max(1, ...rows.map(r => r.length));
   const padded = rows.map(r => {
     const out: (string | number | boolean)[] = [...r];
     while (out.length < maxCols) out.push('');
     return out;
   });
 
-  // Clear the existing dashboard area first by writing a wide block of
-  // empties beyond the new content — keeps the tab clean if the team
-  // had previously dropped extra rows we no longer use.
-  const blank = new Array(50).fill(0).map(() => new Array(maxCols).fill(''));
+  // Write the canonical content directly. We deliberately do NOT
+  // pre-clear: a separate pre-clear call leaves the sheet blank if
+  // the follow-up write fails for any reason (auth blip, rate limit,
+  // formula reference error, protected-range rejection). Better to
+  // overwrite-in-place. Trailing rows from a previous larger
+  // dashboard layout get wiped below.
+  const lastCol = colLetter(maxCols - 1);
   try {
-    await updateRange(sheetId, `Dashboard!A1:Z200`, blank, { valueInput: 'RAW' });
-  } catch (err) {
-    errors.push(`pre-clear failed: ${(err as Error).message}`);
-  }
-
-  try {
-    const colLetter = (n: number): string => {
-      let s = '';
-      while (n >= 0) {
-        s = String.fromCharCode(65 + (n % 26)) + s;
-        n = Math.floor(n / 26) - 1;
-      }
-      return s;
-    };
-    const lastCol = colLetter(maxCols - 1);
     await updateRange(sheetId, `Dashboard!A1:${lastCol}${padded.length}`, padded);
   } catch (err) {
     errors.push(`write failed: ${(err as Error).message}`);
+    return { rowsWritten: 0, errors };
+  }
+
+  // Wipe anything that lingered from an older, taller dashboard layout
+  // ONLY after the canonical content write succeeded — so a failed
+  // wipe still leaves the dashboard intact.
+  const wipeStartRow = padded.length + 1;
+  const wipeEndRow = padded.length + 80;
+  const wipe = new Array(wipeEndRow - wipeStartRow + 1).fill(0).map(() => new Array(maxCols).fill(''));
+  try {
+    await updateRange(sheetId, `Dashboard!A${wipeStartRow}:${lastCol}${wipeEndRow}`, wipe, { valueInput: 'RAW' });
+  } catch (err) {
+    // Non-fatal — the canonical content is already there, this only
+    // cleans up stale rows. Surface a warning but don't fail the call.
+    errors.push(`stale-row wipe failed (non-fatal): ${(err as Error).message}`);
   }
 
   return { rowsWritten: padded.length, errors };
