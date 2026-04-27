@@ -14,7 +14,7 @@
 //     different pillars).
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, Lock, Search } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, Download, Lock, Search } from 'lucide-react';
 import { Badge, Button, Card, CardHeader, EmptyState, useToast } from '../../lib/ui';
 import type { Tone } from '../../lib/ui';
 import { displayName } from '../../config/team';
@@ -63,6 +63,7 @@ export function FinalDecisionView({
   isAdmin,
   existingAssignments,
   onLockDecision,
+  onExport,
 }: {
   companies: ReviewableCompany[];
   reviews: Review[];
@@ -72,6 +73,7 @@ export function FinalDecisionView({
   // that have already been materialized for this company.
   existingAssignments: Array<{ company_id: string; intervention_type: string; sub_intervention: string; fund_code: string }>;
   onLockDecision: (args: FinalLockArgs) => Promise<void>;
+  onExport?: () => Promise<{ tabName: string; rowsWritten: number; errors: string[] } | void>;
 }) {
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -165,15 +167,20 @@ export function FinalDecisionView({
           title="Final cohort decisions"
           subtitle="Lock each company's status, intervention pack (per-pillar fund), and Account Manager."
           action={
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Filter companies"
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                className="w-56 rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
-              />
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Filter companies"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  className="w-56 rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+                />
+              </div>
+              {onExport && (
+                <ExportButton onExport={onExport} />
+              )}
             </div>
           }
         />
@@ -656,6 +663,45 @@ function statusStyle(s: FinalStatus): React.CSSProperties {
   };
   const v = map[s];
   return { borderColor: v.border, backgroundColor: v.bg, color: v.color };
+}
+
+function ExportButton({
+  onExport,
+}: {
+  onExport: () => Promise<{ tabName: string; rowsWritten: number; errors: string[] } | void>;
+}) {
+  const toast = useToast();
+  const [running, setRunning] = useState(false);
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={running}
+      onClick={async () => {
+        setRunning(true);
+        try {
+          const r = await onExport();
+          if (r) {
+            if (r.errors.length === 0) {
+              toast.success('Exported',
+                `${r.rowsWritten} rows written to the "${r.tabName}" tab in the Companies workbook.`);
+            } else {
+              toast.error('Export had warnings', r.errors[0]);
+            }
+          } else {
+            toast.success('Exported');
+          }
+        } catch (e) {
+          toast.error('Export failed', (e as Error).message);
+        } finally {
+          setRunning(false);
+        }
+      }}
+      title="Write a Cohort Review Export tab to the Companies workbook"
+    >
+      <Download className="h-3.5 w-3.5" /> {running ? 'Exporting…' : 'Export to sheet'}
+    </Button>
+  );
 }
 
 function Tile({ label, value, tone }: { label: string; value: number; tone: 'green' | 'amber' | 'red' | 'navy' }) {

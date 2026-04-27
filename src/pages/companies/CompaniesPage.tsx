@@ -40,6 +40,7 @@ import { ReviewView } from './ReviewView';
 import type { ReviewableCompany, SelectionContext } from './ReviewView';
 import { FinalDecisionView } from './FinalDecisionView';
 import type { FinalLockArgs } from './FinalDecisionView';
+import { exportReviewToSheet } from './exportReview';
 import { indexByCompanyName, lookupByName } from './selectionContext';
 import { ExpandableCompanyCard } from './ExpandableCompanyCard';
 import type { CardCompany } from './ExpandableCompanyCard';
@@ -1549,6 +1550,15 @@ export function CompaniesPage() {
             sub_intervention: a.sub_intervention,
             fund_code: a.fund_code,
           }))}
+          onExport={async () => {
+            if (!masterSheetId) throw new Error('No companies workbook configured');
+            return exportReviewToSheet(masterSheetId, {
+              companies: reviewableForView,
+              reviews: reviews.rows,
+              comments: comments.rows,
+              assignments: assignments.rows as unknown as Record<string, string>[],
+            }, user?.email || 'unknown');
+          }}
           onLockDecision={async (args: FinalLockArgs) => {
             const c = reviewableForView.find(x => x.company_id === args.companyId);
             if (!c) throw new Error('Company not found');
