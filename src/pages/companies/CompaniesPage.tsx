@@ -25,6 +25,7 @@ import {
   FilterDrawer,
   FilterToggleButton,
   Kanban,
+  PageHeader,
   Tabs,
   statusTone,
   useToast,
@@ -415,7 +416,9 @@ export function CompaniesPage() {
   // is "decide whether to recommend, and what interventions to assign."
   // Flip this toggle to bring the pre-interview applicants back into view
   // (Applicant / Shortlisted / blank) for an admin-only audit pass.
-  const [includePreInterview, setIncludePreInterview] = useState(false);
+  // Derived from the FilterDrawer toggle so the chrome and the filter state
+  // stay in lockstep. Default = false (post-interview only).
+  const includePreInterview = filters.includePreInterview === true;
   // Legacy collapse — kept so the existing FilterBar / chip wiring continues
   // to work, just hidden from the header. Functionally identical to flipping
   // both knobs to "post-interview only", which is now the default.
@@ -596,6 +599,12 @@ export function CompaniesPage() {
   }, [joined, filtered.length]);
 
   const filterFields: FilterFieldDef[] = useMemo(() => [
+    {
+      key: 'includePreInterview',
+      type: 'toggle',
+      label: 'Include pre-interview',
+      hint: 'Bring Applicant + Shortlisted lanes back into view (defaults to post-interview only).',
+    },
     {
       key: 'status',
       type: 'multiselect',
@@ -1008,131 +1017,109 @@ export function CompaniesPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Companies</h1>
-            <Badge tone="teal">{joined.length} cohort 3</Badge>
-            {interviewedSet.size > 0 && (
-              <Badge tone="amber">
-                {interviewedCount} / {INTERVIEWED_RAW.length} interviewed
-              </Badge>
-            )}
-            {unmatchedInterviewed.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowUnmatched(s => !s)}
-                className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
-                title="Click to view names that didn't match any applicant in Source Data"
-              >
-                {unmatchedInterviewed.length} unmatched
-              </button>
-            )}
-          </div>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Post-interview triage: {INTERVIEWED_RAW.length} companies scheduled across Phases 1–4 (April 2026) flow through
-            Reviewing → Recommended → Selected, then get interventions assigned. Pre-interview applicants are hidden by default —
-            flip <em>Include pre-interview</em> to see all 107.
-          </p>
-          {showUnmatched && (
-            <div className="mt-2 max-w-3xl rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
-              <datalist id="applicant-options">
-                {applicantOptions.map(n => (<option key={n} value={n} />))}
-              </datalist>
+      <PageHeader
+        title="Companies"
+        badges={[
+          { label: `${joined.length} cohort 3`, tone: 'teal' },
+          ...(interviewedSet.size > 0
+            ? [{ label: `${interviewedCount} / ${INTERVIEWED_RAW.length} interviewed`, tone: 'amber' as Tone }]
+            : []),
+          ...(unmatchedInterviewed.length > 0
+            ? [{
+                key: 'unmatched',
+                label: (
+                  <button
+                    type="button"
+                    onClick={() => setShowUnmatched(s => !s)}
+                    className="font-semibold underline-offset-2 hover:underline"
+                  >
+                    {unmatchedInterviewed.length} unmatched
+                  </button>
+                ),
+                tone: 'amber' as Tone,
+              }]
+            : []),
+        ]}
+        actions={
+          <>
+            <FilterToggleButton count={activeFilterCount} onClick={() => setFiltersOpen(true)} />
+            <Button variant="ghost" onClick={() => { applicants.refresh(); master.refresh(); assignments.refresh(); }} title="Reload">
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => downloadCsv(timestampedFilename('companies'), filteredBySelection as unknown as Record<string, unknown>[])}
+              disabled={filteredBySelection.length === 0}
+              title="Export CSV"
+            >
+              <Download className="h-4 w-4" />
+            </Button>
+            <Button onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" /> New
+            </Button>
+          </>
+        }
+      />
 
-              {unmatchedInterviewed.length > 0 ? (
-                <>
-                  <div className="mb-2 font-semibold">
-                    {unmatchedInterviewed.length} schedule name{unmatchedInterviewed.length === 1 ? '' : 's'} didn't match any applicant. Pick the right company from Source Data to map them:
+      {showUnmatched && (
+        <Card className="border-amber-200 bg-amber-50/60 dark:border-amber-900 dark:bg-amber-950/30">
+          <datalist id="applicant-options">
+            {applicantOptions.map(n => (<option key={n} value={n} />))}
+          </datalist>
+          {unmatchedInterviewed.length > 0 ? (
+            <>
+              <h3 className="mb-2 text-sm font-bold text-amber-900 dark:text-amber-200">
+                {unmatchedInterviewed.length} schedule name{unmatchedInterviewed.length === 1 ? '' : 's'} didn't match — pick the right Source Data company for each
+              </h3>
+              <div className="space-y-1.5">
+                {unmatchedInterviewed.map(name => (
+                  <div key={name} className="flex flex-wrap items-center gap-2 text-xs">
+                    <div className="min-w-[14rem] flex-1 truncate font-medium" title={name}>{name}</div>
+                    <span className="text-amber-700 dark:text-amber-300">→</span>
+                    <input
+                      type="text"
+                      list="applicant-options"
+                      placeholder="Type or pick an applicant…"
+                      defaultValue={aliases[name] || ''}
+                      onBlur={e => setAlias(name, e.currentTarget.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                      className="min-w-[16rem] flex-1 rounded border border-amber-300 bg-white px-2 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:border-amber-500 focus:outline-none dark:border-amber-800 dark:bg-slate-900 dark:text-slate-100"
+                    />
                   </div>
-                  <div className="space-y-1.5">
-                    {unmatchedInterviewed.map(name => (
-                      <div key={name} className="flex flex-wrap items-center gap-2">
-                        <div className="min-w-[14rem] flex-1 truncate font-medium" title={name}>{name}</div>
-                        <span className="text-amber-700 dark:text-amber-300">→</span>
-                        <input
-                          type="text"
-                          list="applicant-options"
-                          placeholder="Type or pick an applicant…"
-                          defaultValue={aliases[name] || ''}
-                          onBlur={e => setAlias(name, e.currentTarget.value)}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                          }}
-                          className="min-w-[16rem] flex-1 rounded border border-amber-300 bg-white px-2 py-1 text-[12px] text-slate-800 placeholder:text-slate-400 focus:border-amber-500 focus:outline-none dark:border-amber-800 dark:bg-slate-900 dark:text-slate-100"
-                        />
-                      </div>
-                    ))}
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="text-sm font-semibold text-emerald-700">All schedule names matched.</p>
+          )}
+          {mappedAliases.length > 0 && (
+            <div className="mt-3 border-t border-amber-200 pt-2 dark:border-amber-900">
+              <h4 className="mb-1 text-xs font-bold uppercase tracking-wider text-amber-800 dark:text-amber-300">
+                {mappedAliases.length} mapped alias{mappedAliases.length === 1 ? '' : 'es'}
+              </h4>
+              <div className="space-y-1">
+                {mappedAliases.map(name => (
+                  <div key={name} className="flex flex-wrap items-center gap-2 text-xs">
+                    <div className="min-w-[14rem] flex-1 truncate" title={name}>{name}</div>
+                    <span className="text-emerald-700 dark:text-emerald-300">→</span>
+                    <div className="min-w-[16rem] flex-1 truncate font-medium text-emerald-800 dark:text-emerald-200" title={aliases[name]}>{aliases[name]}</div>
+                    <button
+                      type="button"
+                      onClick={() => setAlias(name, '')}
+                      className="rounded border border-amber-300 px-1.5 py-0.5 text-[11px] hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900"
+                    >
+                      Clear
+                    </button>
                   </div>
-                </>
-              ) : (
-                <div className="font-semibold">All schedule names matched. Nothing to reconcile.</div>
-              )}
-
-              {mappedAliases.length > 0 && (
-                <div className="mt-3 border-t border-amber-200 pt-2 dark:border-amber-900">
-                  <div className="mb-1 font-semibold">
-                    {mappedAliases.length} mapped alias{mappedAliases.length === 1 ? '' : 'es'}:
-                  </div>
-                  <div className="space-y-1">
-                    {mappedAliases.map(name => (
-                      <div key={name} className="flex flex-wrap items-center gap-2">
-                        <div className="min-w-[14rem] flex-1 truncate" title={name}>{name}</div>
-                        <span className="text-emerald-700 dark:text-emerald-300">→</span>
-                        <div className="min-w-[16rem] flex-1 truncate font-medium text-emerald-800 dark:text-emerald-200" title={aliases[name]}>
-                          {aliases[name]}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setAlias(name, '')}
-                          className="rounded border border-amber-300 px-1.5 py-0.5 text-[11px] hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900"
-                        >
-                          Clear
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="mt-2 text-[11px] opacity-80">
-                Aliases are saved to the shared <code className="rounded bg-amber-100 px-1 dark:bg-amber-900">Interview Aliases</code> tab in the Companies workbook —
-                every team member sees the same matches. Permanent fixes can also be made by editing{' '}
-                <code className="rounded bg-amber-100 px-1 dark:bg-amber-900">interviewedSource.ts</code> to match Source Data's spelling.
+                ))}
               </div>
             </div>
           )}
-        </div>
-        <div className="flex items-center gap-3">
-          <label
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300"
-            title="Default scope is the post-interview portfolio. Flip this to bring the pre-interview applicants back into view."
-          >
-            <input
-              type="checkbox"
-              checked={includePreInterview}
-              onChange={() => setIncludePreInterview(v => !v)}
-              className="rounded"
-            />
-            Include pre-interview
-          </label>
-          <FilterToggleButton count={activeFilterCount} onClick={() => setFiltersOpen(true)} />
-          <Button variant="ghost" onClick={() => { applicants.refresh(); master.refresh(); assignments.refresh(); }} title="Reload">
-            <RefreshCw className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => downloadCsv(timestampedFilename('companies'), filteredBySelection as unknown as Record<string, unknown>[])}
-            disabled={filteredBySelection.length === 0}
-            title="Export CSV"
-          >
-            <Download className="h-4 w-4" />
-          </Button>
-          <Button onClick={() => setCreating(true)}>
-            <Plus className="h-4 w-4" /> New
-          </Button>
-        </div>
-      </header>
+          <p className="mt-2 text-[11px] text-amber-800 opacity-80 dark:text-amber-300">
+            Saved to the shared Interview Aliases tab — every team member sees the same matches and the matched company auto-materializes into Master.
+          </p>
+        </Card>
+      )}
 
       {error && (
         <Card className="border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950">

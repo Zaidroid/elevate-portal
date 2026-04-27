@@ -33,6 +33,7 @@ import {
   CardHeader,
   DataTable,
   EmptyState,
+  PageHeader,
   Tabs,
   downloadCsv,
   timestampedFilename,
@@ -757,43 +758,40 @@ export function AdvisorsPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Advisors</h1>
-            <Badge tone="teal">{active.length} active</Badge>
-            {archivedCount > 0 && (
-              <Badge tone="neutral">{archivedCount} archived</Badge>
+      <PageHeader
+        title="Advisors"
+        badges={[
+          { label: `${active.length} active`, tone: 'teal' },
+          ...(archivedCount > 0 ? [{ label: `${archivedCount} archived`, tone: 'neutral' as Tone }] : []),
+        ]}
+        actions={
+          <>
+            {canEdit && (
+              <span
+                className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:border-navy-700 dark:text-slate-400"
+                title="Form responses are pulled every 5 minutes"
+              >
+                <CloudDownload className={`h-3 w-3 ${importing ? 'animate-pulse text-brand-teal' : ''}`} />
+                Auto-sync
+              </span>
             )}
-          </div>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Triage Cohort 3 advisors (post-2026). Pre-2026 entries are archived; toggle below to see them.
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {canEdit && (
-            <span className="inline-flex items-center gap-1 self-center text-2xs font-semibold uppercase tracking-wider text-slate-400">
-              <CloudDownload className={`h-3 w-3 ${importing ? 'animate-pulse text-brand-teal' : ''}`} />
-              Auto-syncing form
-            </span>
-          )}
-          {/* Manual Dedupe button removed — auto-dedupe runs silently on
-              mount when duplicates are detected (see useEffect below). */}
-          <Button variant="ghost" onClick={() => setShowArchived(v => !v)}>
-            <Archive className="h-4 w-4" /> {showArchived ? 'Hide archived' : 'Show archived'}
-          </Button>
-          <Button variant="ghost" onClick={() => { advHook.refresh(); fuHook.refresh(); actHook.refresh(); cmtHook.refresh(); }}>
-            <RefreshCw className="h-4 w-4" /> Refresh
-          </Button>
-          <Button
-            variant="ghost"
-            disabled={filtered.length === 0}
-            onClick={() => downloadCsv(timestampedFilename('advisors'), filtered.map(toCsvRow))}
-          >
-            <Download className="h-4 w-4" /> Export CSV
-          </Button>
-        </div>
-      </header>
+            <Button variant="ghost" onClick={() => setShowArchived(v => !v)} title={showArchived ? 'Hide archived' : 'Show archived'}>
+              <Archive className="h-4 w-4" />
+            </Button>
+            <Button variant="ghost" onClick={() => { advHook.refresh(); fuHook.refresh(); actHook.refresh(); cmtHook.refresh(); }} title="Reload">
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={filtered.length === 0}
+              onClick={() => downloadCsv(timestampedFilename('advisors'), filtered.map(toCsvRow))}
+              title="Export CSV"
+            >
+              <Download className="h-4 w-4" />
+            </Button>
+          </>
+        }
+      />
 
       {newEntries.length > 0 && (
         <Card accent="red">

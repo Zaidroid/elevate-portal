@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react';
-import { Search, Plus, CheckCircle2, XCircle, Download } from 'lucide-react';
+import { Search, Plus, CheckCircle2, XCircle, Download, RefreshCw } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { isAdmin } from '../../config/team';
 import { useSheetDoc } from '../../lib/two-way-sync';
 import { getSheetId, getTab } from '../../config/sheets';
-import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
+import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { PaymentsSourceComparisonView } from './SourceComparisonView';
 
@@ -89,27 +89,28 @@ export function PaymentsPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Payments</h1>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Advisor fees, vendor payments, participant stipends. {admin ? 'You can approve payments.' : 'Approvals require admin role.'}
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <Button variant="ghost" onClick={refresh}>Refresh</Button>
-          <Button
-            variant="ghost"
-            onClick={() => downloadCsv(timestampedFilename('payments'), filtered)}
-            disabled={filtered.length === 0}
-          >
-            <Download className="h-4 w-4" /> Export
-          </Button>
-          <Button onClick={() => setCreating(true)}>
-            <Plus className="h-4 w-4" /> New Payment
-          </Button>
-        </div>
-      </header>
+      <PageHeader
+        title="Payments"
+        badges={[{ label: `${rows.length} entries`, tone: 'teal' }]}
+        actions={
+          <>
+            <Button variant="ghost" onClick={refresh} title="Reload">
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => downloadCsv(timestampedFilename('payments'), filtered)}
+              disabled={filtered.length === 0}
+              title="Export CSV"
+            >
+              <Download className="h-4 w-4" />
+            </Button>
+            <Button onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" /> New
+            </Button>
+          </>
+        }
+      />
 
       <div className="flex gap-2 rounded-xl border border-slate-200 bg-white p-1 dark:border-navy-700 dark:bg-navy-600">
         <button

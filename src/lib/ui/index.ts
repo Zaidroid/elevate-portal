@@ -20,3 +20,5 @@ export type { FilterGroup, FilterOption, FilterValues } from './FilterBar';
 export { FilterDrawer, FilterToggleButton } from './FilterDrawer';
 export type { FilterFieldDef, FilterFieldOption } from './FilterDrawer';
 export type { FilterValues as FilterDrawerValues } from './FilterDrawer';
+export { PageHeader } from './PageHeader';
+export type { PageHeaderBadge } from './PageHeader';

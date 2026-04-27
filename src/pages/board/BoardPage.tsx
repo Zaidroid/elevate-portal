@@ -14,7 +14,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { Badge, Card, EmptyState, Kanban, Tabs, statusTone } from '../../lib/ui';
+import { Badge, Card, EmptyState, Kanban, PageHeader, Tabs, statusTone } from '../../lib/ui';
 import type { KanbanColumn, TabItem, Tone } from '../../lib/ui';
 import { useSheetDoc } from '../../lib/two-way-sync';
 import { getSheetId, getTab } from '../../config/sheets';
@@ -390,47 +390,32 @@ export function BoardPage() {
 
   return (
     <div className="mx-auto max-w-[1800px] space-y-5">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">
-              Workboard
-            </h1>
-            <Badge tone={scope === 'mine' ? 'teal' : 'neutral'}>
-              {scope === 'mine' ? `${userFirst}'s work` : 'All work'}
-            </Badge>
-          </div>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Drag cards between columns to update status in the source sheet. Every lane is a lens on the same data.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {tier !== 'profile_manager' && (
-            <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 dark:border-navy-700 dark:bg-navy-600">
+      <PageHeader
+        title="Workboard"
+        badges={[{ label: scope === 'mine' ? `${userFirst}'s work` : 'All work', tone: scope === 'mine' ? 'teal' : 'neutral' }]}
+        actions={
+          tier !== 'profile_manager' ? (
+            <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-1 dark:border-navy-700 dark:bg-navy-600">
               <button
                 onClick={() => setScope('mine')}
-                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                  scope === 'mine'
-                    ? 'bg-brand-red text-white'
-                    : 'text-slate-500 hover:text-navy-500 dark:text-slate-300'
+                className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                  scope === 'mine' ? 'bg-brand-red text-white' : 'text-slate-500 hover:text-navy-500 dark:text-slate-300'
                 }`}
               >
-                My work
+                Mine
               </button>
               <button
                 onClick={() => setScope('all')}
-                className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                  scope === 'all'
-                    ? 'bg-brand-red text-white'
-                    : 'text-slate-500 hover:text-navy-500 dark:text-slate-300'
+                className={`rounded-md px-2.5 py-1 text-xs font-semibold transition ${
+                  scope === 'all' ? 'bg-brand-red text-white' : 'text-slate-500 hover:text-navy-500 dark:text-slate-300'
                 }`}
               >
                 Everyone
               </button>
             </div>
-          )}
-        </div>
-      </header>
+          ) : null
+        }
+      />
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <HeroStat

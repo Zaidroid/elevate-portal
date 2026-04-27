@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Search, Plus, Download } from 'lucide-react';
+import { Search, Plus, Download, RefreshCw } from 'lucide-react';
 import { derivePRFields } from '../../lib/procurement/compute';
 import { useAuth } from '../../services/auth';
 import { useSheetDoc } from '../../lib/two-way-sync';
 import { getSheetId, getTab } from '../../config/sheets';
-import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
+import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { SourceComparisonView } from './SourceComparisonView';
 import { SourceAnalysisView } from './SourceAnalysisView';
@@ -144,27 +144,28 @@ export function ProcurementPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-extrabold text-navy-500 dark:text-white">Procurement</h1>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Quarterly purchase requests. Thresholds and deadlines compute in the sheet.
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <Button variant="ghost" onClick={refresh}>Refresh</Button>
-          <Button
-            variant="ghost"
-            onClick={() => downloadCsv(timestampedFilename(`procurement_${isQuarter ? view : 'q1'}`), filtered)}
-            disabled={filtered.length === 0}
-          >
-            <Download className="h-4 w-4" /> Export
-          </Button>
-          <Button onClick={() => setCreating(true)}>
-            <Plus className="h-4 w-4" /> New PR
-          </Button>
-        </div>
-      </header>
+      <PageHeader
+        title="Procurement"
+        badges={[{ label: `${allE3Rows.length} PRs`, tone: 'teal' }]}
+        actions={
+          <>
+            <Button variant="ghost" onClick={refresh} title="Reload">
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => downloadCsv(timestampedFilename(`procurement_${isQuarter ? view : 'q1'}`), filtered)}
+              disabled={filtered.length === 0}
+              title="Export CSV"
+            >
+              <Download className="h-4 w-4" />
+            </Button>
+            <Button onClick={() => setCreating(true)}>
+              <Plus className="h-4 w-4" /> New
+            </Button>
+          </>
+        }
+      />
 
       <div className="flex gap-2 rounded-xl border border-slate-200 bg-white p-1 dark:border-navy-700 dark:bg-navy-600">
         {(Object.keys(QUARTER_LABELS) as Quarter[]).map(q => (
