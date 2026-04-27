@@ -24,11 +24,13 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Download,
+  ExternalLink,
   Lock,
   MessageCircle,
   RefreshCw,
+  Search,
   Trophy,
-  Upload,
+  Users,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { useSheetDoc } from '../../lib/two-way-sync';
@@ -43,15 +45,16 @@ import {
   EmptyState,
   PageHeader,
   Tabs,
+  downloadCsv,
+  timestampedFilename,
   useToast,
 } from '../../lib/ui';
 import type { TabItem, Tone } from '../../lib/ui';
-import { ACCOUNT_MANAGERS, displayName, isAdmin } from '../../config/team';
+import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
 import { PILLARS, pillarFor, resolveIntervention } from '../../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from '../companies/interviewedSource';
 import type { ReviewableCompany, SelectionContext } from './ReviewQueueTab';
 import type { FinalLockArgs } from './FinalCohortTab';
-import { fuzzyResolve, importExternalSeed, loadSeed } from './importExternal';
 import {
   ACTIVITY_HEADERS,
   ALIAS_HEADERS,
@@ -126,14 +129,12 @@ function padId(n: string): string {
   return Number.isFinite(num) && num > 0 ? `A-${num.toString().padStart(4, '0')}` : '';
 }
 
-type Stage = 'review' | 'finalize' | 'output' | 'insights' | 'imports' | 'activity';
+type Stage = 'review' | 'finalize' | 'output' | 'insights' | 'activity';
 
 // ─── main page ───────────────────────────────────────────────────────
 
 export function SelectionPage() {
   const { user } = useAuth();
-  const toast = useToast();
-  const admin = user ? isAdmin(user.email) : false;
 
   const masterSheetId = getSheetId('companies');
   const selectionSheetId = getSheetId('selection');
@@ -463,41 +464,11 @@ export function SelectionPage() {
     await assignments.refresh();
   };
 
-  // ─── import handler ───
-  const [importingExt, setImportingExt] = useState(false);
-  const handleImportExternal = async () => {
-    if (!masterSheetId) return;
-    setImportingExt(true);
-    try {
-      const seed = await loadSeed();
-      if (!seed) {
-        toast.error('Seed missing', 'Run sheet-builders/tools/import_external_comments.py.');
-        return;
-      }
-      const candidates = reviewableForView.map(r => ({ company_id: r.company_id, company_name: r.company_name }));
-      const result = await importExternalSeed(seed, {
-        resolve: name => fuzzyResolve(name, candidates),
-        existingComments: commentsDoc.rows,
-        existingRecs: preDecisionsDoc.rows,
-        createComment: row => commentsDoc.createRow(row),
-        createRecommendation: row => preDecisionsDoc.createRow(row),
-      });
-      const lines: string[] = [];
-      lines.push(`${result.commentsAdded} comments + ${result.recsAdded} recs imported.`);
-      if (result.commentsSkipped + result.recsSkipped > 0) lines.push(`${result.commentsSkipped + result.recsSkipped} already-present.`);
-      if (result.commentsUnmatched.length + result.recsUnmatched.length > 0) {
-        lines.push(`${result.commentsUnmatched.length + result.recsUnmatched.length} unmatched. Add aliases.`);
-      }
-      toast.success('Import complete', lines.join(' '));
-      logActivity('import_external', undefined, { details: `${result.commentsAdded}c+${result.recsAdded}r` });
-      await commentsDoc.refresh();
-      await preDecisionsDoc.refresh();
-    } catch (e) {
-      toast.error('Import failed', (e as Error).message);
-    } finally {
-      setImportingExt(false);
-    }
-  };
+  // External comment imports (Israa CSV / Raouf docx) are handled by
+  // the Python tool offline + a one-time admin push. They land in the
+  // regular Company Comments + Pre-decision Recommendations tabs and
+  // surface in the UI alongside everyone else's comments — no separate
+  // import button or special call-out.
 
   // ─── tab + flow stage counts ───
   const reviewedAnyone = useMemo(() => {
@@ -521,7 +492,6 @@ export function SelectionPage() {
     },
     { value: 'output', label: `Stage 3 · Final cohort · ${lockedCount}`, icon: <Trophy className="h-4 w-4" /> },
     { value: 'insights', label: 'Insights', icon: <BarChart3 className="h-4 w-4" /> },
-    { value: 'imports', label: 'Imports & seeds', icon: <Upload className="h-4 w-4" /> },
     { value: 'activity', label: 'Activity', icon: <ActivityIcon className="h-4 w-4" /> },
   ];
 
@@ -596,6 +566,7 @@ export function SelectionPage() {
             companies={reviewableForView}
             assignments={assignments.rows}
             master={master.rows}
+            masterSheetId={masterSheetId}
           />
         )}
 
@@ -605,15 +576,6 @@ export function SelectionPage() {
             reviews={reviewsDoc.rows}
             assignments={assignments.rows}
             preDecisions={preDecisionsDoc.rows}
-          />
-        )}
-
-        {stage === 'imports' && (
-          <ImportsSeedsView
-            loading={importingExt}
-            onImport={admin ? handleImportExternal : undefined}
-            commentsCount={commentsDoc.rows.length}
-            preDecisionsCount={preDecisionsDoc.rows.length}
           />
         )}
 
@@ -715,13 +677,20 @@ function FinalCohortOutput({
   companies,
   assignments,
   master,
+  masterSheetId,
 }: {
   companies: ReviewableCompany[];
   assignments: Assignment[];
   master: Master[];
+  masterSheetId: string;
 }) {
+  const toast = useToast();
+  const [search, setSearch] = useState('');
+  const [groupBy, setGroupBy] = useState<'am' | 'pillar' | 'fund'>('am');
+  const [exporting, setExporting] = useState(false);
+
   // Group assignments by company. Only show companies that have at
-  // least one locked assignment — that is the resulting cohort.
+  // least one locked assignment — the resulting cohort.
   const byCompany = useMemo(() => {
     const m = new Map<string, Assignment[]>();
     for (const a of assignments) {
@@ -738,136 +707,370 @@ function FinalCohortOutput({
     return m;
   }, [master]);
 
-  const rows = useMemo(() => {
-    const out: Array<{ company: ReviewableCompany; m: Master | undefined; assigns: Assignment[] }> = [];
+  // Per-company aggregate row + pillar breakdown.
+  const cohortRows = useMemo(() => {
+    const out: Array<{
+      company: ReviewableCompany;
+      m: Master | undefined;
+      assigns: Assignment[];
+      byPillar: Map<string, { fund: string; subs: Array<{ name: string; fund: string }> }>;
+      pillarCodes: string[];
+      funds: Set<string>;
+    }> = [];
     for (const c of companies) {
       const a = byCompany.get(c.company_id) || [];
       if (a.length === 0) continue;
-      out.push({ company: c, m: masterById.get(c.company_id), assigns: a });
+      const byPillar = new Map<string, { fund: string; subs: Array<{ name: string; fund: string }> }>();
+      const funds = new Set<string>();
+      for (const x of a) {
+        const code = pillarFor(x.intervention_type)?.code || x.intervention_type;
+        const cur = byPillar.get(code) || { fund: x.fund_code || '', subs: [] };
+        if (!cur.fund && x.fund_code) cur.fund = x.fund_code;
+        if (x.sub_intervention) cur.subs.push({ name: x.sub_intervention, fund: x.fund_code || '' });
+        byPillar.set(code, cur);
+        if (x.fund_code) funds.add(x.fund_code);
+      }
+      out.push({
+        company: c,
+        m: masterById.get(c.company_id),
+        assigns: a,
+        byPillar,
+        pillarCodes: Array.from(byPillar.keys()),
+        funds,
+      });
     }
-    // Group by AM, then alphabetical.
-    return out.sort((x, y) => {
-      const ax = x.m?.profile_manager_email || 'zzz';
-      const ay = y.m?.profile_manager_email || 'zzz';
-      if (ax !== ay) return ax.localeCompare(ay);
-      return x.company.company_name.localeCompare(y.company.company_name);
-    });
+    return out;
   }, [companies, byCompany, masterById]);
 
-  // Group assignments by pillar within each company for compact display.
-  const summaryRows = rows.map(({ company, m, assigns }) => {
-    const byPillar = new Map<string, { fund: string; subs: string[] }>();
-    for (const a of assigns) {
-      const code = pillarFor(a.intervention_type)?.code || a.intervention_type;
-      const cur = byPillar.get(code) || { fund: a.fund_code || '', subs: [] };
-      if (!cur.fund && a.fund_code) cur.fund = a.fund_code;
-      if (a.sub_intervention) cur.subs.push(a.sub_intervention);
-      byPillar.set(code, cur);
-    }
-    return { company, m, byPillar };
-  });
+  // Apply search filter.
+  const visibleRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return cohortRows;
+    return cohortRows.filter(r =>
+      `${r.company.company_name} ${r.company.sector} ${r.company.city} ${r.company.governorate}`.toLowerCase().includes(q),
+    );
+  }, [cohortRows, search]);
 
-  if (rows.length === 0) {
+  if (cohortRows.length === 0) {
     return (
-      <EmptyState
-        icon={<Trophy className="h-6 w-6" />}
-        title="No locked decisions yet"
-        description="As Stage 2 finalizes companies, the resulting cohort will populate here. Each row shows the AM, status, fund, and pillars + sub-interventions locked for that company."
-      />
+      <Card>
+        <EmptyState
+          icon={<Trophy className="h-8 w-8" />}
+          title="No locked decisions yet"
+          description="Once Stage 2 starts locking decisions, the final cohort populates here with AMs, donors, pillars and sub-interventions per company. Includes one-click Sheet/CSV export."
+        />
+      </Card>
     );
   }
 
   // Stats
-  const totalCompanies = rows.length;
+  const totalCompanies = cohortRows.length;
   const totalAssignments = assignments.length;
   const dutchCount = assignments.filter(a => a.fund_code === '97060').length;
   const sidaCount = assignments.filter(a => a.fund_code === '91763').length;
-  const perAm = new Map<string, number>();
-  for (const r of rows) {
-    const k = r.m?.profile_manager_email || 'unassigned';
-    perAm.set(k, (perAm.get(k) || 0) + 1);
+  const noFundCount = assignments.filter(a => !a.fund_code).length;
+  const dualFundCompanies = cohortRows.filter(r => r.funds.has('97060') && r.funds.has('91763')).length;
+
+  // Per-pillar coverage: distinct companies served per pillar
+  const pillarCompanySets = new Map<string, Set<string>>();
+  for (const r of cohortRows) {
+    for (const p of r.pillarCodes) {
+      const set = pillarCompanySets.get(p) || new Set();
+      set.add(r.company.company_id);
+      pillarCompanySets.set(p, set);
+    }
   }
 
-  // Group rendering by AM bucket
-  const byAm = new Map<string, typeof summaryRows>();
-  for (const r of summaryRows) {
-    const k = r.m?.profile_manager_email || '';
-    const arr = byAm.get(k) || [];
-    arr.push(r);
-    byAm.set(k, arr);
+  // Per-sub-intervention counts
+  const subCounts = new Map<string, number>();
+  for (const a of assignments) {
+    if (a.sub_intervention) subCounts.set(a.sub_intervention, (subCounts.get(a.sub_intervention) || 0) + 1);
   }
-  const amOrder = [
-    ...ACCOUNT_MANAGERS.map(a => a.email),
-    ...Array.from(byAm.keys()).filter(k => k && !ACCOUNT_MANAGERS.find(a => a.email === k)),
-    '',
-  ];
+
+  // Per-AM
+  const amBuckets = new Map<string, typeof cohortRows>();
+  for (const r of cohortRows) {
+    const key = r.m?.profile_manager_email || '';
+    const arr = amBuckets.get(key) || [];
+    arr.push(r);
+    amBuckets.set(key, arr);
+  }
+
+  // ─── Export handlers ─────────────────────────────────────────────
+  const buildExportRows = () => {
+    return cohortRows.map(r => {
+      const pillarStrings: string[] = [];
+      for (const [code, { fund, subs }] of r.byPillar) {
+        if (subs.length === 0) pillarStrings.push(`${code}${fund ? ` [${fund}]` : ''}`);
+        else for (const s of subs) pillarStrings.push(`${code}/${s.name}${s.fund ? ` [${s.fund}]` : (fund ? ` [${fund}]` : '')}`);
+      }
+      const dutchSubs: string[] = [];
+      const sidaSubs: string[] = [];
+      for (const [code, { fund, subs }] of r.byPillar) {
+        for (const s of subs) {
+          const eff = s.fund || fund;
+          const tag = `${code}/${s.name}`;
+          if (eff === '97060') dutchSubs.push(tag);
+          else if (eff === '91763') sidaSubs.push(tag);
+        }
+      }
+      return {
+        company_id: r.company.company_id,
+        company_name: r.company.company_name,
+        sector: r.company.sector,
+        city: r.company.city,
+        governorate: r.company.governorate,
+        status: r.m?.status || r.company.status,
+        account_manager: r.m?.profile_manager_email || r.company.profile_manager_email || '',
+        pillars: r.pillarCodes.join(', '),
+        interventions: pillarStrings.join(' | '),
+        dutch_interventions: dutchSubs.join(' | '),
+        sida_interventions: sidaSubs.join(' | '),
+        fund_codes: Array.from(r.funds).join(','),
+        intervention_count: r.assigns.length,
+      };
+    });
+  };
+
+  const handleCsvExport = () => {
+    const rows = buildExportRows();
+    downloadCsv(timestampedFilename('final-cohort'), rows as unknown as Record<string, unknown>[]);
+    toast.success('CSV downloaded', `${rows.length} compan${rows.length === 1 ? 'y' : 'ies'} exported.`);
+  };
+
+  const handleSheetExport = async () => {
+    if (!masterSheetId) {
+      toast.error('No workbook configured', 'VITE_SHEET_COMPANIES is not set.');
+      return;
+    }
+    setExporting(true);
+    try {
+      const rows = buildExportRows();
+      const result = await exportFinalCohortToSheet(masterSheetId, rows);
+      toast.success('Pushed to sheet', `${result.rowsWritten} rows written to "${result.tabName}".`);
+    } catch (e) {
+      toast.error('Export failed', (e as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
-    <div className="space-y-3">
-      <Card>
-        <CardHeader
-          title={`Final cohort · ${totalCompanies} compan${totalCompanies === 1 ? 'y' : 'ies'}`}
-          subtitle={`${totalAssignments} intervention assignment${totalAssignments === 1 ? '' : 's'}; ${dutchCount} Dutch · ${sidaCount} SIDA. Grouped by AM.`}
-        />
-        <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-          <KPI label="Companies" value={totalCompanies} tone="green" />
-          <KPI label="Interventions" value={totalAssignments} tone="teal" />
-          <KPI label="Dutch (97060)" value={dutchCount} tone="navy" />
-          <KPI label="SIDA (91763)" value={sidaCount} tone="amber" />
-          <KPI label="Avg per company" value={(totalAssignments / Math.max(1, totalCompanies)).toFixed(1)} tone="orange" />
+    <div className="space-y-4">
+      {/* ── Hero header ── */}
+      <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-50 to-teal-50 p-4 dark:border-navy-700 dark:from-emerald-950 dark:to-teal-950">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <Trophy className="h-6 w-6 text-emerald-700 dark:text-emerald-300" />
+              <h2 className="text-xl font-extrabold text-emerald-900 dark:text-emerald-100">
+                Cohort 3 · Final selection
+              </h2>
+            </div>
+            <p className="mt-1 text-sm text-emerald-800/80 dark:text-emerald-200/80">
+              {totalCompanies} compan{totalCompanies === 1 ? 'y' : 'ies'} · {totalAssignments} intervention{totalAssignments === 1 ? '' : 's'} · {dutchCount} Dutch + {sidaCount} SIDA
+              {dualFundCompanies > 0 && ` · ${dualFundCompanies} on both donors`}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="ghost" onClick={handleCsvExport}>
+              <Download className="h-4 w-4" /> CSV
+            </Button>
+            <Button onClick={handleSheetExport} disabled={exporting}>
+              <ExternalLink className="h-4 w-4" /> {exporting ? 'Pushing…' : 'Push to Sheet'}
+            </Button>
+          </div>
         </div>
-      </Card>
+      </div>
 
-      {amOrder.map(amEmail => {
-        const bucket = byAm.get(amEmail) || [];
-        if (bucket.length === 0) return null;
-        const amName = amEmail
-          ? ACCOUNT_MANAGERS.find(a => a.email === amEmail)?.name || displayName(amEmail)
-          : 'Unassigned AM';
-        return (
-          <Card key={amEmail || 'unassigned'}>
-            <CardHeader
-              title={`${amName} · ${bucket.length}`}
-              subtitle={amEmail ? amEmail : 'These companies have locked interventions but no AM yet.'}
-            />
-            <ul className="space-y-2">
-              {bucket.map(({ company, m, byPillar }) => (
-                <li
-                  key={company.company_id}
-                  className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="font-bold text-navy-500 dark:text-slate-100">{company.company_name}</div>
-                      <div className="text-xs text-slate-500">
-                        {[company.sector, company.city, company.governorate].filter(Boolean).join(' · ') || '—'}
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                      {m?.status && <Badge tone={m.status === 'Selected' ? 'green' : m.status === 'Hold' ? 'amber' : 'neutral'}>{m.status}</Badge>}
-                      {company.fund_code && (
-                        <Badge tone={company.fund_code === '97060' ? 'teal' : 'amber'}>
-                          {company.fund_code === '97060' ? 'Dutch' : 'SIDA'}
-                        </Badge>
-                      )}
-                    </div>
+      {/* ── KPI strip ── */}
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+        <KPI label="Companies" value={totalCompanies} tone="green" />
+        <KPI label="Interventions" value={totalAssignments} tone="teal" />
+        <KPI label="Dutch" value={dutchCount} hint="97060" tone="navy" />
+        <KPI label="SIDA" value={sidaCount} hint="91763" tone="amber" />
+        <KPI label="Avg / company" value={(totalAssignments / Math.max(1, totalCompanies)).toFixed(1)} tone="orange" />
+        {noFundCount > 0
+          ? <KPI label="No donor" value={noFundCount} hint="needs fix" tone="red" />
+          : <KPI label="Dual-donor cos" value={dualFundCompanies} tone="orange" />}
+      </div>
+
+      {/* ── Per-pillar + per-fund visualization ── */}
+      <div className="grid gap-3 md:grid-cols-2">
+        <Card>
+          <CardHeader title="Pillar coverage" subtitle="Distinct companies per pillar." />
+          <ul className="space-y-2">
+            {PILLARS.map(p => {
+              const count = pillarCompanySets.get(p.code)?.size || 0;
+              const pct = totalCompanies === 0 ? 0 : Math.round((count / totalCompanies) * 100);
+              return (
+                <li key={p.code}>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-navy-500 dark:text-slate-100">{p.label}</span>
+                    <span className="font-mono">{count} <span className="text-[10px] text-slate-500">({pct}%)</span></span>
                   </div>
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {Array.from(byPillar.entries()).map(([code, { fund, subs }]) => (
-                      <span
-                        key={code}
-                        className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] dark:border-navy-700 dark:bg-navy-800"
-                      >
-                        <span className="font-bold text-navy-500 dark:text-slate-100">{code}</span>
-                        {fund && <span className="ml-1 text-[10px] text-slate-500">[{fund}]</span>}
-                        {subs.length > 0 && (
-                          <span className="ml-1 text-[10px] text-slate-500">· {subs.map(s => s.replace(/^MA-/, '')).join(', ')}</span>
-                        )}
-                      </span>
-                    ))}
+                  <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+                    <div className="h-full bg-brand-teal" style={{ width: `${pct}%` }} />
                   </div>
                 </li>
-              ))}
+              );
+            })}
+          </ul>
+        </Card>
+        <Card>
+          <CardHeader title="Sub-interventions allocated" subtitle="Count of intervention-rows per sub." />
+          {subCounts.size === 0 ? (
+            <p className="text-xs italic text-slate-500">No sub-interventions tagged yet.</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {Array.from(subCounts.entries()).sort((a, b) => b[1] - a[1]).map(([sub, n]) => {
+                const max = Math.max(1, ...Array.from(subCounts.values()));
+                const pct = Math.round((n / max) * 100);
+                return (
+                  <li key={sub}>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-bold text-navy-500 dark:text-slate-100">{sub}</span>
+                      <span className="font-mono">{n}</span>
+                    </div>
+                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+                      <div className="h-full bg-amber-500" style={{ width: `${pct}%` }} />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Card>
+      </div>
+
+      {/* ── Search + Group toggle ── */}
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 dark:border-navy-700 dark:bg-navy-900">
+        <div className="relative min-w-[200px] flex-1">
+          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.currentTarget.value)}
+            placeholder="Search company, sector, city…"
+            className="w-full rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+          />
+        </div>
+        <div className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1 py-0.5 dark:border-navy-700 dark:bg-navy-900">
+          <span className="px-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Group by:</span>
+          {(['am', 'pillar', 'fund'] as const).map(g => (
+            <button
+              key={g}
+              type="button"
+              onClick={() => setGroupBy(g)}
+              className={`rounded px-2 py-0.5 text-[11px] font-bold ${
+                groupBy === g
+                  ? 'bg-brand-teal text-white'
+                  : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-navy-800'
+              }`}
+            >
+              {g === 'am' ? 'Account Manager' : g === 'pillar' ? 'Pillar' : 'Donor'}
+            </button>
+          ))}
+        </div>
+        <span className="ml-auto text-[11px] text-slate-500">
+          Showing <span className="font-bold text-navy-500 dark:text-slate-100">{visibleRows.length}</span> of {cohortRows.length}
+        </span>
+      </div>
+
+      {/* ── Grouped sections ── */}
+      {groupBy === 'am' && <CohortByAm rows={visibleRows} amBuckets={amBuckets} />}
+      {groupBy === 'pillar' && <CohortByPillar rows={visibleRows} />}
+      {groupBy === 'fund' && <CohortByFund rows={visibleRows} />}
+    </div>
+  );
+}
+
+type CohortRow = {
+  company: ReviewableCompany;
+  m: Master | undefined;
+  assigns: Assignment[];
+  byPillar: Map<string, { fund: string; subs: Array<{ name: string; fund: string }> }>;
+  pillarCodes: string[];
+  funds: Set<string>;
+};
+
+function CompanyCard({ row }: { row: CohortRow }) {
+  const { company, m, byPillar } = row;
+  return (
+    <li className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="font-bold text-navy-500 dark:text-slate-100">{company.company_name}</div>
+          <div className="text-[11px] text-slate-500">
+            {[company.sector, company.city, company.governorate].filter(Boolean).join(' · ') || '—'}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          {m?.profile_manager_email && (
+            <Badge tone="teal">{displayName(m.profile_manager_email).split(' ')[0]}</Badge>
+          )}
+          {m?.status && <Badge tone={m.status === 'Selected' ? 'green' : m.status === 'Hold' ? 'amber' : 'orange'}>{m.status}</Badge>}
+          {row.funds.size > 1 && <Badge tone="orange">Dutch + SIDA</Badge>}
+        </div>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1">
+        {Array.from(byPillar.entries()).map(([code, { fund, subs }]) => (
+          <span
+            key={code}
+            className="inline-flex flex-wrap items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] dark:border-navy-700 dark:bg-navy-800"
+          >
+            <span className="font-bold text-navy-500 dark:text-slate-100">{code}</span>
+            {fund && (
+              <span className={`rounded px-1 py-0.5 text-[9px] font-bold ${fund === '97060' ? 'bg-teal-100 text-brand-teal' : 'bg-amber-100 text-amber-800'}`}>
+                {fund === '97060' ? 'Dutch' : 'SIDA'}
+              </span>
+            )}
+            {subs.length > 0 && (
+              <span className="text-[10px] text-slate-600 dark:text-slate-300">
+                · {subs.map(s => `${s.name}${s.fund && s.fund !== fund ? ` (${s.fund === '97060' ? 'D' : 'S'})` : ''}`).join(', ')}
+              </span>
+            )}
+          </span>
+        ))}
+      </div>
+    </li>
+  );
+}
+
+function CohortByAm({ rows, amBuckets }: { rows: CohortRow[]; amBuckets: Map<string, CohortRow[]> }) {
+  const visibleByAm = new Map<string, CohortRow[]>();
+  for (const r of rows) {
+    const k = r.m?.profile_manager_email || '';
+    const arr = visibleByAm.get(k) || [];
+    arr.push(r);
+    visibleByAm.set(k, arr);
+  }
+  const order = [
+    ...ACCOUNT_MANAGERS.map(a => a.email),
+    ...Array.from(amBuckets.keys()).filter(k => k && !ACCOUNT_MANAGERS.find(a => a.email === k)),
+    '',
+  ];
+  return (
+    <div className="space-y-3">
+      {order.map(amEmail => {
+        const bucket = visibleByAm.get(amEmail) || [];
+        if (bucket.length === 0) return null;
+        const am = ACCOUNT_MANAGERS.find(a => a.email === amEmail);
+        const amName = am?.name || (amEmail ? displayName(amEmail) : 'Unassigned AM');
+        const tone = amEmail ? 'teal' : 'amber';
+        return (
+          <Card key={amEmail || 'unassigned'} className={`border-l-4 ${tone === 'teal' ? 'border-l-brand-teal' : 'border-l-amber-500'}`}>
+            <CardHeader
+              title={
+                <span className="flex items-center gap-2">
+                  <Users className="h-4 w-4" />
+                  {amName} · {bucket.length}
+                </span>
+              }
+              subtitle={amEmail || 'Companies with locks but no AM yet'}
+            />
+            <ul className="space-y-2">
+              {bucket.map(r => <CompanyCard key={r.company.company_id} row={r} />)}
             </ul>
           </Card>
         );
@@ -876,46 +1079,88 @@ function FinalCohortOutput({
   );
 }
 
-// ─── Imports & seeds ─────────────────────────────────────────────────
-
-function ImportsSeedsView({
-  loading,
-  onImport,
-  commentsCount,
-  preDecisionsCount,
-}: {
-  loading: boolean;
-  onImport?: () => void;
-  commentsCount: number;
-  preDecisionsCount: number;
-}) {
+function CohortByPillar({ rows }: { rows: CohortRow[] }) {
+  const byPillarBucket = new Map<string, CohortRow[]>();
+  for (const r of rows) {
+    for (const p of r.pillarCodes) {
+      const arr = byPillarBucket.get(p) || [];
+      arr.push(r);
+      byPillarBucket.set(p, arr);
+    }
+  }
   return (
-    <Card>
-      <CardHeader
-        title="External imports — Israa CSV + Raouf docx"
-        subtitle="Pulls Israa's voting CSV and Raouf's narrative notes into Company Comments + Pre-decision Recommendations. Idempotent — already-imported entries are skipped."
-      />
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-        <KPI label="Comments in workbook" value={commentsCount} tone="navy" />
-        <KPI label="Pre-decision recs" value={preDecisionsCount} tone="teal" />
-        <KPI label="Israa source" value="Voting.csv" hint="52 × 9 pillars" tone="amber" />
-        <KPI label="Raouf source" value="Notes.docx" hint="Phrase match" tone="orange" />
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        {onImport ? (
-          <Button onClick={onImport} disabled={loading}>
-            <Download className="h-4 w-4" /> {loading ? 'Importing…' : 'Run import'}
-          </Button>
-        ) : (
-          <p className="text-xs italic text-slate-500">Admins only — Zaid / Israa / Raouf can run the import.</p>
-        )}
-        <p className="text-xs text-slate-500">
-          Re-running adds nothing for entries already on the sheet. Edited Israa CSV / Raouf docx content WILL re-import.
-        </p>
-      </div>
-    </Card>
+    <div className="space-y-3">
+      {PILLARS.map(p => {
+        const bucket = byPillarBucket.get(p.code) || [];
+        if (bucket.length === 0) return null;
+        return (
+          <Card key={p.code} className="border-l-4 border-l-brand-teal">
+            <CardHeader title={`${p.label} · ${bucket.length}`} subtitle={p.description} />
+            <ul className="space-y-2">
+              {bucket.map(r => <CompanyCard key={r.company.company_id + p.code} row={r} />)}
+            </ul>
+          </Card>
+        );
+      })}
+    </div>
   );
 }
+
+function CohortByFund({ rows }: { rows: CohortRow[] }) {
+  const dutch = rows.filter(r => r.funds.has('97060'));
+  const sida = rows.filter(r => r.funds.has('91763'));
+  const noFund = rows.filter(r => r.funds.size === 0);
+  return (
+    <div className="space-y-3">
+      {dutch.length > 0 && (
+        <Card className="border-l-4 border-l-brand-teal">
+          <CardHeader title={`Dutch · 97060 · ${dutch.length}`} subtitle="Companies carrying at least one Dutch-funded intervention." />
+          <ul className="space-y-2">{dutch.map(r => <CompanyCard key={'d' + r.company.company_id} row={r} />)}</ul>
+        </Card>
+      )}
+      {sida.length > 0 && (
+        <Card className="border-l-4 border-l-amber-500">
+          <CardHeader title={`SIDA · 91763 · ${sida.length}`} subtitle="Companies carrying at least one SIDA-funded intervention." />
+          <ul className="space-y-2">{sida.map(r => <CompanyCard key={'s' + r.company.company_id} row={r} />)}</ul>
+        </Card>
+      )}
+      {noFund.length > 0 && (
+        <Card className="border-l-4 border-l-red-500">
+          <CardHeader title={`No donor set · ${noFund.length}`} subtitle="These need a fund_code before exporting." />
+          <ul className="space-y-2">{noFund.map(r => <CompanyCard key={'n' + r.company.company_id} row={r} />)}</ul>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ─── Push final cohort to a Sheet tab ───────────────────────────────
+
+async function exportFinalCohortToSheet(
+  sheetId: string,
+  rows: Array<Record<string, string | number>>,
+): Promise<{ tabName: string; rowsWritten: number }> {
+  const tabName = 'Final Cohort Export';
+  const headers = [
+    'company_id', 'company_name', 'sector', 'city', 'governorate',
+    'status', 'account_manager', 'pillars', 'interventions',
+    'dutch_interventions', 'sida_interventions', 'fund_codes', 'intervention_count',
+  ];
+  await ensureSchema(sheetId, tabName, headers);
+  // Clear existing rows below header by overwriting a wide range.
+  const data = rows.map(r => headers.map(h => String(r[h] ?? '')));
+  // Write under the header (row 2 onwards) using appendRows so we don't clobber a manually-edited header.
+  const { appendRows } = await import('../../lib/sheets/client');
+  // Simple strategy: append always — re-runs add a new "wave" of rows below the previous one.
+  // For idempotency the team can clear the tab manually before re-export, or we'd need to wipe first.
+  // For now this is simpler and the team understands "this is a snapshot".
+  // First add a separator marker row so re-runs are visually distinct.
+  const ts = new Date().toISOString();
+  const marker = [`--- snapshot ${ts} ---`, ...new Array(headers.length - 1).fill('')];
+  await appendRows(sheetId, `${tabName}!A1`, [marker, ...data]);
+  return { tabName, rowsWritten: data.length };
+}
+
 
 // ─── Activity ────────────────────────────────────────────────────────
 
@@ -1023,10 +1268,35 @@ function ReviewQueueBoard({
     return m;
   }, [comments]);
 
-  // Bucket companies by MY review state.
   type Bucket = 'unreviewed' | 'Recommend' | 'Hold' | 'Waitlist';
+
+  // Stage 1 polish: search + filter chips for fast navigation.
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState<'all' | 'divergent' | 'topScore' | 'noConsensus'>('all');
+
+  // Apply search + filter to the source companies BEFORE bucketing.
+  const filteredCompanies = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return companies.filter(c => {
+      if (q && !`${c.company_name} ${c.sector} ${c.city} ${c.governorate}`.toLowerCase().includes(q)) return false;
+      if (filter === 'divergent') {
+        const s = teamSummaryByCompany.get(c.company_id);
+        if (!s || !s.divergence) return false;
+      } else if (filter === 'topScore') {
+        const cls = (firstField(c.selection?.scoring, ['class', 'tier', 'grade']) || '').toLowerCase();
+        if (!/^a|class.?a|tier.?1|excellent/.test(cls)) return false;
+      } else if (filter === 'noConsensus') {
+        const s = teamSummaryByCompany.get(c.company_id);
+        if (!s || s.total === 0) return false;
+        if (s.consensus !== 'Mixed' && !s.divergence) return false;
+      }
+      return true;
+    });
+  }, [companies, search, filter, teamSummaryByCompany]);
+
+  // Bucket companies by MY review state — using the filtered set.
   const buckets: Record<Bucket, ReviewableCompany[]> = { unreviewed: [], Recommend: [], Hold: [], Waitlist: [] };
-  for (const c of companies) {
+  for (const c of filteredCompanies) {
     const my = myReviewByCompany.get(c.company_id);
     if (!my || !my.decision) buckets.unreviewed.push(c);
     else if (my.decision === 'Recommend') buckets.Recommend.push(c);
@@ -1046,6 +1316,15 @@ function ReviewQueueBoard({
   // hovered drop target so we can show a highlight ring on the column.
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<Bucket | null>(null);
+
+  // Jump to next unreviewed-by-me company.
+  const jumpToNextUnreviewed = () => {
+    const next = filteredCompanies.find(c => {
+      const my = myReviewByCompany.get(c.company_id);
+      return !my || !my.decision;
+    });
+    if (next) setFocused(next);
+  };
 
   const handleDrop = async (target: Bucket, companyId: string) => {
     setDragId(null); setDragOver(null);
@@ -1069,8 +1348,43 @@ function ReviewQueueBoard({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-        <span><strong>Drag</strong> a card between columns to change your decision, or <strong>click</strong> to open the focus view for the full dossier + pillar picker.</span>
+      {/* Toolbar: search · filter chips · next unreviewed jump */}
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 dark:border-navy-700 dark:bg-navy-900">
+        <div className="relative min-w-[200px] flex-1">
+          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.currentTarget.value)}
+            placeholder="Search company, sector, city…"
+            className="w-full rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+          />
+        </div>
+        <div className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1 py-0.5 dark:border-navy-700 dark:bg-navy-900">
+          {(['all', 'divergent', 'topScore', 'noConsensus'] as const).map(f => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setFilter(f)}
+              className={`rounded px-2 py-0.5 text-[11px] font-bold ${
+                filter === f
+                  ? 'bg-brand-teal text-white'
+                  : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-navy-800'
+              }`}
+            >
+              {f === 'all' ? 'All' : f === 'divergent' ? 'Divergent' : f === 'topScore' ? 'Top class' : 'Mixed consensus'}
+            </button>
+          ))}
+        </div>
+        <Button size="sm" variant="ghost" onClick={jumpToNextUnreviewed} disabled={buckets.unreviewed.length === 0}>
+          Next unreviewed →
+        </Button>
+        <span className="ml-auto text-[11px] text-slate-500">
+          Showing <span className="font-bold text-navy-500 dark:text-slate-100">{filteredCompanies.length}</span> of {companies.length}
+        </span>
+      </div>
+      <div className="text-[11px] text-slate-500">
+        <strong>Drag</strong> between columns to change your decision · <strong>click</strong> a card for the full dossier + pillar picker.
       </div>
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
         {COLUMNS.map(col => {
@@ -1103,9 +1417,7 @@ function ReviewQueueBoard({
                 )}
                 {buckets[col.id].map(c => {
                   const teamSummary = teamSummaryByCompany.get(c.company_id);
-                  const recs = preDecsByCompany.get(c.company_id) || [];
-                  const israa = recs.some(r => r.author_email.startsWith('israa'));
-                  const raouf = recs.some(r => r.author_email.startsWith('raouf'));
+                  const cmtCount = (commentsByCompany.get(c.company_id) || []).length;
                   const my = myReviewByCompany.get(c.company_id);
                   const isDragging = dragId === c.company_id;
                   return (
@@ -1132,8 +1444,11 @@ function ReviewQueueBoard({
                               {teamSummary.divergence ? ' · div' : ''}
                             </span>
                           )}
-                          {israa && <span className="rounded bg-purple-100 px-1 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200">I</span>}
-                          {raouf && <span className="rounded bg-purple-100 px-1 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200">R</span>}
+                          {cmtCount > 0 && (
+                            <span className="rounded bg-slate-100 px-1 py-0.5 font-semibold text-slate-700 dark:bg-navy-800 dark:text-slate-300" title={`${cmtCount} comment(s)`}>
+                              {cmtCount}c
+                            </span>
+                          )}
                           {my?.proposed_pillars && (
                             <span className="text-[9px] text-slate-500" title={my.proposed_pillars}>
                               {my.proposed_pillars.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3).join(', ')}
@@ -1726,37 +2041,36 @@ function CompanyFocusDrawer({
               tone={teamSummary.consensus === 'Recommend' ? 'green' : teamSummary.consensus === 'Waitlist' ? 'red' : 'amber'}
             />
             <KPI
-              label="Pre-decision"
-              value={preDecs.length}
-              hint={preDecs.length > 0 ? Array.from(new Set(preDecs.map(p => displayName(p.author_email).split(' ')[0]))).join(', ') : undefined}
+              label="Comments"
+              value={comments.length}
+              hint={comments.length > 0 ? `${Array.from(new Set(comments.map(c => displayName(c.author_email).split(' ')[0]))).slice(0, 3).join(', ')}${comments.length > 3 ? '…' : ''}` : 'none'}
               tone="orange"
             />
           </div>
 
           {/* Requested vs Recommended pillar matrix — compact */}
           <Card>
-            <CardHeader title="Requested vs Recommended" subtitle="ASKED = applicant wantsXXX. REC = team interview/needs + Israa/Raouf." />
+            <CardHeader title="Requested vs Recommended" subtitle="ASKED = applicant wantsXXX. REC = team reviewers + interview/needs assessment." />
             <table className="w-full text-[11px]">
               <thead className="bg-slate-50 dark:bg-navy-800">
                 <tr>
                   <th className="px-1.5 py-1 text-left">Pillar</th>
                   <th className="px-1.5 py-1 text-center">Asked</th>
                   <th className="px-1.5 py-1 text-center">Rec</th>
-                  <th className="px-1.5 py-1 text-center">Israa+Raouf</th>
                 </tr>
               </thead>
               <tbody>
                 {PILLARS.map(p => {
                   const asked = wantsBoolFor(company.applicantRaw, p.code);
-                  const recs = preDecs.filter(r => (pillarFor(r.pillar)?.code || r.pillar) === p.code);
-                  // Heuristic for team-recommended: if any reviewer's proposed_pillars contains this code.
-                  const teamRec = reviewsForCompany.some(r => (r.proposed_pillars || '').split(',').map(s => s.trim()).includes(p.code));
+                  // Team-recommended: any reviewer's proposed_pillars OR a pre-decision rec maps here.
+                  const teamRec =
+                    reviewsForCompany.some(r => (r.proposed_pillars || '').split(',').map(s => s.trim()).includes(p.code)) ||
+                    preDecs.some(r => (pillarFor(r.pillar)?.code || r.pillar) === p.code);
                   return (
                     <tr key={p.code} className="border-t border-slate-100 dark:border-navy-800">
                       <td className="px-1.5 py-1 font-bold text-navy-500 dark:text-slate-100">{p.shortLabel}</td>
                       <td className="px-1.5 py-1 text-center">{asked ? '✓' : '—'}</td>
                       <td className="px-1.5 py-1 text-center">{teamRec ? '✓' : '—'}</td>
-                      <td className="px-1.5 py-1 text-center">{recs.length > 0 ? `${recs.length}` : '—'}</td>
                     </tr>
                   );
                 })}
@@ -1765,26 +2079,7 @@ function CompanyFocusDrawer({
           </Card>
 
           {/* Pre-decision recs detail */}
-          {preDecs.length > 0 && (
-            <Card className="border-l-4 border-l-purple-500">
-              <CardHeader title={`Israa + Raouf · ${preDecs.length}`} />
-              <ul className="space-y-1">
-                {preDecs.map(r => (
-                  <li key={r.recommendation_id} className="rounded border border-purple-100 bg-purple-50 p-1.5 text-[11px] dark:border-purple-900 dark:bg-purple-950/30">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-purple-800 dark:text-purple-200">
-                        {r.pillar}{r.sub_intervention ? ` · ${r.sub_intervention}` : ''}
-                      </span>
-                      <span className="text-[10px] text-purple-600">{displayName(r.author_email)}</span>
-                    </div>
-                    {r.note && <div className="mt-0.5 whitespace-pre-wrap text-slate-700 dark:text-slate-300">{r.note}</div>}
-                  </li>
-                ))}
-              </ul>
-            </Card>
-          )}
-
-          {/* Comments thread */}
+          {/* Comments thread (includes Israa + Raouf alongside the rest of the team) */}
           {comments.length > 0 && (
             <Card>
               <CardHeader title={`Comments · ${comments.length}`} />
@@ -2184,7 +2479,6 @@ function InsightsDashboard({
   companies,
   reviews,
   assignments,
-  preDecisions,
 }: {
   companies: ReviewableCompany[];
   reviews: Review[];
@@ -2201,32 +2495,11 @@ function InsightsDashboard({
     return m;
   }, [reviews]);
 
-  const recsByCompany = useMemo(() => {
-    const m = new Map<string, PreDecisionRecommendation[]>();
-    for (const r of preDecisions) {
-      const arr = m.get(r.company_id) || [];
-      arr.push(r);
-      m.set(r.company_id, arr);
-    }
-    return m;
-  }, [preDecisions]);
-
   const lockedSet = useMemo(() => new Set(assignments.map(a => a.company_id)), [assignments]);
 
   // ── Action items ─────────────────────────────────────────
   const noReviewYet = companies.filter(c => (reviewsByCompany.get(c.company_id)?.length || 0) === 0);
   const divergent = companies.filter(c => summarizeReviews(reviewsByCompany.get(c.company_id) || []).divergence);
-  const teamYesPreNo = companies.filter(c => {
-    const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
-    if (s.consensus !== 'Recommend') return false;
-    const recs = recsByCompany.get(c.company_id) || [];
-    return recs.length === 0;
-  });
-  const preYesTeamNo = companies.filter(c => {
-    const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
-    const recs = recsByCompany.get(c.company_id) || [];
-    return recs.length > 0 && (s.consensus === 'Waitlist' || s.consensus === 'Hold');
-  });
   const lockedNoPm = companies.filter(c => lockedSet.has(c.company_id) && !c.profile_manager_email);
   const recommendNotLocked = companies.filter(c => {
     const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
@@ -2318,20 +2591,6 @@ function InsightsDashboard({
             tone="amber"
             hint="Reviewers disagree — discuss live"
             companies={divergent}
-          />
-          <ActionTile
-            label="Team Recommend, no Israa+Raouf"
-            count={teamYesPreNo.length}
-            tone="amber"
-            hint="No external endorsement"
-            companies={teamYesPreNo}
-          />
-          <ActionTile
-            label="Israa+Raouf rec'd, team Hold/Waitlist"
-            count={preYesTeamNo.length}
-            tone="amber"
-            hint="Worth a second look"
-            companies={preYesTeamNo}
           />
           <ActionTile
             label="Recommend but not locked yet"
