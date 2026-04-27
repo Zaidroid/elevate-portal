@@ -17,10 +17,10 @@ import { Badge, Button, Card, EmptyState, useToast } from '../../lib/ui';
 import type { Tone } from '../../lib/ui';
 import { displayName } from '../../config/team';
 import { PILLARS, pillarFor } from '../../config/interventions';
-import type { Review, CompanyComment, ReviewDecision } from './reviewTypes';
-import { REVIEW_DECISIONS, summarizeReviews } from './reviewTypes';
-import { bucketize, humanizeKey, meaningfulEntries } from './selectionContext';
-import type { RawRow } from './selectionContext';
+import type { Review, CompanyComment, ReviewDecision } from '../companies/reviewTypes';
+import { REVIEW_DECISIONS, summarizeReviews } from '../companies/reviewTypes';
+import { bucketize, humanizeKey, meaningfulEntries } from '../companies/selectionContext';
+import type { RawRow } from '../companies/selectionContext';
 
 export type SelectionContext = {
   scoring: RawRow | null;

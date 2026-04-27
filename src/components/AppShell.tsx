@@ -5,6 +5,7 @@ import {
   Bell,
   Briefcase,
   Building2,
+  CheckCircle2,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
@@ -51,6 +52,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Pipeline',
     items: [
+      { to: '/selection', label: 'Selection', icon: <CheckCircle2 className="h-[17px] w-[17px]" /> },
       { to: '/companies', label: 'Companies', icon: <Building2 className="h-[17px] w-[17px]" /> },
       { to: '/procurement', label: 'Procurement', icon: <ClipboardList className="h-[17px] w-[17px]" /> },
       { to: '/payments', label: 'Payments', icon: <Wallet className="h-[17px] w-[17px]" />, adminOnly: true },

@@ -36,11 +36,11 @@ import type { Column, FilterDrawerValues, FilterFieldDef, KanbanColumn, KanbanIt
 import { displayName, getProfileManagers, isAdmin } from '../../config/team';
 import { pillarFor } from '../../config/interventions';
 import { INTERVIEWED_NAMES, INTERVIEWED_RAW, isInterviewed } from './interviewedSource';
-import { ReviewView } from './ReviewView';
-import type { ReviewableCompany, SelectionContext } from './ReviewView';
-import { FinalDecisionView } from './FinalDecisionView';
-import type { FinalLockArgs } from './FinalDecisionView';
-import { exportReviewToSheet } from './exportReview';
+import { ReviewView } from '../selection/ReviewQueueTab';
+import type { ReviewableCompany, SelectionContext } from '../selection/ReviewQueueTab';
+import { FinalDecisionView } from '../selection/FinalCohortTab';
+import type { FinalLockArgs } from '../selection/FinalCohortTab';
+import { exportReviewToSheet } from '../selection/exportReview';
 import { indexByCompanyName, indexAllByCompanyName, lookupByName, lookupAllByName } from './selectionContext';
 import { ExpandableCompanyCard } from './ExpandableCompanyCard';
 import type { CardCompany } from './ExpandableCompanyCard';
@@ -56,7 +56,7 @@ import {
   summarizeReviews,
 } from './reviewTypes';
 import { repairDashboard } from './repairDashboard';
-import { fuzzyResolve, importExternalSeed, loadSeed } from './importExternalComments';
+import { fuzzyResolve, importExternalSeed, loadSeed } from '../selection/importExternal';
 import { appendActivity } from './activityLog';
 import type { ActivityAction } from './activityLog';
 import type { ActivityRow, CompanyComment, InterviewAlias, PreDecisionRecommendation, RemovedCompany, Review, ReviewSummary } from './reviewTypes';
@@ -161,11 +161,12 @@ function maxStatus(a: string, b: string): string {
   return ra >= rb ? a : b;
 }
 
-export function CompaniesPage() {
+export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'selection' } = {}) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const toast = useToast();
   const admin = user ? isAdmin(user.email) : false;
+  const isSelectionMode = mode === 'selection';
 
   const masterSheetId = getSheetId('companies');
   const selectionSheetId = getSheetId('selection');
@@ -174,7 +175,9 @@ export function CompaniesPage() {
 
   // Hoisted up front so the Selection-workbook hooks below can lazy-mount
   // when the Review view isn't open. Cuts polling load substantially.
-  const [view, setView] = useState<'review' | 'finalize' | 'dashboard' | 'pipeline' | 'roster'>('review');
+  const [view, setView] = useState<'review' | 'finalize' | 'dashboard' | 'pipeline' | 'roster' | 'imports' | 'activity'>(
+    isSelectionMode ? 'review' : 'review',
+  );
   const reviewActive = view === 'review' || view === 'finalize';
   // Read-only context tabs barely change; poll them every 5 minutes
   // instead of the default 30 seconds. The user still sees fresh data
@@ -1240,18 +1243,30 @@ export function CompaniesPage() {
   // state in the view itself.
   const finalReady = reviewableCompanies.length > 0 && reviewedAnyone === reviewableCompanies.length;
 
-  const tabs: TabItem[] = [
-    { value: 'review', label: `Review · ${reviewedAnyone}/${reviewableCompanies.length}`, icon: <MessageCircle className="h-4 w-4" /> },
-    {
-      value: 'finalize',
-      label: finalReady ? `Final Decision · ready` : `Final Decision · ${reviewableCompanies.length - reviewedAnyone} left`,
-      icon: <BarChart3 className="h-4 w-4" />,
-      disabled: !finalReady,
-    },
-    { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
-    { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: counts.total },
-    { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: counts.filtered },
-  ];
+  const tabs: TabItem[] = isSelectionMode
+    ? [
+        { value: 'review', label: `Today's review queue · ${reviewedAnyone}/${reviewableCompanies.length}`, icon: <MessageCircle className="h-4 w-4" /> },
+        {
+          value: 'finalize',
+          label: finalReady ? `Final cohort decisions · ready` : `Final cohort decisions · ${reviewableCompanies.length - reviewedAnyone} left`,
+          icon: <BarChart3 className="h-4 w-4" />,
+          disabled: !finalReady,
+        },
+        { value: 'imports', label: 'Imports & seeds', icon: <Download className="h-4 w-4" /> },
+        { value: 'activity', label: 'Activity', icon: <RefreshCw className="h-4 w-4" /> },
+      ]
+    : [
+        { value: 'review', label: `Review · ${reviewedAnyone}/${reviewableCompanies.length}`, icon: <MessageCircle className="h-4 w-4" /> },
+        {
+          value: 'finalize',
+          label: finalReady ? `Final Decision · ready` : `Final Decision · ${reviewableCompanies.length - reviewedAnyone} left`,
+          icon: <BarChart3 className="h-4 w-4" />,
+          disabled: !finalReady,
+        },
+        { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
+        { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: counts.total },
+        { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: counts.filtered },
+      ];
 
   // Build the applicants-by-name lookup — needed by the Review view to
   // surface the Source Data application snapshot for each company.
@@ -1328,7 +1343,7 @@ export function CompaniesPage() {
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       <PageHeader
-        title="Companies"
+        title={isSelectionMode ? 'Selection · Final Decision Session' : 'Companies'}
         badges={[
           { label: `${joined.length} cohort 3`, tone: 'teal' },
           ...(interviewedSet.size > 0
@@ -1769,7 +1784,20 @@ export function CompaniesPage() {
         />
       )}
 
-      {view === 'dashboard' && (
+      {view === 'imports' && isSelectionMode && (
+        <ImportsSeedsView
+          loading={importingExt}
+          onImport={admin ? handleImportExternal : undefined}
+          commentsCount={comments.rows.length}
+          preDecisionsCount={preDecisionsDoc.rows.length}
+        />
+      )}
+
+      {view === 'activity' && isSelectionMode && (
+        <SelectionActivityView rows={activityDoc.rows} />
+      )}
+
+      {view === 'dashboard' && !isSelectionMode && (
         <CompanyDashboard
           rows={filteredBySavedView}
           interviewedCount={interviewedCount}
@@ -1777,7 +1805,7 @@ export function CompaniesPage() {
         />
       )}
 
-      {view === 'pipeline' && (
+      {view === 'pipeline' && !isSelectionMode && (
         <CompanyPipelineKanban
           rows={filteredBySelection}
           reviewSummaryByCompany={reviewSummaryByCompany}
@@ -1786,7 +1814,7 @@ export function CompaniesPage() {
         />
       )}
 
-      {view === 'roster' && (
+      {view === 'roster' && !isSelectionMode && (
         <>
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
             <span>
@@ -2335,6 +2363,108 @@ function PMInitials({ name }: { name: string }) {
   return (
     <div className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${tone}`}>
       {initialsOf(name)}
+    </div>
+  );
+}
+
+// ─── Selection-mode tabs ─────────────────────────────────────────────
+
+function ImportsSeedsView({
+  loading,
+  onImport,
+  commentsCount,
+  preDecisionsCount,
+}: {
+  loading: boolean;
+  onImport?: () => void;
+  commentsCount: number;
+  preDecisionsCount: number;
+}) {
+  return (
+    <Card>
+      <CardHeader
+        title="External imports — Israa CSV + Raouf docx"
+        subtitle="Pulls Israa's voting CSV and Raouf's narrative notes into Company Comments + Pre-decision Recommendations. Idempotent — already-imported entries are skipped."
+      />
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <Tile label="Comments in workbook" value={commentsCount} tone="navy" />
+        <Tile label="Pre-decision recs" value={preDecisionsCount} tone="teal" />
+        <Tile label="Israa source" value="Voting.csv" hint="52 companies × 9 pillars" tone="amber" />
+        <Tile label="Raouf source" value="Notes.docx" hint="Narrative + phrase match" tone="orange" />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {onImport ? (
+          <Button onClick={onImport} disabled={loading}>
+            {loading ? 'Importing…' : 'Run import (admin only)'}
+          </Button>
+        ) : (
+          <p className="text-xs italic text-slate-500">Admins only — Zaid / Israa / Raouf can run the import.</p>
+        )}
+        <p className="text-xs text-slate-500">
+          Re-running adds nothing for entries already on the sheet. Edited Israa CSV / Raouf docx content WILL re-import.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
+function SelectionActivityView({ rows }: { rows: ActivityRow[] }) {
+  const filtered = useMemo(() => {
+    const include = new Set(['review_saved', 'comment_added', 'pm_assigned', 'finalize_locked', 'import_external', 'pre_decision_added']);
+    return rows.filter(r => include.has(r.action));
+  }, [rows]);
+  return (
+    <Card>
+      <CardHeader
+        title="Selection activity"
+        subtitle="Reviews saved, comments added, PMs assigned, decisions locked, imports run."
+      />
+      {filtered.length === 0 ? (
+        <EmptyState icon={<RefreshCw className="h-5 w-5" />} title="No activity yet" />
+      ) : (
+        <ul className="space-y-1.5">
+          {filtered
+            .slice()
+            .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''))
+            .slice(0, 200)
+            .map(r => (
+              <li key={r.activity_id} className="rounded-md border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-navy-500 dark:text-slate-100">{r.user_email ? displayName(r.user_email) : '—'}</span>
+                  <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-600 dark:bg-navy-800 dark:text-slate-300">
+                    {r.action.replace(/_/g, ' ')}
+                  </span>
+                  <span className="text-[10px] text-slate-500">{r.timestamp ? new Date(r.timestamp).toLocaleString() : ''}</span>
+                </div>
+                {(r.field || r.new_value || r.details) && (
+                  <div className="mt-1 text-[11px] text-slate-600 dark:text-slate-300">
+                    {r.field && <span className="font-semibold">{r.field}: </span>}
+                    {r.new_value && <span>{r.new_value}</span>}
+                    {r.details && <span className="ml-1 italic text-slate-500">· {r.details}</span>}
+                  </div>
+                )}
+              </li>
+            ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+function Tile({ label, value, hint, tone }: { label: string; value: string | number; hint?: string; tone: 'navy' | 'teal' | 'amber' | 'orange' }) {
+  const cls =
+    tone === 'navy'
+      ? 'bg-navy-50 text-navy-800 dark:bg-navy-900 dark:text-slate-100'
+      : tone === 'teal'
+      ? 'bg-teal-50 text-brand-teal dark:bg-teal-950'
+      : tone === 'amber'
+      ? 'bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-200'
+      : 'bg-orange-50 text-orange-900 dark:bg-orange-950 dark:text-orange-200';
+  return (
+    <div className={`rounded-md border border-slate-200 px-3 py-2 dark:border-navy-700 ${cls}`}>
+      <div className="text-[9px] font-bold uppercase tracking-wider opacity-70">{label}</div>
+      <div className="text-lg font-bold">{value}</div>
+      {hint && <div className="text-[10px] opacity-70">{hint}</div>}
     </div>
   );
 }

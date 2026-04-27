@@ -24,7 +24,8 @@ export type ActivityAction =
   | 'export'
   | 'auto_dedupe'
   | 'import_external'
-  | 'pre_decision_added';
+  | 'pre_decision_added'
+  | 'presence';
 
 export type ActivityInput = {
   sheetId: string;

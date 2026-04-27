@@ -13,9 +13,9 @@
 // Both writes are idempotent — re-running adds nothing for entries
 // that already exist on the sheet.
 
-import { aliasIdFor } from './reviewTypes';
-import type { CompanyComment, PreDecisionRecommendation } from './reviewTypes';
-import { preDecisionIdFor } from './reviewTypes';
+import { aliasIdFor } from '../companies/reviewTypes';
+import type { CompanyComment, PreDecisionRecommendation } from '../companies/reviewTypes';
+import { preDecisionIdFor } from '../companies/reviewTypes';
 
 export type SeedComment = {
   company_match: string;

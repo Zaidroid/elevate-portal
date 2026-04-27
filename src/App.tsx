@@ -8,6 +8,7 @@ import { HomePage } from './pages/HomePage';
 import { BoardPage } from './pages/board/BoardPage';
 import { CompaniesPage } from './pages/companies/CompaniesPage';
 import { CompanyDetailPage } from './pages/companies/CompanyDetailPage';
+import { SelectionPage } from './pages/selection/SelectionPage';
 import { DocsPage } from './pages/docs/DocsPage';
 import { ProcurementPage } from './pages/procurement/ProcurementPage';
 import { PaymentsPage } from './pages/payments/PaymentsPage';
@@ -173,6 +174,7 @@ function AuthGate({
           <Route path="/board" element={<BoardPage />} />
           <Route path="/companies" element={<CompaniesPage />} />
           <Route path="/companies/:id" element={<CompanyDetailPage />} />
+          <Route path="/selection" element={<SelectionPage />} />
           <Route path="/procurement" element={<ProcurementPage />} />
           <Route path="/payments" element={<PaymentsPage />} />
           <Route path="/conferences" element={<ConferencesPage />} />

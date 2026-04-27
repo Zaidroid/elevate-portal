@@ -13,8 +13,8 @@
 import { batchUpdate, ensureSchema, getSpreadsheetMeta, updateRange } from '../../lib/sheets/client';
 import { displayName } from '../../config/team';
 import { pillarFor } from '../../config/interventions';
-import { summarizeReviews } from './reviewTypes';
-import type { Review, CompanyComment } from './reviewTypes';
+import { summarizeReviews } from '../companies/reviewTypes';
+import type { Review, CompanyComment } from '../companies/reviewTypes';
 
 const EXPORT_TAB = 'Cohort Review Export';
 

@@ -20,11 +20,11 @@ import type { Tone } from '../../lib/ui';
 import { displayName } from '../../config/team';
 import { ACCOUNT_MANAGERS } from '../../config/team';
 import { PILLARS, pillarFor } from '../../config/interventions';
-import type { ActivityRow, CompanyComment, PreDecisionRecommendation, Review, ReviewDecision } from './reviewTypes';
-import { summarizeReviews } from './reviewTypes';
-import type { ReviewableCompany } from './ReviewView';
-import { ActivityTimeline } from './ActivityTimeline';
-import { meaningfulEntries } from './selectionContext';
+import type { ActivityRow, CompanyComment, PreDecisionRecommendation, Review, ReviewDecision } from '../companies/reviewTypes';
+import { summarizeReviews } from '../companies/reviewTypes';
+import type { ReviewableCompany } from './ReviewQueueTab';
+import { ActivityTimeline } from '../companies/ActivityTimeline';
+import { meaningfulEntries } from '../companies/selectionContext';
 
 const FINAL_STATUSES = ['Selected', 'Recommended', 'Reviewing', 'Hold', 'Rejected'] as const;
 type FinalStatus = (typeof FINAL_STATUSES)[number];
