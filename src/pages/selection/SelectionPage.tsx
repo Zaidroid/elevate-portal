@@ -164,6 +164,14 @@ export function SelectionPage() {
   const shortlists = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'shortlists'), 'id', selOpts);
   const finalCohortRows = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'finalCohort'), 'id', selOpts);
 
+  // Logframe targets — used by the Stage 2 live insights panel to
+  // surface "X of Y target" bars per pillar / per donor. Lazy-mounted
+  // on Stage 2; SLOW_POLL since targets barely change mid-session.
+  const logframesId = getSheetId('logframes');
+  const logSheetId = stage === 'finalize' ? logframesId || null : null;
+  const dutchLog = useSheetDoc<Record<string, string>>(logSheetId, getTab('logframes', 'dutch'), 'ID', selOpts);
+  const sidaLog = useSheetDoc<Record<string, string>>(logSheetId, getTab('logframes', 'sida'), 'ID', selOpts);
+
   // Auto-create the portal-managed tabs if the workbook is missing them.
   const [schemaReady, setSchemaReady] = useState(false);
   useEffect(() => {
@@ -575,6 +583,8 @@ export function SelectionPage() {
             comments={commentsDoc.rows}
             preDecisions={preDecisionsDoc.rows}
             assignments={assignments.rows}
+            dutchLogframe={dutchLog.rows}
+            sidaLogframe={sidaLog.rows}
             reviewerEmail={user?.email || ''}
             onLockDecision={onLockDecision}
             onAssignPM={onAssignPM}
@@ -1168,6 +1178,8 @@ function FinalCohortBoard({
   comments,
   preDecisions,
   assignments,
+  dutchLogframe,
+  sidaLogframe,
   reviewerEmail,
   onLockDecision,
   onAssignPM,
@@ -1177,11 +1189,17 @@ function FinalCohortBoard({
   comments: CompanyComment[];
   preDecisions: PreDecisionRecommendation[];
   assignments: Assignment[];
+  dutchLogframe: Record<string, string>[];
+  sidaLogframe: Record<string, string>[];
   reviewerEmail: string;
   onLockDecision: (args: FinalLockArgs) => Promise<void>;
   onAssignPM: (companyId: string, pmEmail: string) => Promise<void>;
 }) {
   const [focused, setFocused] = useState<ReviewableCompany | null>(null);
+  // Stage 2 scope filter: 'selected' (default — only Recommend / Selected
+  // companies need lock work), 'all' (every reviewable), 'pending' (only
+  // those without locks yet).
+  const [scope, setScope] = useState<'selected' | 'all' | 'pending'>('selected');
 
   const assignsByCompany = useMemo(() => {
     const m = new Map<string, Assignment[]>();
@@ -1213,6 +1231,32 @@ function FinalCohortBoard({
     return m;
   }, [comments]);
 
+  // Per-company team consensus — used to scope to "selected" (Recommend
+  // by team OR already locked OR master.status === Selected/Recommended).
+  const reviewsByCompany = useMemo(() => {
+    const m = new Map<string, Review[]>();
+    for (const r of reviews) {
+      const arr = m.get(r.company_id) || [];
+      arr.push(r);
+      m.set(r.company_id, arr);
+    }
+    return m;
+  }, [reviews]);
+
+  const isSelected = (c: ReviewableCompany): boolean => {
+    if (assignsByCompany.has(c.company_id)) return true;
+    if (c.status === 'Selected' || c.status === 'Recommended') return true;
+    const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
+    return s.consensus === 'Recommend';
+  };
+
+  const visibleCompanies = useMemo(() => {
+    if (scope === 'all') return companies;
+    if (scope === 'pending') return companies.filter(c => !assignsByCompany.has(c.company_id) && isSelected(c));
+    return companies.filter(c => isSelected(c));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companies, scope, assignsByCompany, reviewsByCompany]);
+
   // Lanes. ACCOUNT_MANAGERS first, then unassigned at the end.
   const lanes: Array<{ amEmail: string; label: string; companies: ReviewableCompany[] }> = [];
   for (const am of ACCOUNT_MANAGERS) {
@@ -1220,7 +1264,7 @@ function FinalCohortBoard({
   }
   lanes.push({ amEmail: '', label: 'Unassigned', companies: [] });
 
-  for (const c of companies) {
+  for (const c of visibleCompanies) {
     const lane = lanes.find(l => l.amEmail === c.profile_manager_email) || lanes[lanes.length - 1];
     lane.companies.push(c);
   }
@@ -1238,12 +1282,66 @@ function FinalCohortBoard({
     await onAssignPM(companyId, targetAmEmail);
   };
 
+  // ── Counts for the live insights panel ──────────────────────────
+  const totalSelected = companies.filter(isSelected).length;
+  const lockedTotal = Array.from(assignsByCompany.keys()).length;
+  const dutchTargets = parseLogframeTargets(dutchLogframe);
+  const sidaTargets = parseLogframeTargets(sidaLogframe);
+
+  // Per-pillar locked counts (companies, not assignment rows — counting
+  // distinct companies served by each pillar is what targets measure).
+  const pillarCompanyCounts = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const a of assignments) {
+      const code = pillarFor(a.intervention_type)?.code || a.intervention_type;
+      if (!code) continue;
+      const set = m.get(code) || new Set();
+      set.add(a.company_id);
+      m.set(code, set);
+    }
+    return m;
+  }, [assignments]);
+
+  const subCompanyCounts = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const a of assignments) {
+      const r = resolveIntervention(a.intervention_type);
+      const sub = r?.sub || a.sub_intervention;
+      if (!sub) continue;
+      const set = m.get(sub) || new Set();
+      set.add(a.company_id);
+      m.set(sub, set);
+    }
+    return m;
+  }, [assignments]);
+
+  const dutchAssignsCount = assignments.filter(a => a.fund_code === '97060').length;
+  const sidaAssignsCount = assignments.filter(a => a.fund_code === '91763').length;
+
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-        <span><strong>Drag</strong> a card between AM lanes to reassign, or <strong>click</strong> to open the lock-decision form.</span>
+      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
+        <span><strong>Drag</strong> between AM lanes to reassign, or <strong>click</strong> to open the lock form (status · AM · per-pillar fund · sub-interventions).</span>
+        <span className="ml-auto inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1 py-0.5 dark:border-navy-700 dark:bg-navy-900">
+          <span className="px-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Show:</span>
+          {(['selected', 'pending', 'all'] as const).map(s => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setScope(s)}
+              className={`rounded px-2 py-0.5 text-[11px] font-bold ${
+                scope === s
+                  ? 'bg-brand-teal text-white'
+                  : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-navy-800'
+              }`}
+            >
+              {s === 'selected' ? `Selected (${totalSelected})` : s === 'pending' ? `Pending lock` : `All (${companies.length})`}
+            </button>
+          ))}
+        </span>
       </div>
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1fr_320px]">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
         {lanes.map(lane => {
           const colTone = lane.amEmail
             ? 'bg-teal-50/60 dark:bg-teal-950/20'
@@ -1339,6 +1437,20 @@ function FinalCohortBoard({
             </div>
           );
         })}
+        </div>
+
+        {/* Live insights side rail — updates as locks happen. */}
+        <LiveInsightsPanel
+          totalSelected={totalSelected}
+          totalCohort={companies.length}
+          lockedTotal={lockedTotal}
+          pillarCompanyCounts={pillarCompanyCounts}
+          subCompanyCounts={subCompanyCounts}
+          dutchAssignsCount={dutchAssignsCount}
+          sidaAssignsCount={sidaAssignsCount}
+          dutchTargets={dutchTargets}
+          sidaTargets={sidaTargets}
+        />
       </div>
 
       <CompanyFocusDrawer
@@ -2368,6 +2480,200 @@ function FundBar({ label, value, total, tone }: { label: string; value: number; 
       </div>
       <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
         <div className={`h-full ${tone === 'teal' ? 'bg-brand-teal' : 'bg-amber-500'}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── Logframe target parser ──────────────────────────────────────────
+// The logframe Dutch + SIDA tabs each have one row per indicator with
+// year-target columns. We pull the 2026 target for each row + match
+// the indicator text to a pillar/sub via keyword. Returns a map keyed
+// by '<pillar>' or '<pillar>/<sub>' with { target, indicator } values.
+
+type LogframeTargets = {
+  perKey: Map<string, { target: number; indicator: string }>;
+  cohortTarget: number; // companies-supported target for 2026 if found
+};
+
+function parseLogframeTargets(rows: Record<string, string>[]): LogframeTargets {
+  const perKey = new Map<string, { target: number; indicator: string }>();
+  let cohortTarget = 0;
+
+  // Match an indicator name to a pillar/sub. Keyword precedence matters:
+  // sub-intervention names beat pillar names so the bar lands on the
+  // most-specific bucket.
+  const matchKey = (text: string): string | null => {
+    const t = text.toLowerCase();
+    // Sub matches first
+    if (/train.to.hire|tth\b/.test(t)) return 'CB/Train To Hire';
+    if (/upskill/.test(t)) return 'CB/Upskilling';
+    if (/marketing agency|m&b agency/.test(t)) return 'MKG/Marketing Agency';
+    if (/marketing resource|m&b resource/.test(t)) return 'MKG/Marketing Resources';
+    if (/legal (support|registration|setup)|registration in|legal&compliance/.test(t)) return 'MA/Legal Support';
+    if (/conference|biban|exhibition/.test(t)) return 'MA/Conferences';
+    if (/c-suite|domain coaching|coaching/.test(t)) return 'MA/C-Suite';
+    if (/elevate ?bridge|bridge\b/.test(t)) return 'MA/ElevateBridge';
+    // Pillar fallback
+    if (/capacity building|cap.building/.test(t)) return 'CB';
+    if (/marketing(?: ?& ?branding)?|m&b\b|brand/.test(t)) return 'MKG';
+    if (/market access|ma\b/.test(t)) return 'MA';
+    return null;
+  };
+
+  for (const r of rows) {
+    const indicator = (r['Output Indicators'] || r['Indicators'] || '').trim();
+    if (!indicator) continue;
+    const target2026Raw = r['2026 Target'] || r['Y1 Target'] || r['2026 Target (June - July)'] || '';
+    const t = parseInt((target2026Raw || '').replace(/[^0-9]/g, ''), 10);
+    if (!Number.isFinite(t) || t <= 0) continue;
+
+    // Whole-cohort indicator (e.g. "Number of supported companies")
+    if (/total (number of )?(supported )?companies|cohort size|companies in the cohort/i.test(indicator)) {
+      cohortTarget = Math.max(cohortTarget, t);
+      continue;
+    }
+
+    const key = matchKey(indicator);
+    if (!key) continue;
+    const existing = perKey.get(key);
+    if (!existing || existing.target < t) {
+      perKey.set(key, { target: t, indicator });
+    }
+  }
+  return { perKey, cohortTarget };
+}
+
+// ─── LiveInsightsPanel ───────────────────────────────────────────────
+
+function LiveInsightsPanel({
+  totalSelected,
+  totalCohort,
+  lockedTotal,
+  pillarCompanyCounts,
+  subCompanyCounts,
+  dutchAssignsCount,
+  sidaAssignsCount,
+  dutchTargets,
+  sidaTargets,
+}: {
+  totalSelected: number;
+  totalCohort: number;
+  lockedTotal: number;
+  pillarCompanyCounts: Map<string, Set<string>>;
+  subCompanyCounts: Map<string, Set<string>>;
+  dutchAssignsCount: number;
+  sidaAssignsCount: number;
+  dutchTargets: LogframeTargets;
+  sidaTargets: LogframeTargets;
+}) {
+  // Combined target (Dutch + SIDA) per key — we don't separate the two
+  // for the per-pillar bars since one company can carry both funds.
+  const combinedTargets = new Map<string, { target: number; indicator: string; dutch: number; sida: number }>();
+  for (const [k, v] of dutchTargets.perKey) {
+    combinedTargets.set(k, { target: v.target, indicator: v.indicator, dutch: v.target, sida: 0 });
+  }
+  for (const [k, v] of sidaTargets.perKey) {
+    const cur = combinedTargets.get(k);
+    if (cur) {
+      combinedTargets.set(k, { ...cur, target: cur.target + v.target, sida: v.target });
+    } else {
+      combinedTargets.set(k, { target: v.target, indicator: v.indicator, dutch: 0, sida: v.target });
+    }
+  }
+  const cohortTarget = Math.max(dutchTargets.cohortTarget, sidaTargets.cohortTarget) || totalCohort;
+
+  return (
+    <div className="space-y-3 lg:sticky lg:top-3">
+      <Card>
+        <CardHeader title="Cohort progress" subtitle="Live as locks happen." />
+        <div className="space-y-2">
+          <ProgressBar label="Selected" value={totalSelected} total={cohortTarget} hint={`of ${cohortTarget} target`} tone="teal" />
+          <ProgressBar label="Locked" value={lockedTotal} total={totalSelected || cohortTarget} hint={`of ${totalSelected || cohortTarget} selected`} tone="green" />
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader title="Per donor" subtitle="Intervention-rows allocated to each fund." />
+        <div className="space-y-2">
+          <FundBar label="Dutch (97060)" value={dutchAssignsCount} total={dutchAssignsCount + sidaAssignsCount} tone="teal" />
+          <FundBar label="SIDA (91763)" value={sidaAssignsCount} total={dutchAssignsCount + sidaAssignsCount} tone="amber" />
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader title="Per pillar" subtitle="Distinct companies per pillar vs logframe target." />
+        <ul className="space-y-2">
+          {PILLARS.map(p => {
+            const t = combinedTargets.get(p.code);
+            const count = pillarCompanyCounts.get(p.code)?.size || 0;
+            return (
+              <li key={p.code}>
+                <ProgressBar
+                  label={p.shortLabel}
+                  value={count}
+                  total={t?.target || 0}
+                  hint={t ? `of ${t.target} target (D ${t.dutch} · S ${t.sida})` : 'no target found'}
+                  tone="navy"
+                />
+              </li>
+            );
+          })}
+        </ul>
+      </Card>
+
+      <Card>
+        <CardHeader title="Per sub-intervention" subtitle="Where each sub-target stands." />
+        <ul className="space-y-2">
+          {PILLARS.flatMap(p => p.subInterventions.map(s => ({ pillar: p.code, sub: s }))).map(({ pillar, sub }) => {
+            const key = `${pillar}/${sub}`;
+            const t = combinedTargets.get(key);
+            const count = subCompanyCounts.get(sub)?.size || 0;
+            // Only render rows that have either a count or a target — skip empty noise.
+            if (!t && count === 0) return null;
+            return (
+              <li key={key}>
+                <ProgressBar
+                  label={sub}
+                  value={count}
+                  total={t?.target || count}
+                  hint={t ? `of ${t.target} target` : 'no target found'}
+                  tone="orange"
+                />
+              </li>
+            );
+          })}
+        </ul>
+      </Card>
+
+      {(dutchTargets.perKey.size === 0 && sidaTargets.perKey.size === 0) && (
+        <Card>
+          <p className="text-[11px] italic text-slate-500">
+            Logframe targets not loaded yet. Check that the Logframes workbook is shared and that 2026 Target / Y1 Target columns are populated for the indicators you care about.
+          </p>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function ProgressBar({ label, value, total, hint, tone }: { label: string; value: number; total: number; hint?: string; tone: 'teal' | 'amber' | 'navy' | 'orange' | 'green' }) {
+  const pct = total <= 0 ? 0 : Math.round((value / total) * 100);
+  const cls =
+    tone === 'teal' ? 'bg-brand-teal'
+    : tone === 'amber' ? 'bg-amber-500'
+    : tone === 'green' ? 'bg-emerald-500'
+    : tone === 'orange' ? 'bg-orange-500'
+    : 'bg-navy-500';
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-bold text-navy-500 dark:text-slate-100">{label}</span>
+        <span className="font-mono">{value}{total > 0 ? ` / ${total}` : ''} <span className="text-[10px] text-slate-500">{total > 0 ? `(${pct}%)` : ''}</span></span>
+      </div>
+      {hint && <div className="text-[10px] text-slate-500">{hint}</div>}
+      <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+        <div className={`h-full ${cls}`} style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
     </div>
   );
