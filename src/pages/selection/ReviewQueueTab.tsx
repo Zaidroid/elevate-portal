@@ -75,12 +75,14 @@ export type FinalizeArgs = {
 const DECISION_TONE: Record<ReviewDecision, Tone> = {
   Recommend: 'green',
   Hold: 'amber',
-  Reject: 'red',
+  Waitlist: 'orange',
+  Reject: 'orange',
 };
 
 const DECISION_ICON: Record<ReviewDecision, React.ReactNode> = {
   Recommend: <ThumbsUp className="h-3.5 w-3.5" />,
   Hold: <PauseCircle className="h-3.5 w-3.5" />,
+  Waitlist: <ThumbsDown className="h-3.5 w-3.5" />,
   Reject: <ThumbsDown className="h-3.5 w-3.5" />,
 };
 
@@ -683,10 +685,11 @@ export function ReviewView({
               <div className="grid grid-cols-3 gap-1.5">
                 {REVIEW_DECISIONS.map(d => {
                   const active = decision === d;
-                  const tones = {
+                  const tones: Record<ReviewDecision, { on: string; off: string }> = {
                     Recommend: { on: 'border-emerald-500 bg-emerald-500 text-white', off: 'border-slate-200 hover:border-emerald-400 hover:bg-emerald-50 dark:border-navy-700 dark:hover:bg-emerald-950' },
                     Hold: { on: 'border-amber-500 bg-amber-500 text-white', off: 'border-slate-200 hover:border-amber-400 hover:bg-amber-50 dark:border-navy-700 dark:hover:bg-amber-950' },
-                    Reject: { on: 'border-red-500 bg-red-500 text-white', off: 'border-slate-200 hover:border-red-400 hover:bg-red-50 dark:border-navy-700 dark:hover:bg-red-950' },
+                    Waitlist: { on: 'border-orange-500 bg-orange-500 text-white', off: 'border-slate-200 hover:border-orange-400 hover:bg-orange-50 dark:border-navy-700 dark:hover:bg-orange-950' },
+                    Reject: { on: 'border-orange-500 bg-orange-500 text-white', off: 'border-slate-200 hover:border-orange-400 hover:bg-orange-50 dark:border-navy-700 dark:hover:bg-orange-950' },
                   };
                   const cls = active ? tones[d].on : `${tones[d].off} text-slate-700 dark:text-slate-200 bg-white dark:bg-navy-900`;
                   return (

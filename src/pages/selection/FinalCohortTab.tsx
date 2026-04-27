@@ -26,7 +26,7 @@ import type { ReviewableCompany } from './ReviewQueueTab';
 import { ActivityTimeline } from '../companies/ActivityTimeline';
 import { meaningfulEntries } from '../companies/selectionContext';
 
-const FINAL_STATUSES = ['Selected', 'Recommended', 'Reviewing', 'Hold', 'Rejected'] as const;
+const FINAL_STATUSES = ['Selected', 'Recommended', 'Reviewing', 'Hold', 'Waitlist'] as const;
 type FinalStatus = (typeof FINAL_STATUSES)[number];
 
 const FINAL_TONE: Record<FinalStatus, Tone> = {
@@ -34,13 +34,14 @@ const FINAL_TONE: Record<FinalStatus, Tone> = {
   Recommended: 'orange',
   Reviewing: 'amber',
   Hold: 'amber',
-  Rejected: 'red',
+  Waitlist: 'orange',
 };
 
 const DECISION_TONE: Record<ReviewDecision, Tone> = {
   Recommend: 'green',
   Hold: 'amber',
-  Reject: 'red',
+  Waitlist: 'orange',
+  Reject: 'orange',
 };
 
 const FUND_OPTIONS: { value: string; label: string }[] = [
@@ -1138,7 +1139,7 @@ function statusStyle(s: FinalStatus): React.CSSProperties {
     Recommended: { border: '#f97316', bg: '#fff7ed', color: '#9a3412' },
     Reviewing: { border: '#f59e0b', bg: '#fffbeb', color: '#92400e' },
     Hold: { border: '#f59e0b', bg: '#fffbeb', color: '#92400e' },
-    Rejected: { border: '#ef4444', bg: '#fef2f2', color: '#991b1b' },
+    Waitlist: { border: '#f97316', bg: '#fff7ed', color: '#9a3412' },
   };
   const v = map[s];
   return { borderColor: v.border, backgroundColor: v.bg, color: v.color };

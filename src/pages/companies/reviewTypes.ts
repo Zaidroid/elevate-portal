@@ -37,9 +37,21 @@ export type ActivityRow = {
   details: string;
 };
 
-export type ReviewDecision = 'Recommend' | 'Hold' | 'Reject';
+// 'Reject' is the legacy code; 'Waitlist' is the canonical. Both are
+// accepted at the type level so existing rows in the Reviews tab still
+// load. New saves always use 'Waitlist'. Aggregations (summarizeReviews)
+// treat the two as the same decision.
+export type ReviewDecision = 'Recommend' | 'Hold' | 'Waitlist' | 'Reject';
 
-export const REVIEW_DECISIONS: ReviewDecision[] = ['Recommend', 'Hold', 'Reject'];
+export const REVIEW_DECISIONS: ReviewDecision[] = ['Recommend', 'Hold', 'Waitlist'];
+
+// Normalize a legacy decision to its canonical form.
+export function canonicalDecision(d: string | undefined | null): ReviewDecision | '' {
+  if (!d) return '';
+  if (d === 'Reject') return 'Waitlist';
+  if (d === 'Recommend' || d === 'Hold' || d === 'Waitlist') return d;
+  return '';
+}
 
 export const REVIEWS_HEADERS = [
   'review_id',
@@ -178,10 +190,15 @@ export function preDecisionIdFor(companyId: string, author: string, pillar: stri
 // Per-company aggregation of all team reviews — what the kanban card and
 // roster column show: total reviewer count, breakdown by decision, the
 // modal recommendation, and whether there's divergence (>1 distinct vote).
+//
+// `waitlist` counts both legacy 'Reject' and canonical 'Waitlist' decisions.
+// `reject` is kept as an alias to avoid breaking existing consumers.
 export type ReviewSummary = {
   total: number;
   recommend: number;
   hold: number;
+  waitlist: number;
+  /** @deprecated alias for `waitlist` — kept for backward compat. */
   reject: number;
   consensus: ReviewDecision | 'Mixed' | null;
   divergence: boolean;
@@ -193,6 +210,7 @@ export function summarizeReviews(rows: Review[]): ReviewSummary {
     total: 0,
     recommend: 0,
     hold: 0,
+    waitlist: 0,
     reject: 0,
     consensus: null,
     divergence: false,
@@ -204,15 +222,16 @@ export function summarizeReviews(rows: Review[]): ReviewSummary {
     summary.total += 1;
     if (r.decision === 'Recommend') summary.recommend += 1;
     else if (r.decision === 'Hold') summary.hold += 1;
-    else if (r.decision === 'Reject') summary.reject += 1;
+    else if (r.decision === 'Waitlist' || r.decision === 'Reject') summary.waitlist += 1;
     const email = (r.reviewer_email || '').toLowerCase();
     if (email && !seen.has(email)) { seen.add(email); summary.reviewerEmails.push(email); }
   }
+  summary.reject = summary.waitlist;
   if (summary.total === 0) return summary;
   const counts: Array<[ReviewDecision, number]> = [
     ['Recommend', summary.recommend],
     ['Hold', summary.hold],
-    ['Reject', summary.reject],
+    ['Waitlist', summary.waitlist],
   ];
   counts.sort((a, b) => b[1] - a[1]);
   const distinct = counts.filter(c => c[1] > 0).length;

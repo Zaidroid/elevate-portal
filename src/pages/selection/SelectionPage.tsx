@@ -1011,14 +1011,14 @@ function ReviewQueueBoard({
   }, [comments]);
 
   // Bucket companies by MY review state.
-  type Bucket = 'unreviewed' | 'Recommend' | 'Hold' | 'Reject';
-  const buckets: Record<Bucket, ReviewableCompany[]> = { unreviewed: [], Recommend: [], Hold: [], Reject: [] };
+  type Bucket = 'unreviewed' | 'Recommend' | 'Hold' | 'Waitlist';
+  const buckets: Record<Bucket, ReviewableCompany[]> = { unreviewed: [], Recommend: [], Hold: [], Waitlist: [] };
   for (const c of companies) {
     const my = myReviewByCompany.get(c.company_id);
     if (!my || !my.decision) buckets.unreviewed.push(c);
     else if (my.decision === 'Recommend') buckets.Recommend.push(c);
     else if (my.decision === 'Hold') buckets.Hold.push(c);
-    else if (my.decision === 'Reject') buckets.Reject.push(c);
+    else if (my.decision === 'Waitlist' || my.decision === 'Reject') buckets.Waitlist.push(c);
     else buckets.unreviewed.push(c);
   }
 
@@ -1026,64 +1026,115 @@ function ReviewQueueBoard({
     { id: 'unreviewed', label: 'To review (you)', tone: 'text-slate-700', bg: 'bg-slate-50 dark:bg-navy-800/50' },
     { id: 'Recommend', label: 'Recommend', tone: 'text-emerald-700', bg: 'bg-emerald-50 dark:bg-emerald-950/30' },
     { id: 'Hold', label: 'Hold', tone: 'text-amber-700', bg: 'bg-amber-50 dark:bg-amber-950/30' },
-    { id: 'Reject', label: 'Reject', tone: 'text-red-700', bg: 'bg-red-50 dark:bg-red-950/30' },
+    { id: 'Waitlist', label: 'Waitlist', tone: 'text-orange-700', bg: 'bg-orange-50 dark:bg-orange-950/30' },
   ];
+
+  // Drag state — track which card is currently being dragged + the
+  // hovered drop target so we can show a highlight ring on the column.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<Bucket | null>(null);
+
+  const handleDrop = async (target: Bucket, companyId: string) => {
+    setDragId(null); setDragOver(null);
+    if (!companyId) return;
+    const my = myReviewByCompany.get(companyId);
+    const now = new Date().toISOString();
+    const id = my?.review_id || `rev-${companyId}-${reviewerEmail.split('@')[0]}`.toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 80);
+    const newDecision = target === 'unreviewed' ? '' : (target as 'Recommend' | 'Hold' | 'Waitlist');
+    await onSaveReview({
+      review_id: id,
+      company_id: companyId,
+      reviewer_email: reviewerEmail,
+      decision: newDecision,
+      proposed_pillars: my?.proposed_pillars || '',
+      proposed_sub_interventions: my?.proposed_sub_interventions || '',
+      notes: my?.notes || '',
+      created_at: my?.created_at || now,
+      updated_at: now,
+    });
+  };
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-        <span>Click any company to open the focus view. Your reviews land in the Reviews tab; team consensus is computed live.</span>
+        <span><strong>Drag</strong> a card between columns to change your decision, or <strong>click</strong> to open the focus view for the full dossier + pillar picker.</span>
       </div>
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
-        {COLUMNS.map(col => (
-          <div key={col.id} className={`rounded-xl border border-slate-200 p-2 dark:border-navy-700 ${col.bg}`}>
-            <div className="mb-2 flex items-center justify-between gap-2 px-1">
-              <div className={`text-xs font-bold uppercase tracking-wider ${col.tone}`}>{col.label}</div>
-              <Badge tone="neutral">{buckets[col.id].length}</Badge>
-            </div>
-            <ul className="space-y-1.5">
-              {buckets[col.id].length === 0 && (
-                <li className="rounded-md border border-dashed border-slate-200 px-2 py-3 text-center text-[10px] italic text-slate-400 dark:border-navy-700">
-                  Empty
-                </li>
-              )}
-              {buckets[col.id].map(c => {
-                const teamSummary = teamSummaryByCompany.get(c.company_id);
-                const recs = preDecsByCompany.get(c.company_id) || [];
-                const israa = recs.some(r => r.author_email.startsWith('israa'));
-                const raouf = recs.some(r => r.author_email.startsWith('raouf'));
-                const my = myReviewByCompany.get(c.company_id);
-                return (
-                  <li key={c.company_id}>
-                    <button
-                      type="button"
-                      onClick={() => setFocused(c)}
-                      className="block w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-left transition hover:border-brand-teal hover:shadow-sm dark:border-navy-700 dark:bg-navy-900 dark:hover:border-brand-teal"
-                    >
-                      <div className="truncate text-xs font-bold text-navy-500 dark:text-slate-100">{c.company_name}</div>
-                      {c.sector && <div className="truncate text-[10px] text-slate-500">{c.sector}</div>}
-                      <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
-                        {teamSummary && teamSummary.total > 0 && (
-                          <span className={`rounded px-1 py-0.5 font-bold ${teamSummary.consensus === 'Recommend' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200' : teamSummary.consensus === 'Hold' ? 'bg-amber-100 text-amber-800' : teamSummary.consensus === 'Reject' ? 'bg-red-100 text-red-800' : 'bg-slate-200'}`}>
-                            {teamSummary.total}× {teamSummary.consensus}
-                            {teamSummary.divergence ? ' · div' : ''}
-                          </span>
-                        )}
-                        {israa && <span className="rounded bg-purple-100 px-1 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200">I</span>}
-                        {raouf && <span className="rounded bg-purple-100 px-1 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200">R</span>}
-                        {my?.proposed_pillars && (
-                          <span className="text-[9px] text-slate-500" title={my.proposed_pillars}>
-                            {my.proposed_pillars.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3).join(', ')}
-                          </span>
-                        )}
-                      </div>
-                    </button>
+        {COLUMNS.map(col => {
+          const isDropTarget = dragOver === col.id;
+          return (
+            <div
+              key={col.id}
+              onDragOver={e => { e.preventDefault(); setDragOver(col.id); }}
+              onDragLeave={() => setDragOver(prev => (prev === col.id ? null : prev))}
+              onDrop={e => {
+                e.preventDefault();
+                const cid = e.dataTransfer.getData('text/plain');
+                void handleDrop(col.id, cid);
+              }}
+              className={`rounded-xl border-2 p-2 transition ${
+                isDropTarget
+                  ? 'border-brand-teal bg-teal-50/80 dark:bg-teal-950/40'
+                  : `border-slate-200 dark:border-navy-700 ${col.bg}`
+              }`}
+            >
+              <div className="mb-2 flex items-center justify-between gap-2 px-1">
+                <div className={`text-xs font-bold uppercase tracking-wider ${col.tone}`}>{col.label}</div>
+                <Badge tone="neutral">{buckets[col.id].length}</Badge>
+              </div>
+              <ul className="space-y-1.5">
+                {buckets[col.id].length === 0 && (
+                  <li className="rounded-md border border-dashed border-slate-200 px-2 py-3 text-center text-[10px] italic text-slate-400 dark:border-navy-700">
+                    {isDropTarget ? 'Drop here' : 'Empty'}
                   </li>
-                );
-              })}
-            </ul>
-          </div>
-        ))}
+                )}
+                {buckets[col.id].map(c => {
+                  const teamSummary = teamSummaryByCompany.get(c.company_id);
+                  const recs = preDecsByCompany.get(c.company_id) || [];
+                  const israa = recs.some(r => r.author_email.startsWith('israa'));
+                  const raouf = recs.some(r => r.author_email.startsWith('raouf'));
+                  const my = myReviewByCompany.get(c.company_id);
+                  const isDragging = dragId === c.company_id;
+                  return (
+                    <li key={c.company_id}>
+                      <div
+                        draggable
+                        onDragStart={e => {
+                          setDragId(c.company_id);
+                          e.dataTransfer.setData('text/plain', c.company_id);
+                          e.dataTransfer.effectAllowed = 'move';
+                        }}
+                        onDragEnd={() => { setDragId(null); setDragOver(null); }}
+                        onClick={() => setFocused(c)}
+                        className={`block w-full cursor-grab rounded-md border bg-white px-2 py-1.5 text-left transition hover:border-brand-teal hover:shadow-sm dark:bg-navy-900 dark:hover:border-brand-teal ${
+                          isDragging ? 'border-brand-teal opacity-60' : 'border-slate-200 dark:border-navy-700'
+                        }`}
+                      >
+                        <div className="truncate text-xs font-bold text-navy-500 dark:text-slate-100">{c.company_name}</div>
+                        {c.sector && <div className="truncate text-[10px] text-slate-500">{c.sector}</div>}
+                        <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
+                          {teamSummary && teamSummary.total > 0 && (
+                            <span className={`rounded px-1 py-0.5 font-bold ${teamSummary.consensus === 'Recommend' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200' : teamSummary.consensus === 'Hold' ? 'bg-amber-100 text-amber-800' : teamSummary.consensus === 'Waitlist' ? 'bg-orange-100 text-orange-800' : 'bg-slate-200'}`}>
+                              {teamSummary.total}× {teamSummary.consensus}
+                              {teamSummary.divergence ? ' · div' : ''}
+                            </span>
+                          )}
+                          {israa && <span className="rounded bg-purple-100 px-1 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200">I</span>}
+                          {raouf && <span className="rounded bg-purple-100 px-1 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200">R</span>}
+                          {my?.proposed_pillars && (
+                            <span className="text-[9px] text-slate-500" title={my.proposed_pillars}>
+                              {my.proposed_pillars.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3).join(', ')}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          );
+        })}
       </div>
 
       <CompanyFocusDrawer
@@ -1171,10 +1222,23 @@ function FinalCohortBoard({
     lane.companies.push(c);
   }
 
+  // Drag state for the AM lane board.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
+
+  const handleAmDrop = async (targetAmEmail: string, companyId: string) => {
+    setDragId(null); setDragOver(null);
+    if (!companyId) return;
+    const c = companies.find(x => x.company_id === companyId);
+    if (!c) return;
+    if (c.profile_manager_email === targetAmEmail) return;
+    await onAssignPM(companyId, targetAmEmail);
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-        <span>Click any company to open the lock-decision form. Cards in the Unassigned lane need an AM picked first.</span>
+        <span><strong>Drag</strong> a card between AM lanes to reassign, or <strong>click</strong> to open the lock-decision form.</span>
       </div>
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
         {lanes.map(lane => {
@@ -1182,8 +1246,24 @@ function FinalCohortBoard({
             ? 'bg-teal-50/60 dark:bg-teal-950/20'
             : 'bg-amber-50/60 dark:bg-amber-950/20';
           const lockedInLane = lane.companies.filter(c => assignsByCompany.has(c.company_id)).length;
+          const isDropTarget = dragOver === (lane.amEmail || 'UNASSIGNED');
+          const laneKey = lane.amEmail || 'UNASSIGNED';
           return (
-            <div key={lane.amEmail || 'unassigned'} className={`rounded-xl border border-slate-200 p-2 dark:border-navy-700 ${colTone}`}>
+            <div
+              key={laneKey}
+              onDragOver={e => { e.preventDefault(); setDragOver(laneKey); }}
+              onDragLeave={() => setDragOver(prev => (prev === laneKey ? null : prev))}
+              onDrop={e => {
+                e.preventDefault();
+                const cid = e.dataTransfer.getData('text/plain');
+                void handleAmDrop(lane.amEmail, cid);
+              }}
+              className={`rounded-xl border-2 p-2 transition ${
+                isDropTarget
+                  ? 'border-brand-teal bg-teal-50/80 dark:bg-teal-950/40'
+                  : `border-slate-200 dark:border-navy-700 ${colTone}`
+              }`}
+            >
               <div className="mb-2 flex items-center justify-between gap-2 px-1">
                 <div className="text-xs font-bold uppercase tracking-wider text-navy-500 dark:text-slate-100">{lane.label}</div>
                 <Badge tone={lane.amEmail ? 'teal' : 'amber'}>
@@ -1193,7 +1273,7 @@ function FinalCohortBoard({
               <ul className="space-y-1.5">
                 {lane.companies.length === 0 && (
                   <li className="rounded-md border border-dashed border-slate-200 px-2 py-3 text-center text-[10px] italic text-slate-400 dark:border-navy-700">
-                    Empty
+                    {isDropTarget ? 'Drop here' : 'Empty'}
                   </li>
                 )}
                 {lane.companies.map(c => {
@@ -1201,13 +1281,22 @@ function FinalCohortBoard({
                   const locked = assigns.length > 0;
                   const pillars = Array.from(new Set(assigns.map(a => pillarFor(a.intervention_type)?.code || a.intervention_type)));
                   const recs = preDecsByCompany.get(c.company_id) || [];
+                  const isDragging = dragId === c.company_id;
                   return (
                     <li key={c.company_id}>
-                      <button
-                        type="button"
+                      <div
+                        draggable
+                        onDragStart={e => {
+                          setDragId(c.company_id);
+                          e.dataTransfer.setData('text/plain', c.company_id);
+                          e.dataTransfer.effectAllowed = 'move';
+                        }}
+                        onDragEnd={() => { setDragId(null); setDragOver(null); }}
                         onClick={() => setFocused(c)}
-                        className={`block w-full rounded-md border bg-white px-2 py-1.5 text-left transition hover:shadow-sm dark:bg-navy-900 ${
-                          locked
+                        className={`block w-full cursor-grab rounded-md border bg-white px-2 py-1.5 text-left transition hover:shadow-sm dark:bg-navy-900 ${
+                          isDragging
+                            ? 'border-brand-teal opacity-60'
+                            : locked
                             ? 'border-emerald-300 dark:border-emerald-800'
                             : 'border-slate-200 hover:border-brand-teal dark:border-navy-700 dark:hover:border-brand-teal'
                         }`}
@@ -1221,7 +1310,7 @@ function FinalCohortBoard({
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
                           {c.status && c.status !== 'Interviewed' && (
-                            <span className={`rounded px-1 py-0.5 font-bold ${c.status === 'Selected' ? 'bg-emerald-100 text-emerald-800' : c.status === 'Hold' ? 'bg-amber-100 text-amber-800' : 'bg-slate-200 text-slate-700'}`}>
+                            <span className={`rounded px-1 py-0.5 font-bold ${c.status === 'Selected' ? 'bg-emerald-100 text-emerald-800' : c.status === 'Hold' ? 'bg-amber-100 text-amber-800' : c.status === 'Waitlist' ? 'bg-orange-100 text-orange-800' : 'bg-slate-200 text-slate-700'}`}>
                               {c.status}
                             </span>
                           )}
@@ -1239,7 +1328,7 @@ function FinalCohortBoard({
                             </span>
                           )}
                         </div>
-                      </button>
+                      </div>
                     </li>
                   );
                 })}
@@ -1300,7 +1389,7 @@ function CompanyFocusDrawer({
   onAssignPM?: (companyId: string, pmEmail: string) => Promise<void>;
 }) {
   // Local form state
-  const [decision, setDecision] = useState<'Recommend' | 'Hold' | 'Reject' | ''>('');
+  const [decision, setDecision] = useState<'Recommend' | 'Hold' | 'Waitlist' | ''>('');
   const [proposedPillars, setProposedPillars] = useState<Set<string>>(new Set());
   const [proposedSubs, setProposedSubs] = useState<Set<string>>(new Set());
   const [reviewNotes, setReviewNotes] = useState('');
@@ -1308,7 +1397,7 @@ function CompanyFocusDrawer({
   const [saving, setSaving] = useState(false);
   const [posting, setPosting] = useState(false);
   // Lock form state
-  const [lockStatus, setLockStatus] = useState<'Selected' | 'Hold' | 'Rejected'>('Selected');
+  const [lockStatus, setLockStatus] = useState<'Selected' | 'Hold' | 'Waitlist'>('Selected');
   const [lockPm, setLockPm] = useState('');
   const [lockPillars, setLockPillars] = useState<Set<string>>(new Set());
   const [lockSubs, setLockSubs] = useState<Set<string>>(new Set());
@@ -1319,13 +1408,13 @@ function CompanyFocusDrawer({
   useEffect(() => {
     if (!company) return;
     if (mode === 'review') {
-      setDecision((myReview?.decision as 'Recommend' | 'Hold' | 'Reject' | '') || '');
+      setDecision((myReview?.decision as 'Recommend' | 'Hold' | 'Waitlist' | '') || '');
       setProposedPillars(new Set((myReview?.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean)));
       setProposedSubs(new Set((myReview?.proposed_sub_interventions || '').split(',').map(s => s.trim()).filter(Boolean)));
       setReviewNotes(myReview?.notes || '');
       setCommentDraft('');
     } else {
-      setLockStatus((company.status === 'Hold' || company.status === 'Rejected' ? company.status : 'Selected'));
+      setLockStatus(((company.status === 'Hold' || company.status === 'Waitlist' || company.status === 'Rejected') ? (company.status === 'Rejected' ? 'Waitlist' : (company.status as 'Hold' | 'Waitlist')) : 'Selected'));
       setLockPm(company.profile_manager_email || '');
       const pSet = new Set<string>();
       const sSet = new Set<string>();
@@ -1464,7 +1553,7 @@ function CompanyFocusDrawer({
               label="Team consensus"
               value={teamSummary.total > 0 ? `${teamSummary.total}× ${teamSummary.consensus}` : 'no reviews'}
               hint={teamSummary.divergence ? 'divergent' : undefined}
-              tone={teamSummary.consensus === 'Recommend' ? 'green' : teamSummary.consensus === 'Reject' ? 'red' : 'amber'}
+              tone={teamSummary.consensus === 'Recommend' ? 'green' : teamSummary.consensus === 'Waitlist' ? 'red' : 'amber'}
             />
             <KPI
               label="Pre-decision"
@@ -1552,7 +1641,7 @@ function CompanyFocusDrawer({
                   <li key={r.review_id} className="rounded border border-slate-200 p-1.5 text-[11px] dark:border-navy-700">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="font-bold">{displayName(r.reviewer_email)}</span>
-                      {r.decision && <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${r.decision === 'Recommend' ? 'bg-emerald-100 text-emerald-800' : r.decision === 'Hold' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'}`}>{r.decision}</span>}
+                      {r.decision && <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${r.decision === 'Recommend' ? 'bg-emerald-100 text-emerald-800' : r.decision === 'Hold' ? 'bg-amber-100 text-amber-800' : 'bg-orange-100 text-orange-800'}`}>{r.decision}</span>}
                     </div>
                     {r.proposed_pillars && (
                       <div className="mt-0.5 text-slate-600 dark:text-slate-400">{r.proposed_pillars}</div>
@@ -1561,6 +1650,53 @@ function CompanyFocusDrawer({
                   </li>
                 ))}
               </ul>
+            </Card>
+          )}
+
+          {/* Selection-tool: Interview Discussion (multi-row team thread) */}
+          {(company.selection?.interviewDiscussionAll && company.selection.interviewDiscussionAll.length > 0) && (
+            <Card>
+              <CardHeader title={`Interview discussion (selection-tool) · ${company.selection.interviewDiscussionAll.length}`} subtitle="Team thread captured in the Selection workbook" />
+              <ul className="space-y-1">
+                {company.selection.interviewDiscussionAll.map((row, i) => (
+                  <li key={i} className="rounded border border-slate-200 p-1.5 text-[11px] dark:border-navy-700">
+                    <SelectionRowDump row={row} />
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
+          {/* Selection-tool: Selection Votes (per voter) */}
+          {(company.selection?.selectionVotesAll && company.selection.selectionVotesAll.length > 0) && (
+            <Card>
+              <CardHeader title={`Selection votes (selection-tool) · ${company.selection.selectionVotesAll.length}`} subtitle="Per-voter tally before the live session" />
+              <ul className="space-y-1">
+                {company.selection.selectionVotesAll.map((row, i) => (
+                  <li key={i} className="rounded border border-slate-200 p-1.5 text-[11px] dark:border-navy-700">
+                    <SelectionRowDump row={row} />
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
+          {/* Selection-tool: Committee votes + Doc reviews */}
+          {(company.selection?.committeeVotes || company.selection?.docReview) && (
+            <Card>
+              <CardHeader title="Committee + doc review (selection-tool)" subtitle="Earlier-stage decisions and document audit" />
+              {company.selection.committeeVotes && (
+                <div className="rounded border border-slate-200 p-1.5 text-[11px] dark:border-navy-700">
+                  <div className="mb-1 text-[9px] font-bold uppercase tracking-wider text-slate-500">Committee votes</div>
+                  <SelectionRowDump row={company.selection.committeeVotes} />
+                </div>
+              )}
+              {company.selection.docReview && (
+                <div className="mt-2 rounded border border-slate-200 p-1.5 text-[11px] dark:border-navy-700">
+                  <div className="mb-1 text-[9px] font-bold uppercase tracking-wider text-slate-500">Doc review</div>
+                  <SelectionRowDump row={company.selection.docReview} />
+                </div>
+              )}
             </Card>
           )}
         </div>
@@ -1572,14 +1708,14 @@ function CompanyFocusDrawer({
               <Card>
                 <CardHeader title="Your decision" />
                 <div className="grid grid-cols-3 gap-1">
-                  {(['Recommend', 'Hold', 'Reject'] as const).map(d => (
+                  {(['Recommend', 'Hold', 'Waitlist'] as const).map(d => (
                     <button
                       key={d}
                       type="button"
                       onClick={() => setDecision(d)}
                       className={`rounded-md border-2 px-2 py-2 text-xs font-bold ${
                         decision === d
-                          ? d === 'Recommend' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : d === 'Hold' ? 'border-amber-500 bg-amber-50 text-amber-800' : 'border-red-500 bg-red-50 text-red-800'
+                          ? d === 'Recommend' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : d === 'Hold' ? 'border-amber-500 bg-amber-50 text-amber-800' : 'border-orange-500 bg-orange-50 text-orange-800'
                           : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200'
                       }`}
                     >
@@ -1666,14 +1802,14 @@ function CompanyFocusDrawer({
               <Card>
                 <CardHeader title="Final status" />
                 <div className="grid grid-cols-3 gap-1">
-                  {(['Selected', 'Hold', 'Rejected'] as const).map(s => (
+                  {(['Selected', 'Hold', 'Waitlist'] as const).map(s => (
                     <button
                       key={s}
                       type="button"
                       onClick={() => setLockStatus(s)}
                       className={`rounded-md border-2 px-2 py-2 text-xs font-bold ${
                         lockStatus === s
-                          ? s === 'Selected' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : s === 'Hold' ? 'border-amber-500 bg-amber-50 text-amber-800' : 'border-red-500 bg-red-50 text-red-800'
+                          ? s === 'Selected' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : s === 'Hold' ? 'border-amber-500 bg-amber-50 text-amber-800' : 'border-orange-500 bg-orange-50 text-orange-800'
                           : 'border-slate-200 bg-white text-slate-700 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200'
                       }`}
                     >
@@ -1778,6 +1914,40 @@ function CompanyFocusDrawer({
   );
 }
 
+// Compact key-value dump of a selection-tool row. Skips empty / id /
+// timestamp columns. Renders the speaker/reviewer + timestamp on top
+// when those are present so multi-row threads identify who said what.
+function SelectionRowDump({ row }: { row: Record<string, string> }) {
+  const meta = {
+    who: row['reviewer_email'] || row['reviewer'] || row['author'] || row['author_email'] || row['voter_email'] || row['email'] || '',
+    when: row['updated_at'] || row['created_at'] || row['timestamp'] || row['date'] || '',
+  };
+  const skip = /^id$|_id$|^index$|^row[_ ]?number$|^updated[_ ]?at$|^created[_ ]?at$|^updated[_ ]?by$|^created[_ ]?by$|^reviewer_?email$|^author_?email$|^voter_?email$|^company.?name$/i;
+  const entries = Object.entries(row).filter(([k, v]) => v && v.trim() && !skip.test(k));
+  return (
+    <div>
+      {(meta.who || meta.when) && (
+        <div className="mb-1 flex items-center justify-between gap-2 text-[10px] font-semibold text-slate-500">
+          <span>{meta.who ? displayName(meta.who) : ''}</span>
+          <span>{meta.when}</span>
+        </div>
+      )}
+      {entries.length === 0 ? (
+        <span className="italic text-slate-400">No data.</span>
+      ) : (
+        <dl className="grid grid-cols-1 gap-x-3 gap-y-0.5 sm:grid-cols-2">
+          {entries.map(([k, v]) => (
+            <div key={k} className="flex flex-col">
+              <dt className="text-[9px] font-bold uppercase tracking-wider text-slate-500">{k.replace(/_/g, ' ')}</dt>
+              <dd className="whitespace-pre-wrap text-slate-700 dark:text-slate-300">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+}
+
 function firstField(row: Record<string, string> | null | undefined, keys: string[]): string {
   if (!row) return '';
   for (const k of keys) {
@@ -1795,16 +1965,17 @@ function firstField(row: Record<string, string> | null | undefined, keys: string
   return '';
 }
 
+// Map a pillar code (new taxonomy) to the applicant wantsXXX flags
+// that signal the applicant requested that pillar.
 function wantsBoolFor(applicant: Record<string, string> | null | undefined, pillarCode: string): boolean {
   if (!applicant) return false;
   const map: Record<string, string[]> = {
-    TTH: ['wantsTrainToHire'],
-    Upskilling: ['wantsUpskilling'],
+    // Capacity Building = wantsTrainToHire OR wantsUpskilling
+    CB: ['wantsTrainToHire', 'wantsUpskilling'],
+    // Marketing & Branding = wantsMarketingSupport
     MKG: ['wantsMarketingSupport'],
-    MA: ['wantsLegalSupport'],
-    'C-Suite': ['wantsDomainCoaching'],
-    Conferences: ['wantsConferences'],
-    ElevateBridge: ['wantsElevateBridge'],
+    // Market Access = legal / coaching / conferences / EB any of these
+    MA: ['wantsLegalSupport', 'wantsDomainCoaching', 'wantsConferences', 'wantsElevateBridge'],
   };
   const keys = map[pillarCode] || [];
   for (const k of keys) {
@@ -1863,7 +2034,7 @@ function InsightsDashboard({
   const preYesTeamNo = companies.filter(c => {
     const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
     const recs = recsByCompany.get(c.company_id) || [];
-    return recs.length > 0 && (s.consensus === 'Reject' || s.consensus === 'Hold');
+    return recs.length > 0 && (s.consensus === 'Waitlist' || s.consensus === 'Hold');
   });
   const lockedNoPm = companies.filter(c => lockedSet.has(c.company_id) && !c.profile_manager_email);
   const recommendNotLocked = companies.filter(c => {
@@ -1965,7 +2136,7 @@ function InsightsDashboard({
             companies={teamYesPreNo}
           />
           <ActionTile
-            label="Israa+Raouf rec'd, team Hold/Reject"
+            label="Israa+Raouf rec'd, team Hold/Waitlist"
             count={preYesTeamNo.length}
             tone="amber"
             hint="Worth a second look"

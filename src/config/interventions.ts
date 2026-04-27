@@ -1,6 +1,10 @@
 // Canonical intervention taxonomy for GSG Elevate Cohort 3.
-// The four program pillars are weighted equally in the UI, with sub-interventions
-// hanging off each pillar rather than inflating Market Access with many siblings.
+//
+// Three top-level pillars, each with its own sub-interventions. The
+// previous taxonomy (TTH/Upskilling/MKG/MA/EB/C-Suite/Conferences as 7
+// peer pillars) was wrong; those are sub-interventions inside the
+// proper 3 pillars. `pillarFor()` accepts both new and legacy codes so
+// existing reviews + assignments still resolve.
 
 export type Pillar = {
   code: string;
@@ -13,83 +17,86 @@ export type Pillar = {
 
 export const PILLARS: Pillar[] = [
   {
-    code: 'TTH',
-    label: 'Train To Hire',
-    shortLabel: 'TTH',
+    code: 'CB',
+    label: 'Capacity Building',
+    shortLabel: 'Capacity',
     color: 'teal',
-    description: 'Train candidates against a company hiring spec, then place them as employees.',
-    subInterventions: [],
-  },
-  {
-    code: 'Upskilling',
-    label: 'Upskilling',
-    shortLabel: 'Upskill',
-    color: 'orange',
-    description: 'Targeted training for existing company staff.',
-    subInterventions: [],
+    description: 'Talent supply for the company — Upskilling existing staff or Train-To-Hire to bring on new hires.',
+    subInterventions: ['Upskilling', 'Train To Hire'],
   },
   {
     code: 'MKG',
-    label: 'Market and Branding',
+    label: 'Marketing & Branding',
     shortLabel: 'M&B',
     color: 'red',
-    description: 'Brand identity, marketing collateral, content pipelines.',
-    subInterventions: [],
+    description: 'Brand identity + go-to-market support via a Marketing Agency or Marketing Resources placed inside the company.',
+    subInterventions: ['Marketing Agency', 'Marketing Resources'],
   },
   {
     code: 'MA',
     label: 'Market Access',
     shortLabel: 'MA',
     color: 'navy',
-    description: 'Entry into new markets, legal setup, market registration.',
-    subInterventions: [
-      'MA-Market Registration',
-      'MA-MKG Agency',
-      'MA-Resource Placement',
-      'MA-Legal',
-    ],
-  },
-  {
-    code: 'ElevateBridge',
-    label: 'ElevateBridge',
-    shortLabel: 'EB',
-    color: 'orange',
-    description: 'Pre-vetted freelancers act as a company\'s sales funnel — Upwork proposals, social outreach, deal closing.',
-    subInterventions: [],
-  },
-  {
-    code: 'C-Suite',
-    label: 'C-Suite Coaching',
-    shortLabel: 'CB',
-    color: 'teal',
-    description: 'Domain expert coaching for C-level leaders.',
-    subInterventions: [],
-  },
-  {
-    code: 'Conferences',
-    label: 'Conferences',
-    shortLabel: 'Conf',
-    color: 'orange',
-    description: 'International conference attendance and Commitment Letters.',
-    subInterventions: [],
+    description: 'Helping companies reach new markets — legal/registration, conferences, C-Suite coaching, ElevateBridge sales support.',
+    subInterventions: ['Legal Support', 'Conferences', 'C-Suite', 'ElevateBridge'],
   },
 ];
 
 export const PILLAR_BY_CODE = Object.fromEntries(PILLARS.map(p => [p.code, p] as const));
 
-// Flat list of every intervention type (pillar codes + sub-intervention codes),
-// suitable for dropdowns and filtering.
+// Flat list of every intervention type (pillar codes + sub-intervention codes).
 export const INTERVENTION_TYPES: string[] = PILLARS.flatMap(p => [p.code, ...p.subInterventions]);
 
-// Map any intervention type back to its parent pillar.
+// Legacy-code → (pillar, sub) migration. Old data in Reviews / Intervention
+// Assignments / Pre-decision Recommendations may carry the obsolete
+// 7-pillar codes; this maps them so older rows still render correctly.
+const LEGACY: Record<string, { pillar: string; sub: string }> = {
+  // Capacity Building children (formerly top-level pillars)
+  'TTH': { pillar: 'CB', sub: 'Train To Hire' },
+  'Train To Hire': { pillar: 'CB', sub: 'Train To Hire' },
+  'Train-To-Hire': { pillar: 'CB', sub: 'Train To Hire' },
+  'Upskilling': { pillar: 'CB', sub: 'Upskilling' },
+  // Marketing & Branding children — old taxonomy had MKG with no subs;
+  // also some Israa CSV rows landed under MA-MKG Agency.
+  'MA-MKG Agency': { pillar: 'MKG', sub: 'Marketing Agency' },
+  'MA-Resource Placement': { pillar: 'MKG', sub: 'Marketing Resources' },
+  // Market Access children (formerly top-level pillars)
+  'C-Suite': { pillar: 'MA', sub: 'C-Suite' },
+  'C-suite': { pillar: 'MA', sub: 'C-Suite' },
+  'ElevateBridge': { pillar: 'MA', sub: 'ElevateBridge' },
+  'Bridge': { pillar: 'MA', sub: 'ElevateBridge' },
+  'Conferences': { pillar: 'MA', sub: 'Conferences' },
+  'Conference': { pillar: 'MA', sub: 'Conferences' },
+  'MA-Legal': { pillar: 'MA', sub: 'Legal Support' },
+  'Legal': { pillar: 'MA', sub: 'Legal Support' },
+  'MA-Market Registration': { pillar: 'MA', sub: 'Legal Support' },
+};
+
+// Map any intervention type (new code, sub code, OR legacy code) to its
+// parent pillar. Returns undefined for genuinely unknown types.
 export function pillarFor(type: string): Pillar | undefined {
   if (!type) return undefined;
   if (PILLAR_BY_CODE[type]) return PILLAR_BY_CODE[type];
-  return PILLARS.find(p => p.subInterventions.includes(type));
+  for (const p of PILLARS) if (p.subInterventions.includes(type)) return p;
+  const legacy = LEGACY[type];
+  if (legacy) return PILLAR_BY_CODE[legacy.pillar];
+  return undefined;
 }
 
-// Default presence array for the 4 core pillars — used to render balanced cards
-// on CompanyDetailPage so TTH/Upskill/M&B/MA each get equal real estate.
-export const CORE_PILLARS: Pillar[] = PILLARS.filter(p =>
-  ['TTH', 'Upskilling', 'MKG', 'MA'].includes(p.code)
-);
+// Resolve a code (new sub, new pillar, OR legacy code) to a canonical
+// {pillar, sub} pair. Returns null if the code can't be mapped.
+export function resolveIntervention(code: string): { pillar: string; sub: string } | null {
+  if (!code) return null;
+  // New top-level pillar code
+  if (PILLAR_BY_CODE[code]) return { pillar: code, sub: '' };
+  // New sub-intervention
+  for (const p of PILLARS) {
+    if (p.subInterventions.includes(code)) return { pillar: p.code, sub: code };
+  }
+  // Legacy code
+  const legacy = LEGACY[code];
+  if (legacy) return legacy;
+  return null;
+}
+
+export const CORE_PILLARS: Pillar[] = PILLARS;
