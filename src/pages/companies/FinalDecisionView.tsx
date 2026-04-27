@@ -24,6 +24,7 @@ import type { ActivityRow, CompanyComment, PreDecisionRecommendation, Review, Re
 import { summarizeReviews } from './reviewTypes';
 import type { ReviewableCompany } from './ReviewView';
 import { ActivityTimeline } from './ActivityTimeline';
+import { meaningfulEntries } from './selectionContext';
 
 const FINAL_STATUSES = ['Selected', 'Recommended', 'Reviewing', 'Hold', 'Rejected'] as const;
 type FinalStatus = (typeof FINAL_STATUSES)[number];
@@ -90,6 +91,12 @@ export function FinalDecisionView({
 }) {
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Phase 6 filters — status, AM, divergent flag, pillar.
+  const [statusFilter, setStatusFilter] = useState<'all' | 'Selected' | 'Hold' | 'Rejected' | 'unset'>('all');
+  const [amFilter, setAmFilter] = useState<string>('all');
+  const [pillarFilter, setPillarFilter] = useState<string>('all');
+  const [divergentOnly, setDivergentOnly] = useState(false);
+  const [decidedOnly, setDecidedOnly] = useState<'all' | 'locked' | 'unlocked'>('all');
 
   // Indexes
   const reviewsByCompany = useMemo(() => {
@@ -132,14 +139,40 @@ export function FinalDecisionView({
     return m;
   }, [existingAssignments]);
 
-  // Filter companies by search.
+  // Filter companies by search + status + AM + pillar + divergent + decided.
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return companies;
-    return companies.filter(c =>
-      `${c.company_name} ${c.sector} ${c.governorate}`.toLowerCase().includes(q)
-    );
-  }, [companies, search]);
+    return companies.filter(c => {
+      if (q && !`${c.company_name} ${c.sector} ${c.governorate}`.toLowerCase().includes(q)) return false;
+      if (statusFilter !== 'all') {
+        if (statusFilter === 'unset' && c.status) return false;
+        if (statusFilter !== 'unset' && c.status !== statusFilter) return false;
+      }
+      if (amFilter !== 'all') {
+        const am = c.profile_manager_email || '';
+        if (amFilter === 'unassigned' && am) return false;
+        if (amFilter !== 'unassigned' && am !== amFilter) return false;
+      }
+      if (pillarFilter !== 'all') {
+        const assigns = assignsByCompany.get(c.company_id) || [];
+        const proposed = (reviewsByCompany.get(c.company_id) || []).flatMap(r =>
+          (r.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean),
+        );
+        const all = new Set([...assigns.map(a => a.intervention_type), ...proposed]);
+        if (!all.has(pillarFilter)) return false;
+      }
+      if (decidedOnly !== 'all') {
+        const locked = (assignsByCompany.get(c.company_id) || []).length > 0;
+        if (decidedOnly === 'locked' && !locked) return false;
+        if (decidedOnly === 'unlocked' && locked) return false;
+      }
+      if (divergentOnly) {
+        const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
+        if (!s.divergence) return false;
+      }
+      return true;
+    });
+  }, [companies, search, statusFilter, amFilter, pillarFilter, decidedOnly, divergentOnly, assignsByCompany, reviewsByCompany]);
 
   // Top-of-table summary.
   const summary = useMemo(() => {
@@ -188,9 +221,9 @@ export function FinalDecisionView({
       <Card>
         <CardHeader
           title="Final cohort decisions"
-          subtitle="Lock each company's status, intervention pack (per-pillar fund), and Account Manager."
+          subtitle={`${filtered.length}/${companies.length} companies — lock status, per-pillar fund, AM. Click a row for the full dossier.`}
           action={
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
                 <input
@@ -201,6 +234,16 @@ export function FinalDecisionView({
                   className="w-56 rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
                 />
               </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() =>
+                  setExpanded(prev => (prev.size === filtered.length ? new Set() : new Set(filtered.map(c => c.company_id))))
+                }
+                title="Expand or collapse all visible rows"
+              >
+                {expanded.size === filtered.length && filtered.length > 0 ? 'Collapse all' : 'Expand all'}
+              </Button>
               {onImportExternal && (
                 <Button
                   variant="ghost"
@@ -218,13 +261,78 @@ export function FinalDecisionView({
             </div>
           }
         />
+        {/* Filter bar */}
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-[11px] dark:border-navy-700 dark:bg-navy-800/50">
+          <span className="font-bold uppercase tracking-wider text-slate-500">Filter:</span>
+          <select
+            value={statusFilter}
+            onChange={e => setStatusFilter(e.target.value as typeof statusFilter)}
+            className="rounded border border-slate-200 bg-white px-2 py-0.5 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+          >
+            <option value="all">Status: any</option>
+            <option value="Selected">Selected</option>
+            <option value="Hold">Hold</option>
+            <option value="Rejected">Rejected</option>
+            <option value="unset">Unset</option>
+          </select>
+          <select
+            value={amFilter}
+            onChange={e => setAmFilter(e.target.value)}
+            className="rounded border border-slate-200 bg-white px-2 py-0.5 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+          >
+            <option value="all">AM: any</option>
+            <option value="unassigned">Unassigned</option>
+            {ACCOUNT_MANAGERS.map(am => (
+              <option key={am.email} value={am.email}>{am.name}</option>
+            ))}
+          </select>
+          <select
+            value={pillarFilter}
+            onChange={e => setPillarFilter(e.target.value)}
+            className="rounded border border-slate-200 bg-white px-2 py-0.5 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+          >
+            <option value="all">Pillar: any</option>
+            {PILLARS.map(p => (
+              <option key={p.code} value={p.code}>{p.label}</option>
+            ))}
+          </select>
+          <select
+            value={decidedOnly}
+            onChange={e => setDecidedOnly(e.target.value as typeof decidedOnly)}
+            className="rounded border border-slate-200 bg-white px-2 py-0.5 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+          >
+            <option value="all">All</option>
+            <option value="locked">Locked only</option>
+            <option value="unlocked">Unlocked only</option>
+          </select>
+          <label className="flex cursor-pointer items-center gap-1">
+            <input
+              type="checkbox"
+              checked={divergentOnly}
+              onChange={e => setDivergentOnly(e.currentTarget.checked)}
+            />
+            Divergent reviews only
+          </label>
+          {(statusFilter !== 'all' || amFilter !== 'all' || pillarFilter !== 'all' || decidedOnly !== 'all' || divergentOnly || search) && (
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter('all'); setAmFilter('all'); setPillarFilter('all');
+                setDecidedOnly('all'); setDivergentOnly(false); setSearch('');
+              }}
+              className="ml-auto rounded bg-white px-2 py-0.5 font-bold text-brand-teal hover:underline dark:bg-navy-900"
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
         <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-navy-700">
-          <div className="grid grid-cols-[24px_1fr_140px_110px_100px_90px] border-b border-slate-200 bg-slate-50 px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-600 dark:border-navy-700 dark:bg-navy-800 dark:text-slate-300">
+          <div className="grid grid-cols-[24px_1fr_140px_110px_120px_90px] border-b border-slate-200 bg-slate-50 px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-600 dark:border-navy-700 dark:bg-navy-800 dark:text-slate-300">
             <span />
             <span>Company</span>
             <span>Team consensus</span>
             <span>Status (master)</span>
-            <span>Interventions</span>
+            <span>Locks · Cmts · Recs</span>
             <span className="text-right">Reviewers</span>
           </div>
           <ul>
@@ -240,7 +348,7 @@ export function FinalDecisionView({
                   <button
                     type="button"
                     onClick={() => toggle(c.company_id)}
-                    className="grid w-full grid-cols-[24px_1fr_140px_110px_100px_90px] items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-slate-50 dark:hover:bg-navy-800"
+                    className="grid w-full grid-cols-[24px_1fr_140px_110px_120px_90px] items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-slate-50 dark:hover:bg-navy-800"
                   >
                     <span className="text-slate-400">
                       {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
@@ -535,14 +643,82 @@ function FinalDecisionRow({
     }
   };
 
+  // Agreement strip — quick visual: which pillars team proposed vs which
+  // selection-tool / pre-decision recs picked, and where they diverge.
+  const teamProposedSet = new Set(proposedPillars.keys());
+  const selectionRecSet = new Set<string>();
+  for (const r of preDecs) {
+    const code = pillarFor(r.pillar)?.code || r.pillar;
+    if (code) selectionRecSet.add(code);
+  }
+  // Also surface Interview Assessment's assessedInterventions if present.
+  const interviewRecRaw = company.selection?.interviewAssessment?.['assessedInterventions'] || '';
+  for (const piece of interviewRecRaw.split(/[,;|]/).map(s => s.trim()).filter(Boolean)) {
+    const code = pillarFor(piece)?.code;
+    if (code) selectionRecSet.add(code);
+  }
+  const agreementUnion = new Set([...teamProposedSet, ...selectionRecSet]);
+  const agreementBoth = new Set([...teamProposedSet].filter(p => selectionRecSet.has(p)));
+  const teamOnly = new Set([...teamProposedSet].filter(p => !selectionRecSet.has(p)));
+  const selectionOnly = new Set([...selectionRecSet].filter(p => !teamProposedSet.has(p)));
+
   return (
     <div className="border-t border-slate-100 bg-slate-50/50 px-4 py-3 dark:border-navy-800 dark:bg-navy-800/30">
+      {/* Agreement strip — quick visual of team vs selection-tool agreement */}
+      {agreementUnion.size > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[11px] dark:border-navy-700 dark:bg-navy-900">
+          <span className="font-bold uppercase tracking-wider text-slate-500">Agreement:</span>
+          {agreementBoth.size > 0 && (
+            <span className="inline-flex items-center gap-1">
+              <span className="font-bold text-emerald-700 dark:text-emerald-300">Both:</span>
+              {[...agreementBoth].map(p => (
+                <span key={p} className="rounded bg-emerald-100 px-1.5 py-0.5 font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">{p}</span>
+              ))}
+            </span>
+          )}
+          {teamOnly.size > 0 && (
+            <span className="inline-flex items-center gap-1">
+              <span className="font-bold text-blue-700 dark:text-blue-300">Team only:</span>
+              {[...teamOnly].map(p => (
+                <span key={p} className="rounded bg-blue-100 px-1.5 py-0.5 font-bold text-blue-800 dark:bg-blue-950 dark:text-blue-200">{p}</span>
+              ))}
+            </span>
+          )}
+          {selectionOnly.size > 0 && (
+            <span className="inline-flex items-center gap-1">
+              <span className="font-bold text-purple-700 dark:text-purple-300">Selection only:</span>
+              {[...selectionOnly].map(p => (
+                <span key={p} className="rounded bg-purple-100 px-1.5 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200">{p}</span>
+              ))}
+            </span>
+          )}
+          {teamOnly.size === 0 && selectionOnly.size === 0 && agreementBoth.size > 0 && (
+            <span className="ml-auto text-[10px] font-bold text-emerald-700">Full agreement</span>
+          )}
+          {(teamOnly.size > 0 || selectionOnly.size > 0) && (
+            <span className="ml-auto text-[10px] font-bold text-amber-700">Divergence — review dossier</span>
+          )}
+        </div>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-12">
-        {/* Left: status + AM */}
-        <div className="space-y-3 lg:col-span-3">
-          <div>
+        {/* LEFT col-span-7: full dossier — applicant snapshot, selection-tool data, comments, recs, activity */}
+        <div className="space-y-3 lg:col-span-7">
+          <DossierColumn
+            company={company}
+            comments={comments}
+            preDecs={preDecs}
+            activity={activity}
+            reviews={reviews}
+          />
+        </div>
+
+        {/* RIGHT col-span-5 (sticky): status + AM + per-pillar matrix + Lock */}
+        <div className="lg:col-span-5">
+          <div className="space-y-3 lg:sticky lg:top-3">
+          <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
             <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Final status</h4>
-            <div className="grid grid-cols-2 gap-1">
+            <div className="grid grid-cols-3 gap-1">
               {FINAL_STATUSES.map(s => (
                 <button
                   key={s}
@@ -559,27 +735,32 @@ function FinalDecisionRow({
                 </button>
               ))}
             </div>
-          </div>
-          <div>
-            <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Account Manager</h4>
-            <div className="space-y-1">
+            <h4 className="mb-1.5 mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">Account Manager</h4>
+            <div className="grid grid-cols-3 gap-1">
               {ACCOUNT_MANAGERS.map(am => (
-                <label key={am.email} className="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs hover:border-brand-teal dark:border-navy-700 dark:bg-navy-900">
+                <label
+                  key={am.email}
+                  className={`flex cursor-pointer items-center justify-center rounded-md border-2 px-2 py-1.5 text-[11px] font-bold ${
+                    pmEmail === am.email
+                      ? 'border-brand-teal bg-teal-50 text-brand-teal dark:bg-teal-950'
+                      : 'border-slate-200 bg-white text-slate-700 hover:border-brand-teal dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200'
+                  }`}
+                >
                   <input
                     type="radio"
                     name={`am-${company.company_id}`}
                     checked={pmEmail === am.email}
                     onChange={() => setPmEmail(am.email)}
+                    className="sr-only"
                   />
-                  <span className="font-semibold text-navy-500 dark:text-slate-100">{am.name}</span>
+                  {am.name.split(' ')[0]}
                 </label>
               ))}
             </div>
           </div>
-        </div>
 
-        {/* Center: per-pillar matrix */}
-        <div className="lg:col-span-7">
+          {/* Per-pillar matrix */}
+          <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
           <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Per-pillar decisions</h4>
           <div className="overflow-hidden rounded-md border border-slate-200 dark:border-navy-700">
             <div className="grid grid-cols-[1.8fr_50px_50px_50px_120px] border-b border-slate-200 bg-slate-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-500 dark:border-navy-700 dark:bg-navy-800 dark:text-slate-400">
@@ -676,96 +857,250 @@ function FinalDecisionRow({
           </div>
         </div>
 
-        {/* Right: lock button */}
-        <div className="lg:col-span-2">
-          <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Lock</h4>
-          <Button onClick={handleLock} disabled={locking || !pmEmail} className="w-full">
-            <Lock className="h-3.5 w-3.5" /> {locking ? 'Locking…' : 'Lock decision'}
-          </Button>
-          {lastLockedAt && (
-            <p className="mt-1.5 inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-              <CheckCircle2 className="h-3 w-3" /> Synced at {new Date(lastLockedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          {/* Lock card — sticky bottom of the right column */}
+          <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+            <Button onClick={handleLock} disabled={locking || !pmEmail} className="w-full">
+              <Lock className="h-3.5 w-3.5" /> {locking ? 'Locking…' : 'Lock decision'}
+            </Button>
+            {lastLockedAt && (
+              <p className="mt-1.5 inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                <CheckCircle2 className="h-3 w-3" /> Synced at {new Date(lastLockedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </p>
+            )}
+            {(existingAssigns.length > 0 || preDecs.length > 0 || proposedPillars.size > 0) && (
+              <div className="mt-2 space-y-0.5 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-[10px] text-slate-500 dark:border-navy-700 dark:bg-navy-800/50">
+                <div className="font-bold uppercase tracking-wider text-slate-400">Pre-filled from</div>
+                {existingAssigns.length > 0 && <div>· {existingAssigns.length} locked assignment(s)</div>}
+                {preDecs.length > 0 && <div>· {preDecs.length} pre-decision rec(s) [{Array.from(new Set(preDecs.map(p => p.author_email.split('@')[0]))).join(', ')}]</div>}
+                {proposedPillars.size > 0 && <div>· {proposedPillars.size} team-proposed pillar(s)</div>}
+              </div>
+            )}
+            <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+              Writes Companies Master (status + AM) + Intervention Assignments (one row per pillar). Idempotent.
             </p>
-          )}
-          <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-            Writes to <span className="font-bold">Companies Master</span> (status + AM) and
-            <span className="font-bold"> Intervention Assignments</span> (one row per included pillar with its per-pillar fund_code).
-            Idempotent — re-locking won't duplicate existing pairs.
-          </p>
-          {(existingAssigns.length > 0 || preDecs.length > 0 || proposedPillars.size > 0) && (
-            <div className="mt-2 space-y-0.5 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[10px] text-slate-500 dark:border-navy-700 dark:bg-navy-900">
-              <div className="font-bold uppercase tracking-wider text-slate-400">Pre-filled from</div>
-              {existingAssigns.length > 0 && <div>· {existingAssigns.length} locked assignment(s)</div>}
-              {preDecs.length > 0 && <div>· {preDecs.length} pre-decision rec(s) [{Array.from(new Set(preDecs.map(p => p.author_email.split('@')[0]))).join(', ')}]</div>}
-              {proposedPillars.size > 0 && <div>· {proposedPillars.size} team-proposed pillar(s)</div>}
-            </div>
-          )}
+          </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── DossierColumn — full per-company context, left side of drilldown ──
+
+function DossierColumn({
+  company,
+  comments,
+  preDecs,
+  activity,
+  reviews,
+}: {
+  company: ReviewableCompany;
+  comments: CompanyComment[];
+  preDecs: PreDecisionRecommendation[];
+  activity: ActivityRow[];
+  reviews: Review[];
+}) {
+  const sel = company.selection;
+  const scoreClass = pickFirst(sel?.scoring, ['class', 'tier', 'grade', 'score class']);
+  const totalScore = pickFirst(sel?.scoring, ['total_score', 'total score', 'score', 'weighted']);
+  const rank = pickFirst(sel?.scoring, ['rank', 'position']);
+  const interviewRating = pickFirst(sel?.interviewAssessment, ['rating', 'score', 'grade', 'recommend']);
+  const sortedComments = useMemo(
+    () => comments.slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || '')),
+    [comments],
+  );
+
+  return (
+    <>
+      {/* Snapshot */}
+      <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+        <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Snapshot</h4>
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <SnapTile label="Score class" value={scoreClass || '—'} hint={[totalScore && `Total ${totalScore}`, rank && `Rank ${rank}`].filter(Boolean).join(' · ') || undefined} />
+          <SnapTile label="Interview" value={interviewRating || '—'} />
+          <SnapTile label="Sector" value={company.sector || '—'} hint={[company.city, company.governorate].filter(Boolean).join(', ')} />
+          <SnapTile label="Employees" value={company.employee_count || '—'} hint={company.fund_code ? `Fund ${company.fund_code}` : undefined} />
         </div>
       </div>
 
-      {/* Dossier: per-company comments thread + pre-decision recs +
-          activity timeline. Shown inline so the team sees the full
-          context for the decision without leaving the row. */}
-      {(comments.length > 0 || preDecs.length > 0 || activity.some(a => a.company_id === company.company_id)) && (
-        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      {/* Selection-tool sections — collapsed by default per section so the dossier stays scannable */}
+      {sel?.docReview && (
+        <DossierBlock title="Doc review" row={sel.docReview} />
+      )}
+      {(sel?.firstFiltration || sel?.additionalFiltration) && (
+        <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+          <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Filtration</h4>
+          {sel.firstFiltration && <DossierKV row={sel.firstFiltration} />}
+          {sel.additionalFiltration && (
+            <div className="mt-2 border-t border-slate-100 pt-2 dark:border-navy-800">
+              <div className="mb-1 text-[10px] font-bold text-slate-500">Additional factors</div>
+              <DossierKV row={sel.additionalFiltration} />
+            </div>
+          )}
+        </div>
+      )}
+      {sel?.interviewAssessment && (
+        <DossierBlock title="Interview assessment" row={sel.interviewAssessment} />
+      )}
+      {(sel?.interviewDiscussionAll && sel.interviewDiscussionAll.length > 0) && (
+        <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+          <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Interview discussion ({sel.interviewDiscussionAll.length})
+          </h4>
           <div className="space-y-2">
-            <h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              Pre-decision recommendations ({preDecs.length})
-            </h4>
-            {preDecs.length === 0 ? (
-              <p className="text-xs italic text-slate-400">No external recommendations yet.</p>
-            ) : (
-              <ul className="space-y-1">
-                {preDecs.map(r => (
-                  <li key={r.recommendation_id} className="rounded border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-navy-500 dark:text-slate-100">
-                        {r.pillar}{r.sub_intervention ? ` · ${r.sub_intervention}` : ''}
-                      </span>
-                      <span className="text-[10px] text-slate-500">{displayName(r.author_email)}</span>
-                    </div>
-                    {r.fund_hint && (
-                      <div className="text-[10px] text-slate-500">Fund hint: {r.fund_hint}</div>
-                    )}
-                    {r.note && (
-                      <div className="mt-1 whitespace-pre-wrap text-[11px] text-slate-700 dark:text-slate-300">{r.note}</div>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            <h4 className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-              Comments ({comments.length})
-            </h4>
-            {comments.length === 0 ? (
-              <p className="text-xs italic text-slate-400">No comments yet.</p>
-            ) : (
-              <ul className="space-y-1">
-                {comments
-                  .slice()
-                  .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
-                  .map(c => (
-                    <li key={c.comment_id} className="rounded border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-bold text-navy-500 dark:text-slate-100">{displayName(c.author_email)}</span>
-                        <span className="text-[10px] text-slate-500">{c.created_at}</span>
-                      </div>
-                      <div className="mt-1 whitespace-pre-wrap text-[11px] text-slate-700 dark:text-slate-300">{c.body}</div>
-                    </li>
-                  ))}
-              </ul>
-            )}
-          </div>
-
-          <div>
-            <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Activity timeline</h4>
-            <ActivityTimeline rows={activity} companyId={company.company_id} limit={20} emptyText="No activity recorded yet for this company." />
+            {sel.interviewDiscussionAll.map((row, i) => (
+              <div key={i} className="rounded border border-slate-100 p-2 dark:border-navy-800">
+                <DossierKV row={row} />
+              </div>
+            ))}
           </div>
         </div>
       )}
+      {(sel?.selectionVotesAll && sel.selectionVotesAll.length > 0) && (
+        <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+          <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Selection votes ({sel.selectionVotesAll.length} voters)
+          </h4>
+          <div className="space-y-2">
+            {sel.selectionVotesAll.map((row, i) => (
+              <div key={i} className="rounded border border-slate-100 p-2 dark:border-navy-800">
+                <DossierKV row={row} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Team reviews — what the team wrote during step-through */}
+      {reviews.length > 0 && (
+        <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+          <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Team reviews ({reviews.length})
+          </h4>
+          <ul className="space-y-1.5">
+            {reviews.slice().sort((a, b) => (a.updated_at || '').localeCompare(b.updated_at || '')).map(r => (
+              <li key={r.review_id} className="rounded border border-slate-100 p-2 text-xs dark:border-navy-800">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-navy-500 dark:text-slate-100">{displayName(r.reviewer_email)}</span>
+                  {r.decision && <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${r.decision === 'Recommend' ? 'bg-emerald-100 text-emerald-800' : r.decision === 'Hold' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'}`}>{r.decision}</span>}
+                </div>
+                {r.proposed_pillars && (
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {r.proposed_pillars.split(',').map(s => s.trim()).filter(Boolean).map(p => (
+                      <span key={p} className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold dark:bg-navy-800">{p}</span>
+                    ))}
+                  </div>
+                )}
+                {r.notes && <div className="mt-1 whitespace-pre-wrap text-[11px] text-slate-700 dark:text-slate-300">{r.notes}</div>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Pre-decision recommendations (Israa CSV / Raouf docx) */}
+      {preDecs.length > 0 && (
+        <div className="rounded-md border border-purple-200 bg-purple-50 p-3 dark:border-purple-900 dark:bg-purple-950/30">
+          <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-purple-800 dark:text-purple-200">
+            Pre-decision recs ({preDecs.length}) · {Array.from(new Set(preDecs.map(p => displayName(p.author_email)))).join(', ')}
+          </h4>
+          <ul className="space-y-1">
+            {preDecs.map(r => (
+              <li key={r.recommendation_id} className="rounded border border-purple-100 bg-white p-2 text-xs dark:border-purple-900 dark:bg-navy-900">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-purple-800 dark:text-purple-200">
+                    {r.pillar}{r.sub_intervention ? ` · ${r.sub_intervention}` : ''}
+                    {r.fund_hint && <span className="ml-1 text-[10px] font-normal text-purple-600">[{r.fund_hint}]</span>}
+                  </span>
+                  <span className="text-[10px] text-purple-500">{displayName(r.author_email)}</span>
+                </div>
+                {r.note && <div className="mt-1 whitespace-pre-wrap text-[11px] text-slate-700 dark:text-slate-300">{r.note}</div>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Comments thread */}
+      {sortedComments.length > 0 && (
+        <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+          <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Comments ({sortedComments.length})</h4>
+          <ul className="space-y-1">
+            {sortedComments.map(c => (
+              <li key={c.comment_id} className="rounded border border-slate-100 p-2 text-xs dark:border-navy-800">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-navy-500 dark:text-slate-100">{displayName(c.author_email)}</span>
+                  <span className="text-[10px] text-slate-500">{c.created_at}</span>
+                </div>
+                <div className="mt-1 whitespace-pre-wrap text-[11px] text-slate-700 dark:text-slate-300">{c.body}</div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Activity timeline */}
+      {activity.some(a => a.company_id === company.company_id) && (
+        <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+          <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Activity</h4>
+          <ActivityTimeline rows={activity} companyId={company.company_id} limit={15} />
+        </div>
+      )}
+    </>
+  );
+}
+
+function SnapTile({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-md border border-slate-100 bg-slate-50 px-2 py-1.5 dark:border-navy-800 dark:bg-navy-800/50">
+      <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500">{label}</div>
+      <div className="text-sm font-bold text-navy-500 dark:text-slate-100">{value}</div>
+      {hint && <div className="text-[10px] text-slate-500">{hint}</div>}
     </div>
   );
+}
+
+function DossierBlock({ title, row }: { title: string; row: Record<string, string> }) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
+      <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">{title}</h4>
+      <DossierKV row={row} />
+    </div>
+  );
+}
+
+function DossierKV({ row }: { row: Record<string, string> }) {
+  const entries = meaningfulEntries(row).slice(0, 12);
+  if (entries.length === 0) return <p className="text-[11px] italic text-slate-400">No data.</p>;
+  return (
+    <dl className="grid grid-cols-1 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-2">
+      {entries.map(([k, v]) => (
+        <div key={k} className="flex flex-col">
+          <dt className="text-[9px] font-bold uppercase tracking-wider text-slate-500">{k.replace(/_/g, ' ')}</dt>
+          <dd className="whitespace-pre-wrap text-slate-700 dark:text-slate-300">{v}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function pickFirst(row: Record<string, string> | null | undefined, keys: string[]): string {
+  if (!row) return '';
+  for (const k of keys) {
+    const lower = k.toLowerCase();
+    for (const [rk, rv] of Object.entries(row)) {
+      if (rk.toLowerCase() === lower && rv) return rv;
+    }
+  }
+  // try contains
+  for (const k of keys) {
+    const lower = k.toLowerCase();
+    for (const [rk, rv] of Object.entries(row)) {
+      if (rk.toLowerCase().includes(lower) && rv) return rv;
+    }
+  }
+  return '';
 }
 
 // ─── helpers ────────────────────────────────────────────────────────
