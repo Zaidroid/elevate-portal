@@ -246,6 +246,67 @@ export function CompaniesPage() {
     { userEmail: user?.email }
   );
 
+  // One-time migration: pull any aliases the user previously saved in
+  // localStorage (from before the shared-sheet refactor) and write them
+  // to the Interview Aliases tab, then clear the localStorage entry so
+  // we never run again. Only fires once the sheet has loaded so we know
+  // which entries already exist there. Idempotent — entries already on
+  // the sheet are skipped.
+  const ALIAS_LEGACY_KEY = 'companies.interviewedAliases.v1';
+  const [aliasMigrationRun, setAliasMigrationRun] = useState(false);
+  useEffect(() => {
+    if (aliasMigrationRun) return;
+    if (!schemaReady) return;
+    if (aliasesDoc.loading) return;       // wait for first poll
+    let raw: string | null = null;
+    try { raw = localStorage.getItem(ALIAS_LEGACY_KEY); } catch { /* private mode */ }
+    if (!raw) { setAliasMigrationRun(true); return; }
+    let parsed: Record<string, string> = {};
+    try { parsed = JSON.parse(raw); } catch { setAliasMigrationRun(true); return; }
+    const entries = Object.entries(parsed).filter(([k, v]) => k && v);
+    if (entries.length === 0) {
+      try { localStorage.removeItem(ALIAS_LEGACY_KEY); } catch { /* */ }
+      setAliasMigrationRun(true);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const now = new Date().toISOString();
+      let written = 0;
+      let skipped = 0;
+      for (const [scheduleName, target] of entries) {
+        const id = aliasIdFor(scheduleName);
+        const exists = aliasesDoc.rows.some(r => r.alias_id === id);
+        if (exists) { skipped += 1; continue; }
+        try {
+          await aliasesDoc.createRow({
+            alias_id: id,
+            schedule_name: scheduleName,
+            applicant_company_name: target,
+            created_by: user?.email || '',
+            created_at: now,
+            updated_at: now,
+            updated_by: user?.email || '',
+          });
+          written += 1;
+        } catch (err) {
+          console.warn('[alias-migration] failed for', scheduleName, err);
+        }
+        if (cancelled) return;
+      }
+      if (!cancelled) {
+        try { localStorage.removeItem(ALIAS_LEGACY_KEY); } catch { /* */ }
+        if (written > 0) {
+          toast.success(`Migrated ${written} alias${written === 1 ? '' : 'es'} from your browser to the shared sheet`,
+            skipped > 0 ? `${skipped} were already on the sheet.` : undefined);
+        }
+        setAliasMigrationRun(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schemaReady, aliasesDoc.loading]);
+
   // Static, hand-maintained list of Cohort 3 interviewed companies (see
   // interviewedSource.ts for the why). Used to overlay the "Interviewed"
   // status onto the master sheet without ever demoting a higher status.
