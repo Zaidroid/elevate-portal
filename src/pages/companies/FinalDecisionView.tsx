@@ -13,7 +13,7 @@
 //     fund_code so a company can carry both 97060 and 91763 across
 //     different pillars).
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, ChevronDown, ChevronRight, Lock, Search } from 'lucide-react';
 import { Badge, Button, Card, CardHeader, EmptyState, useToast } from '../../lib/ui';
 import type { Tone } from '../../lib/ui';
@@ -250,6 +250,7 @@ export function FinalDecisionView({
 function FinalDecisionRow({
   company,
   reviews,
+  reviewerEmail,
   existingAssigns,
   onLock,
 }: {
@@ -261,44 +262,75 @@ function FinalDecisionRow({
 }) {
   const toast = useToast();
 
-  // Aggregate proposed pillars + subs from all reviewers + the
-  // applicant's own asked-for set so the form can pre-check
-  // intelligently.
+  // Aggregate every reviewer's pillar + sub picks regardless of their
+  // decision verdict (Recommend / Hold / Reject). A reviewer who voted
+  // Hold but still listed pillars they think the company needs counts
+  // here — the lock decision is about WHICH interventions to assign,
+  // separately from whether to include the company at all.
+  // Each map value carries the count + a list of contributing reviewer
+  // emails so the UI can show 'Mohammad, Doaa' on hover.
   const proposedPillars = useMemo(() => {
-    const c = new Map<string, number>();
+    const c = new Map<string, { count: number; reviewers: string[] }>();
     for (const r of reviews) {
-      if (r.decision !== 'Recommend') continue;
       for (const p of (r.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean)) {
-        c.set(p, (c.get(p) || 0) + 1);
+        const e = c.get(p) || { count: 0, reviewers: [] };
+        e.count += 1;
+        if (r.reviewer_email && !e.reviewers.includes(r.reviewer_email)) e.reviewers.push(r.reviewer_email);
+        c.set(p, e);
       }
     }
     return c;
   }, [reviews]);
 
   const proposedSubs = useMemo(() => {
-    const c = new Map<string, number>();
+    const c = new Map<string, { count: number; reviewers: string[] }>();
     for (const r of reviews) {
-      if (r.decision !== 'Recommend') continue;
       for (const s of (r.proposed_sub_interventions || '').split(',').map(t => t.trim()).filter(Boolean)) {
-        c.set(s, (c.get(s) || 0) + 1);
+        const e = c.get(s) || { count: 0, reviewers: [] };
+        e.count += 1;
+        if (r.reviewer_email && !e.reviewers.includes(r.reviewer_email)) e.reviewers.push(r.reviewer_email);
+        c.set(s, e);
       }
     }
     return c;
   }, [reviews]);
 
-  // Initial picks: a pillar starts checked if it's locked already
-  // (an existing assignment), otherwise if any reviewer recommended it.
+  // My own picks (if I reviewed this company) take priority over the
+  // team aggregate — the admin closing out the cohort might want their
+  // own picks pre-loaded.
+  const myReview = useMemo(() => {
+    const lower = (reviewerEmail || '').toLowerCase();
+    return reviews.find(r => r.reviewer_email?.toLowerCase() === lower) || null;
+  }, [reviews, reviewerEmail]);
+
+  // Pre-fill order:
+  //   1. Existing locked Intervention Assignments  (don't undo prior locks)
+  //   2. My own review picks                       (preserve admin intent)
+  //   3. Union of every reviewer's picks           (team consensus)
+  //   4. The applicant's wantsXXX flags            (last-resort fallback)
   const initialPillars = useMemo(() => {
     const set = new Set<string>();
+    // 1) existing assignments
     for (const a of existingAssigns) {
       const p = pillarFor(a.intervention_type)?.code || a.intervention_type;
       if (p) set.add(p);
     }
+    // 2) my own picks
+    if (myReview) {
+      for (const p of (myReview.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean)) set.add(p);
+    }
+    // 3) team union when nothing else surfaced
     if (set.size === 0) {
       for (const [p] of proposedPillars) set.add(p);
     }
+    // 4) applicant's asked-for set as the last fallback (still empty)
+    if (set.size === 0) {
+      for (const [code, key] of Object.entries(WANTED_KEY)) {
+        if (asBool(company.applicantRaw?.[key])) set.add(code);
+      }
+    }
     return set;
-  }, [existingAssigns, proposedPillars]);
+  }, [existingAssigns, myReview, proposedPillars, company.applicantRaw]);
 
   const initialSubs = useMemo(() => {
     const set = new Set<string>();
@@ -306,11 +338,14 @@ function FinalDecisionRow({
       const s = (a.sub_intervention || '').trim();
       if (s) set.add(s);
     }
+    if (myReview) {
+      for (const s of (myReview.proposed_sub_interventions || '').split(',').map(t => t.trim()).filter(Boolean)) set.add(s);
+    }
     if (set.size === 0) {
       for (const [s] of proposedSubs) set.add(s);
     }
     return set;
-  }, [existingAssigns, proposedSubs]);
+  }, [existingAssigns, myReview, proposedSubs]);
 
   const initialFunds: Record<string, string> = useMemo(() => {
     const m: Record<string, string> = {};
@@ -335,13 +370,28 @@ function FinalDecisionRow({
   }));
   const [pmEmail, setPmEmail] = useState<string>(company.profile_manager_email || '');
   const [locking, setLocking] = useState(false);
+  const [lastLockedAt, setLastLockedAt] = useState<string | null>(null);
+
+  // Reset picks when the team's reviews change AND the admin hasn't
+  // started editing yet. Once the admin makes a single change
+  // (touched), we stop overriding their state.
+  const touchedRef = useRef(false);
+  const lastReviewSig = useRef('');
+  useEffect(() => {
+    const sig = reviews.map(r => `${r.reviewer_email}:${r.proposed_pillars}:${r.proposed_sub_interventions}`).join('|');
+    if (sig === lastReviewSig.current) return;
+    lastReviewSig.current = sig;
+    if (touchedRef.current) return;
+    setPillars(new Set(initialPillars));
+    setSubs(new Set(initialSubs));
+  }, [reviews, initialPillars, initialSubs]);
 
   const togglePillar = (code: string) => {
+    touchedRef.current = true;
     setPillars(prev => {
       const next = new Set(prev);
       if (next.has(code)) {
         next.delete(code);
-        // Drop subs tied to this pillar.
         const dead = new Set(PILLARS.find(p => p.code === code)?.subInterventions || []);
         if (dead.size > 0) {
           setSubs(prevS => {
@@ -357,6 +407,7 @@ function FinalDecisionRow({
     });
   };
   const toggleSub = (code: string) => {
+    touchedRef.current = true;
     setSubs(prev => {
       const next = new Set(prev);
       if (next.has(code)) next.delete(code); else next.add(code);
@@ -392,7 +443,10 @@ function FinalDecisionRow({
         pmEmail,
         interventions,
       });
-      toast.success('Locked', `${company.company_name} → ${status}, ${interventions.length} intervention${interventions.length === 1 ? '' : 's'}, AM ${displayName(pmEmail)}.`);
+      setLastLockedAt(new Date().toISOString());
+      touchedRef.current = false; // re-enable auto-pickup of further team review changes
+      toast.success('Locked & synced',
+        `${company.company_name} → ${status} · ${interventions.length} intervention${interventions.length === 1 ? '' : 's'} · AM ${displayName(pmEmail)}. Master + Intervention Assignments sheets updated.`);
     } catch (e) {
       toast.error('Lock failed', (e as Error).message);
     } finally {
@@ -457,8 +511,9 @@ function FinalDecisionRow({
             <ul>
               {PILLARS.map(p => {
                 const on = pillars.has(p.code);
-                const recCount = proposedPillars.get(p.code) || 0;
-                const totalRecs = Array.from(proposedPillars.values()).reduce((s, n) => Math.max(s, n), 1);
+                const rec = proposedPillars.get(p.code);
+                const recCount = rec?.count || 0;
+                const totalRecs = Math.max(1, ...Array.from(proposedPillars.values()).map(v => v.count));
                 const fund = fundsByPillar[p.code] || '';
                 return (
                   <li key={p.code} className="border-b border-slate-100 dark:border-navy-800 last:border-b-0">
@@ -473,7 +528,10 @@ function FinalDecisionRow({
                       </span>
                       <span className="text-center">
                         {recCount > 0 ? (
-                          <span className="inline-flex items-center gap-0.5 text-purple-700 dark:text-purple-300" title={`${recCount} of ${totalRecs} reviewers recommended`}>
+                          <span
+                            className="inline-flex items-center gap-0.5 text-purple-700 dark:text-purple-300"
+                            title={`${recCount} of ${totalRecs} reviewer${recCount === 1 ? '' : 's'}: ${(rec?.reviewers || []).map(displayName).join(', ')}`}
+                          >
                             <CheckCircle2 className="h-3.5 w-3.5" />
                             <span className="text-[9px] font-bold">{recCount}</span>
                           </span>
@@ -508,7 +566,8 @@ function FinalDecisionRow({
                         <div className="flex flex-wrap gap-1">
                           {p.subInterventions.map(s => {
                             const subOn = subs.has(s);
-                            const subRecCount = proposedSubs.get(s) || 0;
+                            const subRec = proposedSubs.get(s);
+                            const subRecCount = subRec?.count || 0;
                             return (
                               <button
                                 key={s}
@@ -519,7 +578,7 @@ function FinalDecisionRow({
                                     ? 'border-brand-teal bg-brand-teal text-white'
                                     : 'border-slate-300 bg-white text-slate-700 hover:border-brand-teal hover:text-brand-teal dark:border-navy-700 dark:bg-navy-900 dark:text-slate-300'
                                 }`}
-                                title={subRecCount > 0 ? `${subRecCount} reviewer${subRecCount === 1 ? '' : 's'} recommended this` : undefined}
+                                title={subRecCount > 0 ? `${subRecCount} reviewer${subRecCount === 1 ? '' : 's'}: ${(subRec?.reviewers || []).map(displayName).join(', ')}` : undefined}
                               >
                                 {s.replace(/^MA-/, '')}
                                 {subRecCount > 0 && <span className="ml-1 opacity-70">·{subRecCount}</span>}
@@ -542,9 +601,15 @@ function FinalDecisionRow({
           <Button onClick={handleLock} disabled={locking || !pmEmail} className="w-full">
             <Lock className="h-3.5 w-3.5" /> {locking ? 'Locking…' : 'Lock decision'}
           </Button>
-          <p className="mt-2 text-[10px] text-slate-500">
-            Sets master.status, master.profile_manager_email, and writes one Intervention Assignment row per included pillar
-            with the per-pillar fund_code. Idempotent — re-locking won't duplicate existing (pillar, sub) pairs.
+          {lastLockedAt && (
+            <p className="mt-1.5 inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+              <CheckCircle2 className="h-3 w-3" /> Synced at {new Date(lastLockedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </p>
+          )}
+          <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+            Writes to <span className="font-bold">Companies Master</span> (status + AM) and
+            <span className="font-bold"> Intervention Assignments</span> (one row per included pillar with its per-pillar fund_code).
+            Idempotent — re-locking won't duplicate existing pairs.
           </p>
         </div>
       </div>
