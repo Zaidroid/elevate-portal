@@ -29,23 +29,28 @@ export type RepairResult = {
 // the Dashboard tab. We use plain text + formulas so the rebuild is
 // portable across Sheets / Excel and survives if the team renames the
 // brand colors.
-// Every dashboard row is exactly 3 columns: [label, value, bar]. Consistent
-// width avoids the legacy multi-column merging that the older Python
-// builder left behind from clashing with our content.
-function buildDashboardRows(): (string | number | boolean)[][] {
-  const rows: (string | number | boolean)[][] = [];
+// Internal row shape — keeps a tag so we know later which rows to bold,
+// which to color as a value, etc. when we apply formatting via
+// batchUpdate.
+type DashboardRow = {
+  tag: 'title' | 'subtitle' | 'section' | 'metric' | 'blank';
+  cells: (string | number | boolean)[];
+};
 
-  const section = (label: string) => {
-    rows.push([label, '', '']);
-  };
-  const metric = (label: string, valueFormula: string, barFormula: string = '') => {
-    rows.push([label, valueFormula, barFormula]);
-  };
-  const blank = () => rows.push(['', '', '']);
+// Every dashboard row is exactly 3 columns: [label, value, bar]. The
+// content gets padded to 26 columns at write time so any legacy
+// multi-column content from the original Python builder gets cleared.
+function buildDashboardRows(): DashboardRow[] {
+  const rows: DashboardRow[] = [];
+
+  const section = (label: string) => rows.push({ tag: 'section', cells: [label, '', ''] });
+  const metric = (label: string, valueFormula: string, barFormula: string = '') =>
+    rows.push({ tag: 'metric', cells: [label, valueFormula, barFormula] });
+  const blank = () => rows.push({ tag: 'blank', cells: ['', '', ''] });
 
   // Title.
-  rows.push(['Companies Master Dashboard', '', '']);
-  rows.push(['Live mirror of the Companies module in the Elevate Portal.', '', '']);
+  rows.push({ tag: 'title', cells: ['Companies Master Dashboard', '', ''] });
+  rows.push({ tag: 'subtitle', cells: ['Live mirror of the Companies module in the Elevate Portal.', '', ''] });
   blank();
 
   // Top metrics — vertical, one per row.
@@ -123,14 +128,22 @@ function colLetter(n: number): string {
   return s;
 }
 
+// Brand palette used for cell styling. Mirrors the GSG portal palette
+// so the dashboard tab looks like the rest of the system.
+const BRAND_NAVY = { red: 0.07, green: 0.15, blue: 0.27 };       // navy-500
+const BRAND_TEAL = { red: 0.0, green: 0.66, blue: 0.74 };        // brand teal
+const BRAND_BG_LIGHT = { red: 0.96, green: 0.97, blue: 0.99 };   // header row tint
+const WHITE = { red: 1, green: 1, blue: 1 };
+
+const TARGET_COL_WIDTH = 26;
+
 export async function repairDashboard(sheetId: string): Promise<RepairResult> {
   const errors: string[] = [];
-  // Make sure a Dashboard tab exists; if not, create one with a single
-  // header cell so the write below has somewhere to land.
+
   await ensureSchema(sheetId, 'Dashboard', ['Companies Master Dashboard']);
 
-  // Find the numeric sheetId for the Dashboard tab so we can issue
-  // unmergeCells + clearFormatting requests.
+  // Resolve the Dashboard tab's numeric sheetId for the batchUpdate
+  // formatting requests later.
   let dashboardSheetId: number | null = null;
   try {
     const meta = await getSpreadsheetMeta(sheetId);
@@ -141,34 +154,14 @@ export async function repairDashboard(sheetId: string): Promise<RepairResult> {
   }
 
   // Unmerge every merged range on the Dashboard tab + reset cell
-  // formatting. The previous Python builder created merged cells with
-  // brand colors that were clashing with our new vertical 3-col layout
-  // (the 'Active' / 'Onboarded' / 'Selected' colored blocks the user
-  // saw in the screenshot were merge artefacts from row 5 of the old
-  // layout). batchUpdate is best-effort — non-fatal if it errors.
+  // formatting. Non-fatal if it fails.
   if (dashboardSheetId !== null) {
     try {
       await batchUpdate(sheetId, [
-        {
-          unmergeCells: {
-            range: {
-              sheetId: dashboardSheetId,
-              startRowIndex: 0,
-              endRowIndex: 200,
-              startColumnIndex: 0,
-              endColumnIndex: 26,
-            },
-          },
-        },
+        { unmergeCells: { range: rangeRef(dashboardSheetId, 0, 200, 0, TARGET_COL_WIDTH) } },
         {
           repeatCell: {
-            range: {
-              sheetId: dashboardSheetId,
-              startRowIndex: 0,
-              endRowIndex: 200,
-              startColumnIndex: 0,
-              endColumnIndex: 26,
-            },
+            range: rangeRef(dashboardSheetId, 0, 200, 0, TARGET_COL_WIDTH),
             cell: { userEnteredFormat: {} },
             fields: 'userEnteredFormat',
           },
@@ -179,18 +172,18 @@ export async function repairDashboard(sheetId: string): Promise<RepairResult> {
     }
   }
 
+  // Build content + write across the full 26-col width so any legacy
+  // values in cells D-Z get blanked. Without this, the previous 12-col
+  // 'Top metrics' row had labels like 'Active'/'Onboarded'/'Selected'
+  // sitting in cols E/H/K which our 3-col write left untouched.
   const rows = buildDashboardRows();
-  const maxCols = Math.max(1, ...rows.map(r => r.length));
   const padded = rows.map(r => {
-    const out: (string | number | boolean)[] = [...r];
-    while (out.length < maxCols) out.push('');
+    const out: (string | number | boolean)[] = [...r.cells];
+    while (out.length < TARGET_COL_WIDTH) out.push('');
     return out;
   });
 
-  // Write the canonical content. If this fails we return early — the
-  // unmerge ran but nothing got blanked, so the sheet is in a defined
-  // (if empty) state.
-  const lastCol = colLetter(maxCols - 1);
+  const lastCol = colLetter(TARGET_COL_WIDTH - 1);
   try {
     await updateRange(sheetId, `Dashboard!A1:${lastCol}${padded.length}`, padded);
   } catch (err) {
@@ -198,16 +191,158 @@ export async function repairDashboard(sheetId: string): Promise<RepairResult> {
     return { rowsWritten: 0, errors };
   }
 
-  // Wipe anything that lingered from an older, taller dashboard layout
-  // ONLY after the canonical content write succeeded.
+  // Wipe stale rows below.
   const wipeStartRow = padded.length + 1;
   const wipeEndRow = padded.length + 80;
-  const wipe = new Array(wipeEndRow - wipeStartRow + 1).fill(0).map(() => new Array(maxCols).fill(''));
+  const wipe = new Array(wipeEndRow - wipeStartRow + 1)
+    .fill(0)
+    .map(() => new Array(TARGET_COL_WIDTH).fill(''));
   try {
     await updateRange(sheetId, `Dashboard!A${wipeStartRow}:${lastCol}${wipeEndRow}`, wipe, { valueInput: 'RAW' });
   } catch (err) {
     errors.push(`stale-row wipe failed (non-fatal): ${(err as Error).message}`);
   }
 
+  // Apply formatting per row tag. Title gets a large bold navy font;
+  // section headers get bold + tinted background; metric rows get
+  // bold first column + monospace value column.
+  if (dashboardSheetId !== null) {
+    const requests: unknown[] = [];
+
+    // Column widths so the layout is readable: A label wide, B value
+    // narrow, C bar wide.
+    requests.push(setColWidth(dashboardSheetId, 0, 260));   // A
+    requests.push(setColWidth(dashboardSheetId, 1, 90));    // B
+    requests.push(setColWidth(dashboardSheetId, 2, 380));   // C
+
+    rows.forEach((r, i) => {
+      const rowIdx = i;
+      switch (r.tag) {
+        case 'title':
+          requests.push({
+            mergeCells: { range: rangeRef(dashboardSheetId!, rowIdx, rowIdx + 1, 0, 4), mergeType: 'MERGE_ROWS' },
+          });
+          requests.push(formatRow(dashboardSheetId, rowIdx, 0, 4, {
+            backgroundColor: BRAND_NAVY,
+            textFormat: { fontSize: 18, bold: true, foregroundColor: WHITE, fontFamily: 'Source Sans Pro' },
+            verticalAlignment: 'MIDDLE',
+            horizontalAlignment: 'LEFT',
+            padding: { top: 8, bottom: 8, left: 12, right: 12 },
+          }));
+          requests.push(setRowHeight(dashboardSheetId, rowIdx, 38));
+          break;
+        case 'subtitle':
+          requests.push({
+            mergeCells: { range: rangeRef(dashboardSheetId!, rowIdx, rowIdx + 1, 0, 4), mergeType: 'MERGE_ROWS' },
+          });
+          requests.push(formatRow(dashboardSheetId, rowIdx, 0, 4, {
+            textFormat: { fontSize: 11, italic: true, foregroundColor: { red: 0.4, green: 0.45, blue: 0.55 }, fontFamily: 'Source Sans Pro' },
+            horizontalAlignment: 'LEFT',
+            padding: { top: 4, bottom: 8, left: 12, right: 12 },
+          }));
+          break;
+        case 'section':
+          requests.push(formatRow(dashboardSheetId, rowIdx, 0, TARGET_COL_WIDTH, {
+            backgroundColor: BRAND_BG_LIGHT,
+            textFormat: { fontSize: 11, bold: true, foregroundColor: BRAND_NAVY, fontFamily: 'Source Sans Pro' },
+            horizontalAlignment: 'LEFT',
+            padding: { top: 6, bottom: 6, left: 8, right: 8 },
+          }));
+          requests.push(setRowHeight(dashboardSheetId, rowIdx, 26));
+          // top + bottom border for section header
+          requests.push({
+            updateBorders: {
+              range: rangeRef(dashboardSheetId!, rowIdx, rowIdx + 1, 0, 3),
+              top: { style: 'SOLID', width: 1, color: BRAND_TEAL },
+              bottom: { style: 'SOLID', width: 1, color: { red: 0.85, green: 0.88, blue: 0.92 } },
+            },
+          });
+          break;
+        case 'metric':
+          // Label cell (col A) bold navy
+          requests.push(formatRow(dashboardSheetId, rowIdx, 0, 1, {
+            textFormat: { fontSize: 11, bold: true, foregroundColor: BRAND_NAVY, fontFamily: 'Source Sans Pro' },
+            horizontalAlignment: 'LEFT',
+            padding: { top: 4, bottom: 4, left: 12, right: 4 },
+          }));
+          // Value cell (col B) right-aligned mono
+          requests.push(formatRow(dashboardSheetId, rowIdx, 1, 2, {
+            textFormat: { fontSize: 11, bold: true, foregroundColor: BRAND_NAVY, fontFamily: 'Roboto Mono' },
+            horizontalAlignment: 'RIGHT',
+            padding: { top: 4, bottom: 4, left: 4, right: 12 },
+          }));
+          // Bar cell (col C) teal
+          requests.push(formatRow(dashboardSheetId, rowIdx, 2, 3, {
+            textFormat: { fontSize: 11, foregroundColor: BRAND_TEAL, fontFamily: 'Roboto Mono' },
+            horizontalAlignment: 'LEFT',
+            padding: { top: 4, bottom: 4, left: 8, right: 8 },
+          }));
+          break;
+        default:
+          break;
+      }
+    });
+
+    if (requests.length > 0) {
+      try {
+        // batchUpdate has a request size cap; split into chunks of 100.
+        const chunks: unknown[][] = [];
+        for (let i = 0; i < requests.length; i += 100) chunks.push(requests.slice(i, i + 100));
+        for (const c of chunks) await batchUpdate(sheetId, c);
+      } catch (err) {
+        errors.push(`formatting failed (non-fatal): ${(err as Error).message}`);
+      }
+    }
+  }
+
   return { rowsWritten: padded.length, errors };
+}
+
+// ─────────── batchUpdate request helpers ───────────
+
+function rangeRef(sheetId: number, startRow: number, endRow: number, startCol: number, endCol: number) {
+  return {
+    sheetId,
+    startRowIndex: startRow,
+    endRowIndex: endRow,
+    startColumnIndex: startCol,
+    endColumnIndex: endCol,
+  };
+}
+
+function formatRow(
+  sheetId: number,
+  rowIdx: number,
+  startCol: number,
+  endCol: number,
+  format: Record<string, unknown>,
+): unknown {
+  const fields = Object.keys(format).map(k => `userEnteredFormat.${k}`).join(',');
+  return {
+    repeatCell: {
+      range: rangeRef(sheetId, rowIdx, rowIdx + 1, startCol, endCol),
+      cell: { userEnteredFormat: format },
+      fields,
+    },
+  };
+}
+
+function setColWidth(sheetId: number, colIdx: number, pixels: number): unknown {
+  return {
+    updateDimensionProperties: {
+      range: { sheetId, dimension: 'COLUMNS', startIndex: colIdx, endIndex: colIdx + 1 },
+      properties: { pixelSize: pixels },
+      fields: 'pixelSize',
+    },
+  };
+}
+
+function setRowHeight(sheetId: number, rowIdx: number, pixels: number): unknown {
+  return {
+    updateDimensionProperties: {
+      range: { sheetId, dimension: 'ROWS', startIndex: rowIdx, endIndex: rowIdx + 1 },
+      properties: { pixelSize: pixels },
+      fields: 'pixelSize',
+    },
+  };
 }
