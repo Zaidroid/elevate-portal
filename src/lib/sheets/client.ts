@@ -234,9 +234,12 @@ export async function ensureSchema(
   return { created: false, headersMatch: match, actualHeaders: actual };
 }
 
-// Polling subscription. Returns an unsubscribe function. The callback fires once
-// immediately and then every intervalMs; errors are delivered but do not stop the
-// loop (network blips shouldn't kill sync).
+// Polling subscription. Returns an unsubscribe function. The callback fires
+// once immediately, then every intervalMs while the document is visible.
+// When the browser tab is hidden we skip ticks (avoids quota spend on
+// background tabs), and when it becomes visible again we fire an
+// immediate refresh + resume the cadence. Errors are delivered but do
+// not stop the loop (network blips shouldn't kill sync).
 export function pollRange(
   sheetId: string,
   range: string,
@@ -246,23 +249,61 @@ export function pollRange(
 ): () => void {
   let cancelled = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let inFlight = false;
+
+  const isHidden = (): boolean =>
+    typeof document !== 'undefined' && document.visibilityState === 'hidden';
+
+  const scheduleNext = () => {
+    if (cancelled) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(tick, intervalMs);
+  };
 
   const tick = async () => {
     if (cancelled) return;
+    if (isHidden()) {
+      // Document is hidden — defer the network call until it becomes
+      // visible. visibilitychange below kicks the next tick.
+      scheduleNext();
+      return;
+    }
+    if (inFlight) {
+      scheduleNext();
+      return;
+    }
+    inFlight = true;
     try {
       const rows = await fetchRange(sheetId, range);
       if (!cancelled) onData(rows);
     } catch (err) {
       if (onError) onError(err);
     } finally {
-      if (!cancelled) timer = setTimeout(tick, intervalMs);
+      inFlight = false;
+      scheduleNext();
     }
   };
+
+  // visibilitychange handler: when the tab becomes visible, fire a
+  // catch-up refresh immediately so the user sees fresh data on focus.
+  const onVisibility = () => {
+    if (cancelled) return;
+    if (!isHidden()) {
+      if (timer) clearTimeout(timer);
+      void tick();
+    }
+  };
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisibility);
+  }
 
   tick();
 
   return () => {
     cancelled = true;
     if (timer) clearTimeout(timer);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', onVisibility);
+    }
   };
 }

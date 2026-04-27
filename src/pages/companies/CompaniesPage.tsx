@@ -165,6 +165,15 @@ export function CompaniesPage() {
   const masterTab = getTab('companies', 'companies');
   const sourceTab = getTab('selection', 'sourceData');
 
+  // Hoisted up front so the Selection-workbook hooks below can lazy-mount
+  // when the Review view isn't open. Cuts polling load substantially.
+  const [view, setView] = useState<'review' | 'dashboard' | 'pipeline' | 'roster'>('review');
+  const reviewActive = view === 'review';
+  // Read-only context tabs barely change; poll them every 5 minutes
+  // instead of the default 30 seconds. The user still sees fresh data
+  // because every visibility-change fires an immediate refresh.
+  const SLOW_POLL = 5 * 60_000;
+
   const master = useSheetDoc<Master>(
     masterSheetId || null,
     masterTab,
@@ -184,13 +193,21 @@ export function CompaniesPage() {
   // the team has already concluded (scoring, doc review notes, interview
   // assessment, interview discussion, committee votes) without having to
   // open the workbook. Read-only here; the Selection tool owns CRUD.
-  const scoring = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'scoringMatrix'), 'id', { userEmail: user?.email });
-  const docReviews = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'docReviews'), 'id', { userEmail: user?.email });
-  const companyNeeds = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'companyNeeds'), 'id', { userEmail: user?.email });
-  const interviewAssessments = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'interviewAssessments'), 'id', { userEmail: user?.email });
-  const interviewDiscussion = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'interviewDiscussion'), 'id', { userEmail: user?.email });
-  const committeeVotes = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'committeeVotes'), 'id', { userEmail: user?.email });
-  const selectionVotes = useSheetDoc<Record<string, string>>(selectionSheetId || null, getTab('selection', 'selectionVotes'), 'id', { userEmail: user?.email });
+  //
+  // Lazy-mounted: only fire the seven extra tab hooks when the Review
+  // view is active, AND poll them every 5 minutes instead of every 30
+  // seconds. Without this gating each open page burned 7 × 2 = 14
+  // requests/minute on context that barely changes — fastest path to
+  // hitting the per-100s quota.
+  const selSheetId = reviewActive ? (selectionSheetId || null) : null;
+  const selOpts = { userEmail: user?.email, intervalMs: SLOW_POLL };
+  const scoring = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'scoringMatrix'), 'id', selOpts);
+  const docReviews = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'docReviews'), 'id', selOpts);
+  const companyNeeds = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'companyNeeds'), 'id', selOpts);
+  const interviewAssessments = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'interviewAssessments'), 'id', selOpts);
+  const interviewDiscussion = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'interviewDiscussion'), 'id', selOpts);
+  const committeeVotes = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'committeeVotes'), 'id', selOpts);
+  const selectionVotes = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'selectionVotes'), 'id', selOpts);
 
   // Intervention Assignments tab — drives the per-card pillar dots and the
   // "(N interventions)" badges on the kanban + roster. The detail page owns
@@ -432,7 +449,8 @@ export function CompaniesPage() {
   const [filters, setFilters] = useState<FilterDrawerValues>({ pm: [], stage: [], status: [], fund: [] });
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [view, setView] = useState<'review' | 'dashboard' | 'pipeline' | 'roster'>('review');
+  // (view state is declared at the top of the component, gating the
+  // Selection-workbook hooks for lazy-mounting.)
   const [savedView, setSavedView] = useState<'' | 'mine' | 'unassigned' | 'interviewed' | 'active'>('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
@@ -1177,7 +1195,14 @@ export function CompaniesPage() {
         badges={[
           { label: `${joined.length} cohort 3`, tone: 'teal' },
           ...(interviewedSet.size > 0
-            ? [{ label: `${interviewedCount} / ${INTERVIEWED_RAW.length} interviewed`, tone: 'amber' as Tone }]
+            ? [{
+                label: `${interviewedCount} / ${
+                  // Denominator subtracts removed names so the badge
+                  // reads e.g. 51/51 after one is excluded, not 51/52.
+                  INTERVIEWED_RAW.filter(n => !removedSet.has(norm(n))).length
+                } interviewed`,
+                tone: 'amber' as Tone,
+              }]
             : []),
           ...(unmatchedInterviewed.length > 0
             ? [{
