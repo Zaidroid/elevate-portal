@@ -17,6 +17,7 @@ import {
   X,
   Calendar,
   Activity,
+  MessageCircle,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { useSheetDoc } from '../../lib/two-way-sync';
@@ -39,7 +40,7 @@ import {
   useToast,
 } from '../../lib/ui';
 import type { TabItem } from '../../lib/ui';
-import type { ActivityRow, Review } from './reviewTypes';
+import type { ActivityRow, CompanyComment, PreDecisionRecommendation, Review } from './reviewTypes';
 import { summarizeReviews } from './reviewTypes';
 import { ActivityTimeline as AuditLogTimeline } from './ActivityTimeline';
 
@@ -100,6 +101,8 @@ export function CompanyDetailPage() {
   const assignments = useSheetDoc<Assignment>(companiesSheet || null, getTab('companies', 'assignments'), 'assignment_id', { userEmail: user?.email });
   const reviewsDoc = useSheetDoc<Review>(companiesSheet || null, getTab('companies', 'reviews'), 'review_id', { userEmail: user?.email });
   const activityDoc = useSheetDoc<ActivityRow>(companiesSheet || null, getTab('companies', 'activity'), 'activity_id', { userEmail: user?.email });
+  const commentsDoc = useSheetDoc<CompanyComment>(companiesSheet || null, getTab('companies', 'comments'), 'comment_id', { userEmail: user?.email });
+  const preDecisionsDoc = useSheetDoc<PreDecisionRecommendation>(companiesSheet || null, getTab('companies', 'preDecisions'), 'recommendation_id', { userEmail: user?.email });
 
   // Source Data from Selection workbook is the authoritative applicant list.
   const sourceData = useSheetDoc<Record<string, string>>(
@@ -193,6 +196,14 @@ export function CompanyDetailPage() {
   const companyReviews = useMemo(
     () => reviewsDoc.rows.filter(r => masterKey && r.company_id === masterKey),
     [reviewsDoc.rows, masterKey]
+  );
+  const companyComments = useMemo(
+    () => commentsDoc.rows.filter(c => masterKey && c.company_id === masterKey),
+    [commentsDoc.rows, masterKey]
+  );
+  const companyPreDecisions = useMemo(
+    () => preDecisionsDoc.rows.filter(r => masterKey && r.company_id === masterKey),
+    [preDecisionsDoc.rows, masterKey]
   );
   const reviewSummary = useMemo(() => summarizeReviews(companyReviews), [companyReviews]);
   const interventionPillars = useMemo(() => {
@@ -312,8 +323,9 @@ export function CompanyDetailPage() {
 
   const tabs: TabItem[] = [
     { value: 'overview', label: 'Overview', icon: <Building2 className="h-4 w-4" /> },
-    { value: 'selection', label: 'Selection', icon: <Sparkles className="h-4 w-4" />, count: hasSelection ? 1 : 0 },
     { value: 'program', label: 'Program', icon: <Activity className="h-4 w-4" />, count: companyAssignments.length },
+    { value: 'comments', label: 'Comments', icon: <MessageCircle className="h-4 w-4" />, count: companyComments.length + companyPreDecisions.length },
+    { value: 'selection', label: 'Selection', icon: <Sparkles className="h-4 w-4" />, count: hasSelection ? 1 : 0 },
     { value: 'activity', label: 'Activity', icon: <LayoutDashboard className="h-4 w-4" />, count: activityCount },
   ];
 
@@ -439,15 +451,33 @@ export function CompanyDetailPage() {
           />
         )}
         {tab === 'selection' && (
-          <SelectionTab
-            applicant={applicant}
-            needs={myNeeds}
-            score={myScore}
-            interview={myInterview}
-            discussion={myDiscussion}
-            eb={myEB}
-            company={company}
-          />
+          <div className="space-y-3">
+            <Card className="border-l-4 border-l-brand-teal">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-bold text-navy-500 dark:text-slate-100">Selection workflow</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    Reviews, votes, and final-decision locking now live in the dedicated Selection module so the whole team can use them simultaneously.
+                  </p>
+                </div>
+                <Link
+                  to="/selection"
+                  className="inline-flex items-center gap-1 rounded-lg bg-brand-teal px-3 py-2 text-xs font-bold text-white hover:bg-brand-teal/90"
+                >
+                  Open in Selection module <ExternalLink className="h-3.5 w-3.5" />
+                </Link>
+              </div>
+            </Card>
+            <SelectionTab
+              applicant={applicant}
+              needs={myNeeds}
+              score={myScore}
+              interview={myInterview}
+              discussion={myDiscussion}
+              eb={myEB}
+              company={company}
+            />
+          </div>
         )}
         {tab === 'program' && (
           <ProgramTab
@@ -461,6 +491,26 @@ export function CompanyDetailPage() {
               setQuickAction(kind);
             }}
             masterKey={masterKey}
+          />
+        )}
+        {tab === 'comments' && (
+          <CommentsTab
+            comments={companyComments}
+            preDecisions={companyPreDecisions}
+            companyId={masterKey}
+            onPost={async body => {
+              if (!masterKey || !body.trim() || !user?.email) return;
+              const now = new Date().toISOString();
+              const id = `cmt-${masterKey}-${user.email.split('@')[0]}-${now}`.toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 80);
+              await commentsDoc.createRow({
+                comment_id: id,
+                company_id: masterKey,
+                author_email: user.email,
+                body: body.trim(),
+                created_at: now,
+                updated_at: now,
+              });
+            }}
           />
         )}
         {tab === 'activity' && (
@@ -1577,6 +1627,111 @@ function TrackCard({ title, desc, active }: { title: string; desc: string; activ
         {active && <Badge tone="teal">Likely</Badge>}
       </div>
       <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{desc}</div>
+    </div>
+  );
+}
+
+// -------- Comments tab --------
+
+function CommentsTab({
+  comments,
+  preDecisions,
+  companyId,
+  onPost,
+}: {
+  comments: CompanyComment[];
+  preDecisions: PreDecisionRecommendation[];
+  companyId: string;
+  onPost: (body: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState('');
+  const [posting, setPosting] = useState(false);
+  const sorted = useMemo(
+    () => comments.slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || '')),
+    [comments],
+  );
+  if (!companyId) {
+    return (
+      <EmptyState
+        icon={<MessageCircle className="h-6 w-6" />}
+        title="No master row yet"
+        description="Comments need a Companies Master record. Materialize the company first."
+      />
+    );
+  }
+  const handlePost = async () => {
+    if (!draft.trim()) return;
+    setPosting(true);
+    try {
+      await onPost(draft);
+      setDraft('');
+    } finally {
+      setPosting(false);
+    }
+  };
+  return (
+    <div className="space-y-3">
+      {/* Pre-decision recommendations (Israa CSV / Raouf docx / future seeds) */}
+      {preDecisions.length > 0 && (
+        <Card className="border-l-4 border-l-purple-500">
+          <CardHeader
+            title={`Pre-decision recommendations (${preDecisions.length})`}
+            subtitle={`From ${Array.from(new Set(preDecisions.map(p => displayName(p.author_email)))).join(', ')}`}
+          />
+          <ul className="space-y-1.5">
+            {preDecisions.map(r => (
+              <li key={r.recommendation_id} className="rounded-md border border-purple-200 bg-purple-50/50 p-2 text-xs dark:border-purple-900 dark:bg-purple-950/30">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-purple-800 dark:text-purple-200">
+                    {r.pillar}{r.sub_intervention ? ` · ${r.sub_intervention}` : ''}
+                    {r.fund_hint && <span className="ml-1 text-[10px] font-normal text-purple-600">[{r.fund_hint}]</span>}
+                  </span>
+                  <span className="text-[10px] text-purple-500">{displayName(r.author_email)}{r.source ? ` · ${r.source}` : ''}</span>
+                </div>
+                {r.note && <div className="mt-1 whitespace-pre-wrap text-[11px] text-slate-700 dark:text-slate-300">{r.note}</div>}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      {/* Comments thread */}
+      <Card>
+        <CardHeader
+          title={`Comments (${sorted.length})`}
+          subtitle="Free-form team thread. Israa + Raouf imports show up here automatically."
+        />
+        {sorted.length === 0 ? (
+          <p className="text-xs italic text-slate-500">No comments yet — be the first to post.</p>
+        ) : (
+          <ul className="space-y-2">
+            {sorted.map(c => (
+              <li key={c.comment_id} className="rounded-md border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-navy-500 dark:text-slate-100">{displayName(c.author_email)}</span>
+                  <span className="text-[10px] text-slate-500">{c.created_at}</span>
+                </div>
+                <div className="mt-1 whitespace-pre-wrap text-[11px] text-slate-700 dark:text-slate-300">{c.body}</div>
+              </li>
+            ))}
+          </ul>
+        )}
+        {/* Composer */}
+        <div className="mt-3 border-t border-slate-200 pt-3 dark:border-navy-700">
+          <textarea
+            value={draft}
+            onChange={e => setDraft(e.currentTarget.value)}
+            placeholder="Add a comment for the team…"
+            rows={3}
+            className="w-full rounded-md border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+          />
+          <div className="mt-2 flex justify-end">
+            <Button onClick={handlePost} disabled={posting || !draft.trim()} size="sm">
+              {posting ? 'Posting…' : 'Post comment'}
+            </Button>
+          </div>
+        </div>
+      </Card>
     </div>
   );
 }
