@@ -145,8 +145,14 @@ export function getUserByEmail(email: string): TeamMember | null {
   return getRoster().find(u => u.email.toLowerCase() === n) || null;
 }
 
+// Admin check is lenient — anyone with role=admin OR tier=leadership
+// counts. Defence-in-depth so Raouf / Israa / Zaid retain admin access
+// even if a future edit accidentally drops their role to 'user' but
+// keeps them at the leadership tier.
 export function isAdmin(email: string): boolean {
-  return getUserRole(email) === 'admin';
+  const u = getUserByEmail(email);
+  if (!u) return false;
+  return u.role === 'admin' || u.tier === 'leadership';
 }
 
 export function getTier(email: string): Tier {
