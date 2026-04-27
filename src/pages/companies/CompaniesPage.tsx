@@ -1402,6 +1402,32 @@ export function CompaniesPage() {
             }
           }}
           onJumpToCompany={rid => navigate(`/companies/${encodeURIComponent(rid)}`)}
+          onRemoveCompany={async (companyId, companyName) => {
+            // Permanent delete: remove the master row + any alias whose
+            // applicant_company_name matches this company. The Source
+            // Data row in the Selection workbook is read-only and stays.
+            const ok = window.confirm(
+              `Remove "${companyName}" from the system?\n\n` +
+              `This deletes the row from the Companies Master sheet and any matching Interview Aliases entry. ` +
+              `Source Data in the Selection workbook is not touched.`
+            );
+            if (!ok) return;
+            try {
+              if (master.rows.some(m => m.company_id === companyId)) {
+                await master.deleteRow(companyId);
+              }
+              const targetKey = norm(companyName);
+              for (const a of aliasesDoc.rows) {
+                if (norm(a.applicant_company_name || '') === targetKey) {
+                  await aliasesDoc.deleteRow(a.alias_id);
+                }
+              }
+              toast.success('Removed', `${companyName} deleted from Master + aliases.`);
+              await master.refresh();
+            } catch (e) {
+              toast.error('Remove failed', (e as Error).message);
+            }
+          }}
         />
       )}
 

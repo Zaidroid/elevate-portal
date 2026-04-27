@@ -199,6 +199,7 @@ export function ReviewView({
   onAssignPM,
   onFinalize,
   onJumpToCompany,
+  onRemoveCompany,
 }: {
   companies: ReviewableCompany[];
   reviews: Review[];
@@ -211,6 +212,7 @@ export function ReviewView({
   onAssignPM: (companyId: string, pmEmail: string) => Promise<void>;
   onFinalize: (args: FinalizeArgs) => Promise<void>;
   onJumpToCompany?: (route_id: string) => void;
+  onRemoveCompany?: (companyId: string, companyName: string) => Promise<void>;
 }) {
   const toast = useToast();
   const [cursor, setCursor] = useState(0);
@@ -525,6 +527,16 @@ export function ReviewView({
             {onJumpToCompany && (
               <Button variant="ghost" size="sm" onClick={() => onJumpToCompany(company.route_id)}>
                 <ExternalLink className="h-3.5 w-3.5" /> Detail
+              </Button>
+            )}
+            {isAdmin && onRemoveCompany && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onRemoveCompany(company.company_id, company.company_name)}
+                title="Remove this company from Master + aliases"
+              >
+                <span className="text-red-600 dark:text-red-400 font-bold">Remove</span>
               </Button>
             )}
           </div>
