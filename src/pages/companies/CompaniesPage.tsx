@@ -49,6 +49,7 @@ import {
   aliasIdFor,
   summarizeReviews,
 } from './reviewTypes';
+import { repairDashboard } from './repairDashboard';
 import type { CompanyComment, InterviewAlias, Review, ReviewSummary } from './reviewTypes';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
@@ -836,21 +837,73 @@ export function CompaniesPage() {
   // creates those rows in one go so the master reflects the actual
   // post-interview cohort and direct edits on the sheet have somewhere
   // to attach. Idempotent — already-materialized companies are skipped.
+  // The dedup check uses ALL master rows (not just E3-tagged). The
+  // previous bug: masterByName was scoped to cohort=='E3', so any
+  // pre-existing master row without an E3 tag (or with empty cohort)
+  // was invisible — and materialize wrote a duplicate. This map keys
+  // on both company_id AND normalized company_name so name drift
+  // between Source Data and a hand-edited master row still matches.
+  const allMasterIndex = useMemo(() => {
+    const byId = new Map<string, Master>();
+    const byName = new Map<string, Master>();
+    for (const m of master.rows) {
+      const id = (m.company_id || '').trim();
+      const nm = norm(m.company_name || '');
+      if (id) byId.set(id, m);
+      if (nm) byName.set(nm, m);
+    }
+    return { byId, byName };
+  }, [master.rows]);
+
   const needsMaterialize = useMemo(() => {
-    return joined.filter(r =>
-      isInterviewed(r.company_name, interviewedSet) &&
-      r.source === 'applicant'        // applicant-only means no master row exists yet
-    );
-  }, [joined, interviewedSet]);
+    return joined.filter(r => {
+      if (!isInterviewed(r.company_name, interviewedSet)) return false;
+      // Check ALL master rows by id and by name. If either matches, the
+      // company already has a row and we should NOT re-create it.
+      if (r.company_id && allMasterIndex.byId.has(r.company_id)) return false;
+      const nm = norm(r.company_name);
+      if (nm && allMasterIndex.byName.has(nm)) return false;
+      return true;
+    });
+  }, [joined, interviewedSet, allMasterIndex]);
+
   const [materializing, setMaterializing] = useState(false);
+  const [repairingDash, setRepairingDash] = useState(false);
+  const handleRepairDashboard = async () => {
+    if (!admin || !masterSheetId) return;
+    setRepairingDash(true);
+    try {
+      const res = await repairDashboard(masterSheetId);
+      if (res.errors.length === 0) {
+        toast.success('Dashboard rebuilt', `Wrote ${res.rowsWritten} rows of canonical formulas to the Dashboard tab.`);
+      } else {
+        toast.error('Dashboard rebuild had errors', res.errors[0]);
+      }
+    } catch (e) {
+      toast.error('Dashboard rebuild failed', (e as Error).message);
+    } finally {
+      setRepairingDash(false);
+    }
+  };
   const handleMaterialize = async () => {
     if (!admin) return;
     if (needsMaterialize.length === 0) return;
     setMaterializing(true);
+    // Track in-loop creations so a follow-up row with the same name doesn't
+    // sneak past the dedup check before the next master.refresh() lands.
+    const seenIds = new Set<string>(allMasterIndex.byId.keys());
+    const seenNames = new Set<string>(allMasterIndex.byName.keys());
     let created = 0;
+    let skipped = 0;
     let failed = 0;
     try {
       for (const r of needsMaterialize) {
+        const id = (r.company_id || '').trim();
+        const nm = norm(r.company_name);
+        if ((id && seenIds.has(id)) || (nm && seenNames.has(nm))) {
+          skipped += 1;
+          continue;
+        }
         try {
           await master.createRow({
             company_id: r.company_id,
@@ -865,6 +918,8 @@ export function CompaniesPage() {
             fund_code: r.fund_code || '',
             profile_manager_email: r.profile_manager_email || '',
           } as Master);
+          if (id) seenIds.add(id);
+          if (nm) seenNames.add(nm);
           created += 1;
         } catch (e) {
           failed += 1;
@@ -873,7 +928,10 @@ export function CompaniesPage() {
       }
       if (created > 0) {
         toast.success(`Materialized ${created} compan${created === 1 ? 'y' : 'ies'} into Master`,
-          failed > 0 ? `${failed} failed (likely permission — see console)` : 'Master sheet now mirrors the interviewed cohort.');
+          [
+            skipped > 0 ? `${skipped} already had a row` : '',
+            failed > 0 ? `${failed} failed (likely permission)` : '',
+          ].filter(Boolean).join(' · '));
       } else if (failed > 0) {
         toast.error('Materialize failed', `${failed} write${failed === 1 ? '' : 's'} rejected. Check Drive sharing.`);
       }
@@ -882,6 +940,74 @@ export function CompaniesPage() {
       setMaterializing(false);
     }
   };
+
+  // Auto-dedupe master sheet — same pattern as advisors. Detects rows
+  // sharing a company_id OR a normalized company_name, removes the
+  // older copies (latest updated_at wins). Admin-only, runs once per
+  // page load, surfaces a toast on completion.
+  const [masterDedupRan, setMasterDedupRan] = useState(false);
+  useEffect(() => {
+    if (masterDedupRan) return;
+    if (!admin) return;
+    if (master.loading) return;
+    if (master.rows.length === 0) { setMasterDedupRan(true); return; }
+
+    // Build groups: each duplicate group = list of rows with same id or name.
+    const byId = new Map<string, Master[]>();
+    const byName = new Map<string, Master[]>();
+    for (const m of master.rows) {
+      const id = (m.company_id || '').trim();
+      const nm = norm(m.company_name || '');
+      if (id) (byId.get(id) || byId.set(id, []).get(id)!).push(m);
+      if (nm) (byName.get(nm) || byName.set(nm, []).get(nm)!).push(m);
+    }
+    const losers: Master[] = [];
+    const flagged = new Set<Master>();
+    const flagLosers = (group: Master[]) => {
+      if (group.length < 2) return;
+      // Keep the row with the most recent updated_at (lexicographic ISO
+      // strings sort correctly), or the LAST one if all are blank — that's
+      // the freshest sheet-row.
+      const sorted = [...group].sort((a, b) => (a.updated_at || '').localeCompare(b.updated_at || ''));
+      const winner = sorted[sorted.length - 1];
+      for (const r of group) {
+        if (r === winner) continue;
+        if (flagged.has(r)) continue;
+        flagged.add(r);
+        losers.push(r);
+      }
+    };
+    for (const g of byId.values()) flagLosers(g);
+    for (const g of byName.values()) flagLosers(g);
+
+    if (losers.length === 0) {
+      setMasterDedupRan(true);
+      return;
+    }
+    setMasterDedupRan(true);
+    let cancelled = false;
+    (async () => {
+      let removed = 0;
+      for (const l of losers) {
+        if (cancelled) return;
+        try {
+          if (l.company_id) {
+            await master.deleteRow(l.company_id);
+            removed += 1;
+          }
+        } catch (err) {
+          console.warn('[master-dedup] failed to remove duplicate', l.company_name, err);
+        }
+      }
+      if (!cancelled && removed > 0) {
+        toast.success(`Auto-removed ${removed} duplicate master row${removed === 1 ? '' : 's'}`,
+          'Kept the most recently updated copy of each company.');
+        await master.refresh();
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [admin, master.loading, master.rows.length, masterDedupRan]);
 
   // Surface every interview-list name that did NOT find a match against any
   // applicant in Source Data. These are either spelling drift (fix the static
@@ -1127,17 +1253,32 @@ export function CompaniesPage() {
         </Card>
       )}
 
-      {/* Materialize chip — folds the old prominent banner into a single
-          line above the saved-view chips. One click writes missing
-          interviewed companies into the Master sheet. */}
-      {admin && needsMaterialize.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-1.5 text-xs dark:border-amber-900 dark:bg-amber-950/30">
-          <span className="font-bold text-amber-900 dark:text-amber-200">
-            {needsMaterialize.length} interviewed compan{needsMaterialize.length === 1 ? 'y' : 'ies'} not yet in Master
-          </span>
-          <Button size="sm" variant="ghost" onClick={handleMaterialize} disabled={materializing}>
-            {materializing ? 'Writing…' : 'Materialize'}
-          </Button>
+      {/* Admin maintenance strip — Materialize + Repair Dashboard. Each
+          chip shows up only when actually useful. */}
+      {admin && (needsMaterialize.length > 0 || true) && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {needsMaterialize.length > 0 && (
+            <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-1.5 dark:border-amber-900 dark:bg-amber-950/30">
+              <span className="font-bold text-amber-900 dark:text-amber-200">
+                {needsMaterialize.length} interviewed compan{needsMaterialize.length === 1 ? 'y' : 'ies'} not yet in Master
+              </span>
+              <Button size="sm" variant="ghost" onClick={handleMaterialize} disabled={materializing}>
+                {materializing ? 'Writing…' : 'Materialize'}
+              </Button>
+            </div>
+          )}
+          <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 dark:border-navy-700 dark:bg-navy-800">
+            <span className="text-slate-600 dark:text-slate-300">Master Dashboard tab</span>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={handleRepairDashboard}
+              disabled={repairingDash}
+              title="Overwrite the Dashboard tab with canonical COUNTIF formulas covering every current status (Interviewed / Reviewing / Recommended / Selected / Onboarded / Active / Graduated / Withdrawn) plus reviews + interventions"
+            >
+              {repairingDash ? 'Rebuilding…' : 'Repair'}
+            </Button>
+          </div>
         </div>
       )}
 
