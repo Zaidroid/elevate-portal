@@ -4,7 +4,6 @@ import {
   BarChart3,
   Download,
   Kanban as KanbanIcon,
-  MessageCircle,
   Plus,
   RefreshCw,
   Table as TableIcon,
@@ -36,12 +35,6 @@ import type { Column, FilterDrawerValues, FilterFieldDef, KanbanColumn, KanbanIt
 import { displayName, getProfileManagers, isAdmin } from '../../config/team';
 import { pillarFor } from '../../config/interventions';
 import { INTERVIEWED_NAMES, INTERVIEWED_RAW, isInterviewed } from './interviewedSource';
-import { ReviewView } from '../selection/ReviewQueueTab';
-import type { ReviewableCompany, SelectionContext } from '../selection/ReviewQueueTab';
-import { FinalDecisionView } from '../selection/FinalCohortTab';
-import type { FinalLockArgs } from '../selection/FinalCohortTab';
-import { exportReviewToSheet } from '../selection/exportReview';
-import { indexByCompanyName, indexAllByCompanyName, lookupByName, lookupAllByName } from './selectionContext';
 import { ExpandableCompanyCard } from './ExpandableCompanyCard';
 import type { CardCompany } from './ExpandableCompanyCard';
 import {
@@ -52,14 +45,12 @@ import {
   REMOVED_HEADERS,
   REVIEWS_HEADERS,
   aliasIdFor,
-  removedIdFor,
   summarizeReviews,
 } from './reviewTypes';
 import { repairDashboard } from './repairDashboard';
-import { fuzzyResolve, importExternalSeed, loadSeed } from '../selection/importExternal';
 import { appendActivity } from './activityLog';
 import type { ActivityAction } from './activityLog';
-import type { ActivityRow, CompanyComment, InterviewAlias, PreDecisionRecommendation, RemovedCompany, Review, ReviewSummary } from './reviewTypes';
+import type { InterviewAlias, RemovedCompany, Review, ReviewSummary } from './reviewTypes';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
 // Company schema so keys are camelCase.
@@ -161,28 +152,18 @@ function maxStatus(a: string, b: string): string {
   return ra >= rb ? a : b;
 }
 
-export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'selection' } = {}) {
+export function CompaniesPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const toast = useToast();
   const admin = user ? isAdmin(user.email) : false;
-  const isSelectionMode = mode === 'selection';
 
   const masterSheetId = getSheetId('companies');
   const selectionSheetId = getSheetId('selection');
   const masterTab = getTab('companies', 'companies');
   const sourceTab = getTab('selection', 'sourceData');
 
-  // Hoisted up front so the Selection-workbook hooks below can lazy-mount
-  // when the Review view isn't open. Cuts polling load substantially.
-  const [view, setView] = useState<'review' | 'finalize' | 'dashboard' | 'pipeline' | 'roster' | 'imports' | 'activity'>(
-    isSelectionMode ? 'review' : 'pipeline',
-  );
-  const reviewActive = view === 'review' || view === 'finalize';
-  // Read-only context tabs barely change; poll them every 5 minutes
-  // instead of the default 30 seconds. The user still sees fresh data
-  // because every visibility-change fires an immediate refresh.
-  const SLOW_POLL = 5 * 60_000;
+  const [view, setView] = useState<'pipeline' | 'roster' | 'dashboard'>('pipeline');
 
   const master = useSheetDoc<Master>(
     masterSheetId || null,
@@ -198,33 +179,8 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
     { userEmail: user?.email }
   );
 
-  // Prior team evaluation context — every relevant tab from the Selection
-  // workbook surfaces inline in the Review view so the reviewer sees what
-  // the team has already concluded (scoring, doc review notes, interview
-  // assessment, interview discussion, committee votes) without having to
-  // open the workbook. Read-only here; the Selection tool owns CRUD.
-  //
-  // Lazy-mounted: only fire the seven extra tab hooks when the Review
-  // view is active, AND poll them every 5 minutes instead of every 30
-  // seconds. Without this gating each open page burned 7 × 2 = 14
-  // requests/minute on context that barely changes — fastest path to
-  // hitting the per-100s quota.
-  const selSheetId = reviewActive ? (selectionSheetId || null) : null;
-  const selOpts = { userEmail: user?.email, intervalMs: SLOW_POLL };
-  const scoring = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'scoringMatrix'), 'id', selOpts);
-  const docReviews = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'docReviews'), 'id', selOpts);
-  const companyNeeds = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'companyNeeds'), 'id', selOpts);
-  const interviewAssessments = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'interviewAssessments'), 'id', selOpts);
-  const interviewDiscussion = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'interviewDiscussion'), 'id', selOpts);
-  const committeeVotes = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'committeeVotes'), 'id', selOpts);
-  const selectionVotes = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'selectionVotes'), 'id', selOpts);
-  // 4 selection tabs the team fills in but the portal previously ignored.
-  // Adding them so Filtration / Shortlist / Final Cohort context is
-  // surfaced inline in the Review view alongside the existing tabs.
-  const firstFiltration = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'firstFiltration'), 'id', selOpts);
-  const additionalFiltration = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'additionalFiltration'), 'id', selOpts);
-  const shortlists = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'shortlists'), 'id', selOpts);
-  const finalCohort = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'finalCohort'), 'id', selOpts);
+  // Selection-tool tabs are not read here anymore; they live in the
+  // /selection module. Companies is purely operational.
 
   // Intervention Assignments tab — drives the per-card pillar dots and the
   // "(N interventions)" badges on the kanban + roster. The detail page owns
@@ -273,13 +229,6 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
     { userEmail: user?.email }
   );
 
-  const comments = useSheetDoc<CompanyComment>(
-    schemaReady && masterSheetId ? masterSheetId : null,
-    getTab('companies', 'comments'),
-    'comment_id',
-    { userEmail: user?.email }
-  );
-
   const aliasesDoc = useSheetDoc<InterviewAlias>(
     schemaReady && masterSheetId ? masterSheetId : null,
     getTab('companies', 'interviewAliases'),
@@ -296,25 +245,6 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
     schemaReady && masterSheetId ? masterSheetId : null,
     getTab('companies', 'removedCompanies'),
     'removed_id',
-    { userEmail: user?.email }
-  );
-
-  // Pre-decision Recommendations — sourced from Israa's CSV / Raouf's
-  // docx / future seeds via the importer. Used by Final Decision's
-  // pre-fill logic.
-  const preDecisionsDoc = useSheetDoc<PreDecisionRecommendation>(
-    schemaReady && masterSheetId ? masterSheetId : null,
-    getTab('companies', 'preDecisions'),
-    'recommendation_id',
-    { userEmail: user?.email }
-  );
-
-  // Activity Log feed. Tab is auto-created via ensureSchema; we read
-  // back so per-company timelines and the global feed surface in the UI.
-  const activityDoc = useSheetDoc<ActivityRow>(
-    schemaReady && masterSheetId ? masterSheetId : null,
-    getTab('companies', 'activity'),
-    'activity_id',
     { userEmail: user?.email }
   );
 
@@ -994,58 +924,6 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
     }
   };
 
-  // Import external comments + Pre-decision Recommendations from the
-  // /external-comments-seed.json file produced by
-  // sheet-builders/tools/import_external_comments.py. Idempotent —
-  // already-imported entries are skipped.
-  const [importingExt, setImportingExt] = useState(false);
-  const handleImportExternal = async () => {
-    if (!masterSheetId) return;
-    setImportingExt(true);
-    try {
-      const seed = await loadSeed();
-      if (!seed) {
-        toast.error('Seed missing', 'Could not load /external-comments-seed.json. Re-run the Python parser.');
-        return;
-      }
-      // Build a candidate list for fuzzy resolution: every interviewed
-      // company (joined view) plus every master row that has a name
-      // even if not interviewed.
-      const candidates = joined.map(r => ({ company_id: r.company_id, company_name: r.company_name }));
-      const resolve = (name: string) => fuzzyResolve(name, candidates);
-      const result = await importExternalSeed(seed, {
-        resolve,
-        existingComments: comments.rows,
-        existingRecs: preDecisionsDoc.rows,
-        createComment: row => comments.createRow(row),
-        createRecommendation: row => preDecisionsDoc.createRow(row),
-      });
-      const lines: string[] = [];
-      lines.push(`${result.commentsAdded} comments + ${result.recsAdded} recommendations imported.`);
-      if (result.commentsSkipped + result.recsSkipped > 0) {
-        lines.push(`Skipped ${result.commentsSkipped + result.recsSkipped} already-present entries.`);
-      }
-      if (result.commentsUnmatched.length + result.recsUnmatched.length > 0) {
-        const unmatched = Array.from(new Set([...result.commentsUnmatched, ...result.recsUnmatched])).slice(0, 6).join(', ');
-        lines.push(`${result.commentsUnmatched.length + result.recsUnmatched.length} unmatched names (e.g. ${unmatched}). Add aliases or fix spelling.`);
-      }
-      if (result.errors.length > 0) {
-        lines.push(`${result.errors.length} write error(s). Check console.`);
-        console.warn('[importExternal] errors', result.errors);
-      }
-      toast.success('Import complete', lines.join(' '));
-      logActivity('import_external', undefined, {
-        details: `${result.commentsAdded}c+${result.recsAdded}r added; ${result.commentsSkipped + result.recsSkipped} skipped; ${result.commentsUnmatched.length + result.recsUnmatched.length} unmatched`,
-      });
-      await comments.refresh();
-      await preDecisionsDoc.refresh();
-    } catch (e) {
-      toast.error('Import failed', (e as Error).message);
-    } finally {
-      setImportingExt(false);
-    }
-  };
-
   const handleMaterialize = async () => {
     if (!admin) return;
     if (needsMaterialize.length === 0) return;
@@ -1229,114 +1107,17 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
     return m;
   }, [reviews.rows]);
 
-  // Apply review-aware count for the Review tab — companies still needing
-  // *any* review by *anyone*. Shown as the small badge on the tab.
-  const reviewableCompanies = filteredBySelection;
-  const reviewedAnyone = useMemo(
-    () => reviewableCompanies.filter(c => (reviewSummaryByCompany.get(c.company_id)?.total || 0) > 0).length,
-    [reviewableCompanies, reviewSummaryByCompany]
-  );
+  const tabs: TabItem[] = [
+    { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: counts.total },
+    { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: counts.filtered },
+    { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
+  ];
 
-  // Final decision unlocks once every company in scope has at least
-  // one team review. Admin-only — non-admins still see the tab so
-  // they know it's coming, but it routes to a "still gathering reviews"
-  // state in the view itself.
-  const finalReady = reviewableCompanies.length > 0 && reviewedAnyone === reviewableCompanies.length;
-
-  const tabs: TabItem[] = isSelectionMode
-    ? [
-        { value: 'review', label: `Today's review queue · ${reviewedAnyone}/${reviewableCompanies.length}`, icon: <MessageCircle className="h-4 w-4" /> },
-        {
-          value: 'finalize',
-          label: finalReady ? `Final cohort decisions · ready` : `Final cohort decisions · ${reviewableCompanies.length - reviewedAnyone} left`,
-          icon: <BarChart3 className="h-4 w-4" />,
-          disabled: !finalReady,
-        },
-        { value: 'imports', label: 'Imports & seeds', icon: <Download className="h-4 w-4" /> },
-        { value: 'activity', label: 'Activity', icon: <RefreshCw className="h-4 w-4" /> },
-      ]
-    : [
-        { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: counts.total },
-        { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: counts.filtered },
-        { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
-      ];
-
-  // Build the applicants-by-name lookup — needed by the Review view to
-  // surface the Source Data application snapshot for each company.
-  const applicantByName = useMemo(() => {
-    const m = new Map<string, Applicant>();
-    for (const a of applicants.rows) {
-      const name = a.name || a.companyName || a.company_name || '';
-      const k = norm(name);
-      if (k) m.set(k, a);
-    }
-    return m;
-  }, [applicants.rows]);
-
-  const masterById = useMemo(() => {
-    const m = new Map<string, Master>();
-    for (const r of masterE3) if (r.company_id) m.set(r.company_id, r);
-    return m;
-  }, [masterE3]);
-
-  // Index every Selection tab once, so per-company context lookups are O(1).
-  const scoringIdx = useMemo(() => indexByCompanyName(scoring.rows), [scoring.rows]);
-  const docReviewIdx = useMemo(() => indexByCompanyName(docReviews.rows), [docReviews.rows]);
-  const needsIdx = useMemo(() => indexByCompanyName(companyNeeds.rows), [companyNeeds.rows]);
-  const interviewAssessIdx = useMemo(() => indexByCompanyName(interviewAssessments.rows), [interviewAssessments.rows]);
-  const interviewDiscIdx = useMemo(() => indexByCompanyName(interviewDiscussion.rows), [interviewDiscussion.rows]);
-  const interviewDiscAllIdx = useMemo(() => indexAllByCompanyName(interviewDiscussion.rows), [interviewDiscussion.rows]);
-  const committeeIdx = useMemo(() => indexByCompanyName(committeeVotes.rows), [committeeVotes.rows]);
-  const selectionVotesIdx = useMemo(() => indexByCompanyName(selectionVotes.rows), [selectionVotes.rows]);
-  const selectionVotesAllIdx = useMemo(() => indexAllByCompanyName(selectionVotes.rows), [selectionVotes.rows]);
-  // 4 newly-wired selection tabs.
-  const firstFiltrationIdx = useMemo(() => indexByCompanyName(firstFiltration.rows), [firstFiltration.rows]);
-  const additionalFiltrationIdx = useMemo(() => indexByCompanyName(additionalFiltration.rows), [additionalFiltration.rows]);
-  const shortlistsIdx = useMemo(() => indexByCompanyName(shortlists.rows), [shortlists.rows]);
-  const finalCohortIdx = useMemo(() => indexByCompanyName(finalCohort.rows), [finalCohort.rows]);
-
-  const reviewableForView: ReviewableCompany[] = useMemo(() => {
-    return reviewableCompanies.map(r => {
-      const selection: SelectionContext = {
-        scoring: lookupByName(scoringIdx, r.company_name),
-        docReview: lookupByName(docReviewIdx, r.company_name),
-        needs: lookupByName(needsIdx, r.company_name),
-        interviewAssessment: lookupByName(interviewAssessIdx, r.company_name),
-        interviewDiscussion: lookupByName(interviewDiscIdx, r.company_name),
-        interviewDiscussionAll: lookupAllByName(interviewDiscAllIdx, r.company_name),
-        committeeVotes: lookupByName(committeeIdx, r.company_name),
-        selectionVotes: lookupByName(selectionVotesIdx, r.company_name),
-        selectionVotesAll: lookupAllByName(selectionVotesAllIdx, r.company_name),
-        firstFiltration: lookupByName(firstFiltrationIdx, r.company_name),
-        additionalFiltration: lookupByName(additionalFiltrationIdx, r.company_name),
-        shortlists: lookupByName(shortlistsIdx, r.company_name),
-        finalCohort: lookupByName(finalCohortIdx, r.company_name),
-      };
-      return {
-        route_id: r.route_id,
-        applicant_id: r.applicant_id,
-        company_id: r.company_id,
-        company_name: r.company_name,
-        sector: r.sector,
-        city: r.city,
-        governorate: r.governorate,
-        employee_count: r.employee_count,
-        readiness_score: r.readiness_score,
-        fund_code: r.fund_code,
-        status: r.status,
-        profile_manager_email: r.profile_manager_email,
-        contact_email: r.contact_email,
-        applicantRaw: applicantByName.get(norm(r.company_name)) || null,
-        masterRaw: (masterById.get(r.company_id) as unknown as Record<string, string>) || null,
-        selection,
-      };
-    });
-  }, [reviewableCompanies, applicantByName, masterById, scoringIdx, docReviewIdx, needsIdx, interviewAssessIdx, interviewDiscIdx, interviewDiscAllIdx, committeeIdx, selectionVotesIdx, selectionVotesAllIdx, firstFiltrationIdx, additionalFiltrationIdx, shortlistsIdx, finalCohortIdx]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       <PageHeader
-        title={isSelectionMode ? 'Selection · Final Decision Session' : 'Companies'}
+        title="Companies"
         badges={[
           { label: `${joined.length} cohort 3`, tone: 'teal' },
           ...(interviewedSet.size > 0
@@ -1506,291 +1287,7 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
 
       <Tabs items={tabs} value={view} onChange={v => setView(v as typeof view)} />
 
-      {view === 'review' && (
-        <ReviewView
-          companies={reviewableForView}
-          reviews={reviews.rows}
-          comments={comments.rows}
-          reviewerEmail={user?.email || ''}
-          isAdmin={admin}
-          profileManagers={pms}
-          onSaveReview={async r => {
-            const lower = r.reviewer_email.toLowerCase();
-            const existing = reviews.rows.find(x =>
-              x.company_id === r.company_id &&
-              x.reviewer_email.toLowerCase() === lower
-            );
-            if (existing) {
-              await reviews.updateRow(existing.review_id, r);
-            } else {
-              await reviews.createRow(r);
-            }
-            logActivity('review_saved', r.company_id, {
-              new_value: r.decision || '',
-              details: r.proposed_pillars ? `pillars: ${r.proposed_pillars}` : '',
-            });
-          }}
-          onAddComment={async c => {
-            await comments.createRow(c);
-            logActivity('comment_added', c.company_id, { details: c.body.slice(0, 200) });
-          }}
-          onAssignPM={async (companyId, pmEmail) => {
-            // Upsert the master row's PM assignment. If the company is
-            // applicant-only (synthesized id), create a master row first
-            // so the assignment has somewhere to land.
-            const existing = master.rows.find(m => m.company_id === companyId);
-            if (existing) {
-              await master.updateRow(companyId, { profile_manager_email: pmEmail });
-            } else {
-              const c = reviewableForView.find(c => c.company_id === companyId);
-              if (!c) throw new Error('Company not found');
-              await master.createRow({
-                company_id: companyId,
-                company_name: c.company_name,
-                cohort: 'E3',
-                status: c.status || 'Interviewed',
-                profile_manager_email: pmEmail,
-                sector: c.sector || '',
-                city: c.city || '',
-                governorate: c.governorate || '',
-              } as Master);
-            }
-            logActivity('pm_assigned', companyId, { field: 'profile_manager_email', new_value: pmEmail });
-          }}
-          onFinalize={async ({ companyId, pmEmail, status, interventions }) => {
-            // 1) Lock the master row (status + optional PM). Create if needed.
-            const existing = master.rows.find(m => m.company_id === companyId);
-            const c = reviewableForView.find(c => c.company_id === companyId);
-            if (!c) throw new Error('Company not found');
-            if (existing) {
-              await master.updateRow(companyId, {
-                status,
-                ...(pmEmail !== undefined ? { profile_manager_email: pmEmail } : {}),
-              });
-            } else {
-              await master.createRow({
-                company_id: companyId,
-                company_name: c.company_name,
-                cohort: 'E3',
-                status,
-                profile_manager_email: pmEmail || '',
-                sector: c.sector || '',
-                city: c.city || '',
-                governorate: c.governorate || '',
-                fund_code: c.fund_code || '',
-              } as Master);
-            }
-
-            // 2) Materialize each intervention as an assignment row. We don't
-            // delete prior assignments — a re-finalize is additive so any
-            // edits the team already made on the assignments tab are safe.
-            const now = new Date().toISOString();
-            const existingPairs = new Set(
-              assignments.rows
-                .filter(a => a.company_id === companyId)
-                .map(a => `${a.intervention_type}::${a.sub_intervention || ''}`)
-            );
-            for (const i of interventions) {
-              const key = `${i.pillar}::${i.sub || ''}`;
-              if (existingPairs.has(key)) continue;
-              await assignments.createRow({
-                assignment_id: `asn-${companyId}-${i.pillar}-${i.sub || 'all'}-${now}`,
-                company_id: companyId,
-                intervention_type: i.pillar,
-                sub_intervention: i.sub || '',
-                fund_code: c.fund_code || '',
-                status: 'Planned',
-                start_date: '',
-                end_date: '',
-                owner_email: pmEmail || c.profile_manager_email || '',
-                budget_usd: '',
-                notes: '',
-              } as Assignment);
-            }
-            logActivity('finalize_locked', companyId, {
-              field: 'status',
-              new_value: status,
-              details: `${interventions.length} intervention(s); PM=${pmEmail || '—'}`,
-            });
-          }}
-          onJumpToCompany={rid => navigate(`/companies/${encodeURIComponent(rid)}`)}
-          onRemoveCompany={async (companyId, companyName) => {
-            // System-wide hide. Three steps:
-            //  1) Add the name to the shared Removed Companies tab so
-            //     every team member's joined / needsMaterialize / etc.
-            //     filters skip it.
-            //  2) Delete the master row (if any) so the sheet stops
-            //     showing it.
-            //  3) Delete any alias whose target was this name so
-            //     auto-materialize never re-creates it.
-            // Source Data in the Selection workbook is read-only and
-            // not touched; the exclusion list is what makes the hide
-            // stick.
-            const ok = window.confirm(
-              `Remove "${companyName}" from the system?\n\n` +
-              `Adds it to the shared Removed Companies tab so it disappears from every team member's view, ` +
-              `deletes the master row + matching alias, and stops it from being re-created on next materialize. ` +
-              `Source Data in the Selection workbook is read-only and not touched.`
-            );
-            if (!ok) return;
-            try {
-              const now = new Date().toISOString();
-              const id = removedIdFor(companyName);
-              // Step 1: shared exclusion record (idempotent — upsert).
-              const existing = removedDoc.rows.find(r => r.removed_id === id);
-              if (existing) {
-                await removedDoc.updateRow(id, {
-                  company_name: companyName,
-                  removed_by: user?.email || '',
-                  removed_at: now,
-                });
-              } else {
-                await removedDoc.createRow({
-                  removed_id: id,
-                  company_name: companyName,
-                  removed_by: user?.email || '',
-                  removed_at: now,
-                  reason: '',
-                });
-              }
-              // Step 2: master row.
-              if (companyId && master.rows.some(m => m.company_id === companyId)) {
-                await master.deleteRow(companyId);
-              }
-              // Also catch any other master rows that share the name
-              // (handles duplicates with different IDs).
-              const targetKey = norm(companyName);
-              for (const m of master.rows) {
-                if (m.company_id === companyId) continue;
-                if (norm(m.company_name || '') === targetKey && m.company_id) {
-                  try { await master.deleteRow(m.company_id); } catch { /* keep going */ }
-                }
-              }
-              // Step 3: alias rows pointing at this name.
-              for (const a of aliasesDoc.rows) {
-                if (norm(a.applicant_company_name || '') === targetKey) {
-                  try { await aliasesDoc.deleteRow(a.alias_id); } catch { /* keep going */ }
-                }
-              }
-              toast.success('Removed', `${companyName} hidden from the system across the team.`);
-              logActivity('company_removed', companyId, {
-                field: 'company_name',
-                old_value: companyName,
-                details: 'Removed via Companies page',
-              });
-              await master.refresh();
-            } catch (e) {
-              toast.error('Remove failed', (e as Error).message);
-            }
-          }}
-        />
-      )}
-
-      {view === 'finalize' && (
-        <FinalDecisionView
-          companies={reviewableForView}
-          reviews={reviews.rows}
-          reviewerEmail={user?.email || ''}
-          existingAssignments={assignments.rows.map(a => ({
-            company_id: a.company_id,
-            intervention_type: a.intervention_type,
-            sub_intervention: a.sub_intervention,
-            fund_code: a.fund_code,
-          }))}
-          onExport={async () => {
-            if (!masterSheetId) throw new Error('No companies workbook configured');
-            const out = await exportReviewToSheet(masterSheetId, {
-              companies: reviewableForView,
-              reviews: reviews.rows,
-              comments: comments.rows,
-              assignments: assignments.rows as unknown as Record<string, string>[],
-            }, user?.email || 'unknown');
-            logActivity('export', undefined, { details: 'Cohort review exported' });
-            return out;
-          }}
-          comments={comments.rows}
-          preDecisions={preDecisionsDoc.rows}
-          activity={activityDoc.rows}
-          onImportExternal={admin ? handleImportExternal : undefined}
-          importingExternal={importingExt}
-          onLockDecision={async (args: FinalLockArgs) => {
-            const c = reviewableForView.find(x => x.company_id === args.companyId);
-            if (!c) throw new Error('Company not found');
-            // Upsert master row.
-            const existing = master.rows.find(m => m.company_id === args.companyId);
-            // Determine the company-level fund_code: first per-pillar fund picked,
-            // so the master sheet's status panel still shows a representative fund.
-            const repFund = args.interventions.find(i => i.fund_code)?.fund_code || c.fund_code || '';
-            if (existing) {
-              await master.updateRow(args.companyId, {
-                status: args.status,
-                profile_manager_email: args.pmEmail,
-                ...(repFund ? { fund_code: repFund } : {}),
-              });
-            } else {
-              await master.createRow({
-                company_id: args.companyId,
-                company_name: args.companyName,
-                cohort: 'E3',
-                status: args.status,
-                stage: args.status,
-                sector: c.sector || '',
-                city: c.city || '',
-                governorate: c.governorate || '',
-                employee_count: c.employee_count || '',
-                fund_code: repFund,
-                profile_manager_email: args.pmEmail,
-              } as Master);
-            }
-            // Materialize the per-pillar Intervention Assignment rows.
-            const now = new Date().toISOString();
-            const existingPairs = new Set(
-              assignments.rows
-                .filter(a => a.company_id === args.companyId)
-                .map(a => `${a.intervention_type}::${a.sub_intervention || ''}`)
-            );
-            for (const i of args.interventions) {
-              const key = `${i.pillar}::${i.sub || ''}`;
-              if (existingPairs.has(key)) continue;
-              await assignments.createRow({
-                assignment_id: `asn-${args.companyId}-${i.pillar}-${i.sub || 'all'}-${now}`,
-                company_id: args.companyId,
-                intervention_type: i.pillar,
-                sub_intervention: i.sub || '',
-                fund_code: i.fund_code,
-                status: 'Planned',
-                start_date: '',
-                end_date: '',
-                owner_email: args.pmEmail,
-                budget_usd: '',
-                notes: '',
-              } as Assignment);
-            }
-            logActivity('finalize_locked', args.companyId, {
-              field: 'status',
-              new_value: args.status,
-              details: `${args.interventions.length} intervention(s) [${args.interventions.map(i => `${i.pillar}/${i.fund_code}`).join(', ')}]; PM=${args.pmEmail || '—'}`,
-            });
-            await master.refresh();
-            await assignments.refresh();
-          }}
-        />
-      )}
-
-      {view === 'imports' && isSelectionMode && (
-        <ImportsSeedsView
-          loading={importingExt}
-          onImport={admin ? handleImportExternal : undefined}
-          commentsCount={comments.rows.length}
-          preDecisionsCount={preDecisionsDoc.rows.length}
-        />
-      )}
-
-      {view === 'activity' && isSelectionMode && (
-        <SelectionActivityView rows={activityDoc.rows} />
-      )}
-
-      {view === 'dashboard' && !isSelectionMode && (
+      {view === 'dashboard' && (
         <CompanyDashboard
           rows={filteredBySavedView}
           interviewedCount={interviewedCount}
@@ -1798,7 +1295,7 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
         />
       )}
 
-      {view === 'pipeline' && !isSelectionMode && (
+      {view === 'pipeline' && (
         <CompanyPipelineKanban
           rows={filteredBySelection}
           reviewSummaryByCompany={reviewSummaryByCompany}
@@ -1807,7 +1304,7 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
         />
       )}
 
-      {view === 'roster' && !isSelectionMode && (
+      {view === 'roster' && (
         <>
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
             <span>
@@ -2356,108 +1853,6 @@ function PMInitials({ name }: { name: string }) {
   return (
     <div className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${tone}`}>
       {initialsOf(name)}
-    </div>
-  );
-}
-
-// ─── Selection-mode tabs ─────────────────────────────────────────────
-
-function ImportsSeedsView({
-  loading,
-  onImport,
-  commentsCount,
-  preDecisionsCount,
-}: {
-  loading: boolean;
-  onImport?: () => void;
-  commentsCount: number;
-  preDecisionsCount: number;
-}) {
-  return (
-    <Card>
-      <CardHeader
-        title="External imports — Israa CSV + Raouf docx"
-        subtitle="Pulls Israa's voting CSV and Raouf's narrative notes into Company Comments + Pre-decision Recommendations. Idempotent — already-imported entries are skipped."
-      />
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Tile label="Comments in workbook" value={commentsCount} tone="navy" />
-        <Tile label="Pre-decision recs" value={preDecisionsCount} tone="teal" />
-        <Tile label="Israa source" value="Voting.csv" hint="52 companies × 9 pillars" tone="amber" />
-        <Tile label="Raouf source" value="Notes.docx" hint="Narrative + phrase match" tone="orange" />
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        {onImport ? (
-          <Button onClick={onImport} disabled={loading}>
-            {loading ? 'Importing…' : 'Run import (admin only)'}
-          </Button>
-        ) : (
-          <p className="text-xs italic text-slate-500">Admins only — Zaid / Israa / Raouf can run the import.</p>
-        )}
-        <p className="text-xs text-slate-500">
-          Re-running adds nothing for entries already on the sheet. Edited Israa CSV / Raouf docx content WILL re-import.
-        </p>
-      </div>
-    </Card>
-  );
-}
-
-function SelectionActivityView({ rows }: { rows: ActivityRow[] }) {
-  const filtered = useMemo(() => {
-    const include = new Set(['review_saved', 'comment_added', 'pm_assigned', 'finalize_locked', 'import_external', 'pre_decision_added']);
-    return rows.filter(r => include.has(r.action));
-  }, [rows]);
-  return (
-    <Card>
-      <CardHeader
-        title="Selection activity"
-        subtitle="Reviews saved, comments added, PMs assigned, decisions locked, imports run."
-      />
-      {filtered.length === 0 ? (
-        <EmptyState icon={<RefreshCw className="h-5 w-5" />} title="No activity yet" />
-      ) : (
-        <ul className="space-y-1.5">
-          {filtered
-            .slice()
-            .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''))
-            .slice(0, 200)
-            .map(r => (
-              <li key={r.activity_id} className="rounded-md border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-bold text-navy-500 dark:text-slate-100">{r.user_email ? displayName(r.user_email) : '—'}</span>
-                  <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-600 dark:bg-navy-800 dark:text-slate-300">
-                    {r.action.replace(/_/g, ' ')}
-                  </span>
-                  <span className="text-[10px] text-slate-500">{r.timestamp ? new Date(r.timestamp).toLocaleString() : ''}</span>
-                </div>
-                {(r.field || r.new_value || r.details) && (
-                  <div className="mt-1 text-[11px] text-slate-600 dark:text-slate-300">
-                    {r.field && <span className="font-semibold">{r.field}: </span>}
-                    {r.new_value && <span>{r.new_value}</span>}
-                    {r.details && <span className="ml-1 italic text-slate-500">· {r.details}</span>}
-                  </div>
-                )}
-              </li>
-            ))}
-        </ul>
-      )}
-    </Card>
-  );
-}
-
-function Tile({ label, value, hint, tone }: { label: string; value: string | number; hint?: string; tone: 'navy' | 'teal' | 'amber' | 'orange' }) {
-  const cls =
-    tone === 'navy'
-      ? 'bg-navy-50 text-navy-800 dark:bg-navy-900 dark:text-slate-100'
-      : tone === 'teal'
-      ? 'bg-teal-50 text-brand-teal dark:bg-teal-950'
-      : tone === 'amber'
-      ? 'bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-200'
-      : 'bg-orange-50 text-orange-900 dark:bg-orange-950 dark:text-orange-200';
-  return (
-    <div className={`rounded-md border border-slate-200 px-3 py-2 dark:border-navy-700 ${cls}`}>
-      <div className="text-[9px] font-bold uppercase tracking-wider opacity-70">{label}</div>
-      <div className="text-lg font-bold">{value}</div>
-      {hint && <div className="text-[10px] opacity-70">{hint}</div>}
     </div>
   );
 }
