@@ -74,6 +74,39 @@ export const ACTIVITY_HEADERS = [
   'details',
 ];
 
+// Shared interviewed-list aliases. One row per schedule_name; the
+// applicant_company_name field points at the Source Data company the
+// schedule entry should be matched to. Used to overlay the Interviewed
+// status when the team's spelling drifts from the master sheet.
+export type InterviewAlias = {
+  alias_id: string;            // slugged schedule_name; one row per schedule_name
+  schedule_name: string;       // exact value from interviewedSource.ts
+  applicant_company_name: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  updated_by: string;
+};
+
+export const ALIAS_HEADERS = [
+  'alias_id',
+  'schedule_name',
+  'applicant_company_name',
+  'created_by',
+  'created_at',
+  'updated_at',
+  'updated_by',
+];
+
+// Stable id for an alias = lowercased + dashed schedule name.
+export function aliasIdFor(scheduleName: string): string {
+  return (scheduleName || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'unknown';
+}
+
 // Per-company aggregation of all team reviews — what the kanban card and
 // roster column show: total reviewer count, breakdown by decision, the
 // modal recommendation, and whether there's divergence (>1 distinct vote).

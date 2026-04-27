@@ -29,6 +29,10 @@ export const SHEETS: Record<string, ModuleConfig> = {
       reviews: 'Reviews',
       comments: 'Company Comments',
       activity: 'Activity Log',
+      // Shared interviewed-list aliases. Each row maps a schedule-name
+      // (from interviewedSource.ts) to the matching applicant in Source
+      // Data so every team member sees the same overrides.
+      interviewAliases: 'Interview Aliases',
     },
   },
   procurement: {

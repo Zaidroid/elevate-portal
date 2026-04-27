@@ -41,11 +41,13 @@ import { ExpandableCompanyCard } from './ExpandableCompanyCard';
 import type { CardCompany } from './ExpandableCompanyCard';
 import {
   ACTIVITY_HEADERS,
+  ALIAS_HEADERS,
   COMMENTS_HEADERS,
   REVIEWS_HEADERS,
+  aliasIdFor,
   summarizeReviews,
 } from './reviewTypes';
-import type { CompanyComment, Review, ReviewSummary } from './reviewTypes';
+import type { CompanyComment, InterviewAlias, Review, ReviewSummary } from './reviewTypes';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
 // Company schema so keys are camelCase.
@@ -195,10 +197,12 @@ export function CompaniesPage() {
     { userEmail: user?.email }
   );
 
-  // Auto-create the post-interview review tabs (Reviews / Company Comments /
-  // Activity Log) on first mount if the workbook doesn't have them yet. The
-  // user never has to re-upload the file — the tabs appear in-place with the
-  // canonical headers and useSheetDoc starts working immediately.
+  // Auto-create the team-shared tabs (Reviews / Company Comments / Activity
+  // Log / Interview Aliases) on first mount if the workbook doesn't have
+  // them yet. The user never has to re-upload the file — the tabs appear
+  // in-place with the canonical headers and useSheetDoc starts working
+  // immediately. Aliases used to live in localStorage; they're now shared
+  // with the team via this sheet tab.
   const [schemaReady, setSchemaReady] = useState(false);
   useEffect(() => {
     if (!masterSheetId) return;
@@ -209,6 +213,7 @@ export function CompaniesPage() {
           ensureSchema(masterSheetId, getTab('companies', 'reviews'), REVIEWS_HEADERS),
           ensureSchema(masterSheetId, getTab('companies', 'comments'), COMMENTS_HEADERS),
           ensureSchema(masterSheetId, getTab('companies', 'activity'), ACTIVITY_HEADERS),
+          ensureSchema(masterSheetId, getTab('companies', 'interviewAliases'), ALIAS_HEADERS),
         ]);
         if (!cancelled) setSchemaReady(true);
       } catch (err) {
@@ -234,27 +239,59 @@ export function CompaniesPage() {
     { userEmail: user?.email }
   );
 
+  const aliasesDoc = useSheetDoc<InterviewAlias>(
+    schemaReady && masterSheetId ? masterSheetId : null,
+    getTab('companies', 'interviewAliases'),
+    'alias_id',
+    { userEmail: user?.email }
+  );
+
   // Static, hand-maintained list of Cohort 3 interviewed companies (see
   // interviewedSource.ts for the why). Used to overlay the "Interviewed"
   // status onto the master sheet without ever demoting a higher status.
   //
   // When a schedule name doesn't spell-match an applicant in Source Data,
-  // the user can manually alias it to the right company below. Aliases live
-  // in localStorage so they persist across reloads, and the effective
-  // interviewed set is (static list) ∪ (alias targets).
-  const ALIAS_KEY = 'companies.interviewedAliases.v1';
-  const [aliases, setAliases] = useState<Record<string, string>>(() => {
-    try { return JSON.parse(localStorage.getItem(ALIAS_KEY) || '{}'); }
-    catch { return {}; }
-  });
-  const setAlias = (scheduleName: string, target: string) => {
-    setAliases(prev => {
-      const next = { ...prev };
-      const t = (target || '').trim();
-      if (!t) delete next[scheduleName]; else next[scheduleName] = t;
-      try { localStorage.setItem(ALIAS_KEY, JSON.stringify(next)); } catch { /* quota */ }
-      return next;
-    });
+  // the user can alias it to the right company. Aliases live in the
+  // shared Interview Aliases tab so every team member sees the same set.
+  const aliases = useMemo<Record<string, string>>(() => {
+    const m: Record<string, string> = {};
+    for (const r of aliasesDoc.rows) {
+      const n = (r.schedule_name || '').trim();
+      const t = (r.applicant_company_name || '').trim();
+      if (n && t) m[n] = t;
+    }
+    return m;
+  }, [aliasesDoc.rows]);
+
+  const setAlias = async (scheduleName: string, target: string) => {
+    const t = (target || '').trim();
+    const id = aliasIdFor(scheduleName);
+    const existing = aliasesDoc.rows.find(r => r.alias_id === id);
+    const now = new Date().toISOString();
+    try {
+      if (!t) {
+        // Clear alias.
+        if (existing) await aliasesDoc.deleteRow(id);
+      } else if (existing) {
+        await aliasesDoc.updateRow(id, {
+          applicant_company_name: t,
+          updated_at: now,
+          updated_by: user?.email || '',
+        });
+      } else {
+        await aliasesDoc.createRow({
+          alias_id: id,
+          schedule_name: scheduleName,
+          applicant_company_name: t,
+          created_by: user?.email || '',
+          created_at: now,
+          updated_at: now,
+          updated_by: user?.email || '',
+        });
+      }
+    } catch (e) {
+      toast.error('Alias save failed', (e as Error).message);
+    }
   };
   const interviewedSet = useMemo(() => {
     const s = new Set(INTERVIEWED_NAMES);
@@ -890,9 +927,9 @@ export function CompaniesPage() {
               )}
 
               <div className="mt-2 text-[11px] opacity-80">
-                Aliases are saved per-browser (localStorage). To make them permanent, edit the entry in{' '}
-                <code className="rounded bg-amber-100 px-1 dark:bg-amber-900">interviewedSource.ts</code>
-                {' '}to match Source Data's spelling.
+                Aliases are saved to the shared <code className="rounded bg-amber-100 px-1 dark:bg-amber-900">Interview Aliases</code> tab in the Companies workbook —
+                every team member sees the same matches. Permanent fixes can also be made by editing{' '}
+                <code className="rounded bg-amber-100 px-1 dark:bg-amber-900">interviewedSource.ts</code> to match Source Data's spelling.
               </div>
             </div>
           )}

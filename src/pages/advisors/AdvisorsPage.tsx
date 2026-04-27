@@ -266,7 +266,15 @@ export function AdvisorsPage() {
       }
       toast.success(`${adv.full_name || advisorId} → ${nextLabel}`);
     } catch (err) {
-      toast.error(`Move failed: ${(err as Error).message}`);
+      const msg = (err as Error).message || '';
+      // Surface a more actionable hint when the API returns a 403 — the
+      // signed-in user almost always has only Viewer access on the
+      // Advisors workbook in Drive.
+      if (/permission|403|insufficient|read.only|cannot edit/i.test(msg)) {
+        toast.error('No edit access on the Advisors sheet. Ask the workbook owner to share it with you as Editor in Drive.');
+      } else {
+        toast.error(`Move failed: ${msg}`);
+      }
     }
   };
 
