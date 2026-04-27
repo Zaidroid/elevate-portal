@@ -1175,6 +1175,7 @@ function ReviewQueueBoard({
 function FinalCohortBoard({
   companies,
   reviews,
+  comments,
   preDecisions,
   assignments,
   dutchLogframe,
@@ -1218,6 +1219,16 @@ function FinalCohortBoard({
     }
     return m;
   }, [preDecisions]);
+
+  const commentsByCompany = useMemo(() => {
+    const m = new Map<string, CompanyComment[]>();
+    for (const c of comments) {
+      const arr = m.get(c.company_id) || [];
+      arr.push(c);
+      m.set(c.company_id, arr);
+    }
+    return m;
+  }, [comments]);
 
   // Per-company team consensus — used to scope to "selected" (Recommend
   // by team OR already locked OR master.status === Selected/Recommended).
@@ -1427,306 +1438,36 @@ function FinalCohortBoard({
         })}
         </div>
 
-        {/* Right rail — persistent assignment panel when a company is
-            selected, else live insights based on the logframe. */}
-        {focused ? (
-          <Stage2AssignmentPanel
-            company={focused}
-            preDecs={preDecsByCompany.get(focused.company_id) || []}
-            existingAssigns={assignsByCompany.get(focused.company_id) || []}
-            onClose={() => setFocused(null)}
-            onLockDecision={onLockDecision}
-          />
-        ) : (
-          <LiveInsightsPanel
-            totalSelected={totalSelected}
-            totalCohort={companies.length}
-            lockedTotal={lockedTotal}
-            pillarCompanyCounts={pillarCompanyCounts}
-            subCompanyCounts={subCompanyCounts}
-            dutchAssignsCount={dutchAssignsCount}
-            sidaAssignsCount={sidaAssignsCount}
-            dutchTargets={dutchTargets}
-            sidaTargets={sidaTargets}
-          />
-        )}
+        {/* Live insights side rail — always visible, updates as locks happen. */}
+        <LiveInsightsPanel
+          totalSelected={totalSelected}
+          totalCohort={companies.length}
+          lockedTotal={lockedTotal}
+          pillarCompanyCounts={pillarCompanyCounts}
+          subCompanyCounts={subCompanyCounts}
+          dutchAssignsCount={dutchAssignsCount}
+          sidaAssignsCount={sidaAssignsCount}
+          dutchTargets={dutchTargets}
+          sidaTargets={sidaTargets}
+        />
       </div>
+
+      <CompanyFocusDrawer
+        company={focused}
+        onClose={() => setFocused(null)}
+        comments={focused ? (commentsByCompany.get(focused.company_id) || []) : []}
+        preDecs={focused ? (preDecsByCompany.get(focused.company_id) || []) : []}
+        reviewsForCompany={focused ? reviews.filter(r => r.company_id === focused.company_id) : []}
+        existingAssigns={focused ? (assignsByCompany.get(focused.company_id) || []) : []}
+        reviewerEmail=""
+        mode="lock"
+        onLockDecision={onLockDecision}
+        onAssignPM={onAssignPM}
+      />
     </div>
   );
 }
 
-// ─── Stage2AssignmentPanel — persistent right rail for Stage 2 ───────
-// Replaces the modal focus drawer for Stage 2. When a company is
-// clicked in the AM lanes, this panel shows the full assignment form:
-// status / AM / per-pillar pillar+sub+donor picker / Lock button.
-
-function Stage2AssignmentPanel({
-  company,
-  preDecs,
-  existingAssigns,
-  onClose,
-  onLockDecision,
-}: {
-  company: ReviewableCompany;
-  preDecs: PreDecisionRecommendation[];
-  existingAssigns: Assignment[];
-  onClose: () => void;
-  onLockDecision: (args: FinalLockArgs) => Promise<void>;
-}) {
-  const [lockStatus, setLockStatus] = useState<'Selected' | 'Hold' | 'Waitlist'>('Selected');
-  const [lockPm, setLockPm] = useState('');
-  const [lockPillars, setLockPillars] = useState<Set<string>>(new Set());
-  const [lockSubs, setLockSubs] = useState<Set<string>>(new Set());
-  const [lockFund, setLockFund] = useState<Record<string, string>>({});
-  const [perSubFund, setPerSubFund] = useState<Record<string, string>>({});
-  const [locking, setLocking] = useState(false);
-
-  // Reset on company change with full taxonomy migration.
-  useEffect(() => {
-    setLockStatus(((company.status === 'Hold' || company.status === 'Waitlist' || company.status === 'Rejected') ? (company.status === 'Rejected' ? 'Waitlist' : (company.status as 'Hold' | 'Waitlist')) : 'Selected'));
-    setLockPm(company.profile_manager_email || '');
-    const pSet = new Set<string>();
-    const sSet = new Set<string>();
-    const funds: Record<string, string> = {};
-    const subFunds: Record<string, string> = {};
-    for (const a of existingAssigns) {
-      const r = resolveIntervention(a.intervention_type);
-      const pillarCode = r?.pillar || pillarFor(a.intervention_type)?.code || a.intervention_type;
-      if (pillarCode) {
-        pSet.add(pillarCode);
-        if (a.fund_code) funds[pillarCode] = a.fund_code;
-      }
-      const sub = r?.sub || a.sub_intervention;
-      if (sub) {
-        sSet.add(sub);
-        if (a.fund_code) subFunds[sub] = a.fund_code;
-      }
-    }
-    if (pSet.size === 0) {
-      for (const r of preDecs) {
-        const resolved = resolveIntervention(r.pillar);
-        const pillarCode = resolved?.pillar || pillarFor(r.pillar)?.code || r.pillar;
-        if (pillarCode) {
-          pSet.add(pillarCode);
-          if (r.fund_hint && !funds[pillarCode]) funds[pillarCode] = r.fund_hint;
-        }
-        const sub = resolved?.sub || r.sub_intervention;
-        if (sub) sSet.add(sub);
-      }
-    }
-    setLockPillars(pSet);
-    setLockSubs(sSet);
-    setLockFund({ ...Object.fromEntries(PILLARS.map(p => [p.code, '97060'])), ...funds });
-    setPerSubFund(subFunds);
-  }, [company, existingAssigns, preDecs]);
-
-  const togglePillar = (code: string) => {
-    setLockPillars(prev => {
-      const next = new Set(prev);
-      if (next.has(code)) {
-        next.delete(code);
-        const dead = new Set(PILLARS.find(p => p.code === code)?.subInterventions || []);
-        if (dead.size > 0) {
-          setLockSubs(prevS => {
-            const ns = new Set(prevS);
-            for (const s of dead) ns.delete(s);
-            return ns;
-          });
-        }
-      } else next.add(code);
-      return next;
-    });
-  };
-
-  const toggleSub = (sub: string, parentPillar: string) => {
-    setLockSubs(prev => {
-      const next = new Set(prev);
-      if (next.has(sub)) next.delete(sub); else next.add(sub);
-      return next;
-    });
-    setLockPillars(prev => { const next = new Set(prev); next.add(parentPillar); return next; });
-  };
-
-  const handleLock = async () => {
-    if (!lockPm) return;
-    setLocking(true);
-    try {
-      const interventions: FinalLockArgs['interventions'] = [];
-      for (const p of lockPillars) {
-        const subsForP = Array.from(lockSubs).filter(s => pillarFor(s)?.code === p);
-        const pillarFund = lockFund[p] || '';
-        if (subsForP.length === 0) {
-          interventions.push({ pillar: p, sub: '', fund_code: pillarFund });
-        } else {
-          for (const s of subsForP) {
-            interventions.push({ pillar: p, sub: s, fund_code: perSubFund[s] || pillarFund });
-          }
-        }
-      }
-      await onLockDecision({
-        companyId: company.company_id,
-        companyName: company.company_name,
-        status: lockStatus,
-        pmEmail: lockPm,
-        interventions,
-      });
-      onClose();
-    } finally {
-      setLocking(false);
-    }
-  };
-
-  return (
-    <div className="lg:sticky lg:top-3 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
-      <Card className="border-l-4 border-l-brand-teal">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Assigning interventions</div>
-            <h3 className="truncate text-sm font-bold text-navy-500 dark:text-slate-100">{company.company_name}</h3>
-            <div className="text-[11px] text-slate-500">
-              {[company.sector, company.city, company.governorate].filter(Boolean).join(' · ') || 'No detail'}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 hover:border-brand-teal hover:text-brand-teal dark:border-navy-700 dark:bg-navy-900 dark:text-slate-300"
-            title="Close — show insights"
-          >
-            ✕
-          </button>
-        </div>
-
-        {/* Status + AM compact picker */}
-        <div className="mt-2 grid grid-cols-2 gap-1">
-          {(['Selected', 'Hold', 'Waitlist'] as const).map(s => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setLockStatus(s)}
-              className={`col-span-1 rounded-md border-2 px-2 py-1 text-[11px] font-bold ${
-                lockStatus === s
-                  ? s === 'Selected' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : s === 'Hold' ? 'border-amber-500 bg-amber-50 text-amber-800' : 'border-orange-500 bg-orange-50 text-orange-800'
-                  : 'border-slate-200 bg-white text-slate-700 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200'
-              }`}
-            >{s}</button>
-          ))}
-        </div>
-        <div className="mt-2 grid grid-cols-3 gap-1">
-          {ACCOUNT_MANAGERS.map(am => (
-            <button
-              key={am.email}
-              type="button"
-              onClick={() => setLockPm(am.email)}
-              className={`rounded-md border-2 px-2 py-1 text-[11px] font-bold ${
-                lockPm === am.email
-                  ? 'border-brand-teal bg-teal-50 text-brand-teal dark:bg-teal-950'
-                  : 'border-slate-200 bg-white text-slate-700 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200'
-              }`}
-            >{am.name.split(' ')[0]}</button>
-          ))}
-        </div>
-      </Card>
-
-      {/* Per-pillar + per-sub + per-donor matrix */}
-      <Card className="mt-3">
-        <CardHeader title="Interventions + donor" subtitle="Pick a pillar, then sub + donor for each. Sub-level donor wins over pillar-level." />
-        <div className="space-y-2">
-          {PILLARS.map(p => {
-            const isOn = lockPillars.has(p.code);
-            const pillarFund = lockFund[p.code] || '';
-            return (
-              <div key={p.code} className="rounded-md border border-slate-200 dark:border-navy-700">
-                <div className="flex items-center justify-between gap-2 bg-slate-50 px-2 py-1 dark:bg-navy-800/50">
-                  <label className="flex flex-1 cursor-pointer items-center gap-2 text-[12px]">
-                    <input
-                      type="checkbox"
-                      checked={isOn}
-                      onChange={() => togglePillar(p.code)}
-                      className="h-3.5 w-3.5"
-                    />
-                    <span className="font-bold text-navy-500 dark:text-slate-100">{p.label}</span>
-                  </label>
-                  {isOn && (
-                    <select
-                      value={pillarFund}
-                      onChange={e => setLockFund({ ...lockFund, [p.code]: e.currentTarget.value })}
-                      className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
-                    >
-                      <option value="">Donor?</option>
-                      <option value="97060">Dutch (97060)</option>
-                      <option value="91763">SIDA (91763)</option>
-                    </select>
-                  )}
-                </div>
-                {isOn && p.subInterventions.length > 0 && (
-                  <ul className="space-y-0.5 px-2 py-1">
-                    {p.subInterventions.map(s => {
-                      const subOn = lockSubs.has(s);
-                      const subFund = perSubFund[s] || '';
-                      return (
-                        <li key={s} className="flex items-center justify-between gap-2 text-[11px]">
-                          <label className="flex flex-1 cursor-pointer items-center gap-1.5">
-                            <input
-                              type="checkbox"
-                              checked={subOn}
-                              onChange={() => toggleSub(s, p.code)}
-                              className="h-3 w-3"
-                            />
-                            <span className={subOn ? 'font-semibold text-navy-500 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}>{s}</span>
-                          </label>
-                          {subOn && (
-                            <select
-                              value={subFund}
-                              onChange={e => setPerSubFund({ ...perSubFund, [s]: e.currentTarget.value })}
-                              className="rounded border border-slate-200 bg-white px-1 py-0 text-[9px] dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
-                              title="Override pillar-level donor for this sub"
-                            >
-                              <option value="">use pillar</option>
-                              <option value="97060">Dutch</option>
-                              <option value="91763">SIDA</option>
-                            </select>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </Card>
-
-      {preDecs.length > 0 && (
-        <Card className="mt-3 border-l-4 border-l-purple-500">
-          <CardHeader title={`Pre-decision recs · ${preDecs.length}`} subtitle={Array.from(new Set(preDecs.map(p => displayName(p.author_email)))).join(', ')} />
-          <ul className="space-y-1">
-            {preDecs.map(r => (
-              <li key={r.recommendation_id} className="rounded border border-purple-100 bg-purple-50 p-1.5 text-[11px] dark:border-purple-900 dark:bg-purple-950/30">
-                <span className="font-bold text-purple-800 dark:text-purple-200">
-                  {r.pillar}{r.sub_intervention ? ` · ${r.sub_intervention}` : ''}
-                </span>
-                {r.note && <div className="mt-0.5 whitespace-pre-wrap text-slate-700 dark:text-slate-300">{r.note}</div>}
-              </li>
-            ))}
-          </ul>
-        </Card>
-      )}
-
-      <div className="sticky bottom-0 mt-3 rounded-md border border-slate-200 bg-white p-2 dark:border-navy-700 dark:bg-navy-900">
-        <Button onClick={handleLock} disabled={locking || !lockPm || lockPillars.size === 0} className="w-full">
-          {locking ? 'Locking…' : 'Lock decision'}
-        </Button>
-        {(!lockPm || lockPillars.size === 0) && (
-          <p className="mt-1 text-[10px] text-slate-500">
-            {!lockPm ? 'Pick an Account Manager.' : 'Pick at least one intervention.'}
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
 
 // ─── Shared focus drawer ─────────────────────────────────────────────
 // Right-side drawer used by both Stage 1 and Stage 2. Shows the company
@@ -1776,6 +1517,7 @@ function CompanyFocusDrawer({
   const [lockPillars, setLockPillars] = useState<Set<string>>(new Set());
   const [lockSubs, setLockSubs] = useState<Set<string>>(new Set());
   const [lockFund, setLockFund] = useState<Record<string, string>>({});
+  const [perSubFund, setPerSubFund] = useState<Record<string, string>>({});
   const [locking, setLocking] = useState(false);
 
   // Reset state when the focused company changes.
@@ -1823,6 +1565,7 @@ function CompanyFocusDrawer({
       const pSet = new Set<string>();
       const sSet = new Set<string>();
       const funds: Record<string, string> = {};
+      const subFunds: Record<string, string> = {};
       for (const a of existingAssigns || []) {
         // intervention_type might be old (e.g., 'TTH') or new ('CB'); resolve.
         const r = resolveIntervention(a.intervention_type);
@@ -1833,7 +1576,10 @@ function CompanyFocusDrawer({
         }
         // The sub from resolve OR the explicit sub_intervention.
         const sub = r?.sub || a.sub_intervention;
-        if (sub) sSet.add(sub);
+        if (sub) {
+          sSet.add(sub);
+          if (a.fund_code) subFunds[sub] = a.fund_code;
+        }
       }
       // Pre-decision pillars pre-fill when nothing was locked yet.
       if (pSet.size === 0) {
@@ -1851,6 +1597,7 @@ function CompanyFocusDrawer({
       setLockPillars(pSet);
       setLockSubs(sSet);
       setLockFund({ ...Object.fromEntries(PILLARS.map(p => [p.code, '97060'])), ...funds });
+      setPerSubFund(subFunds);
     }
   }, [company, myReview, mode, existingAssigns, preDecs]);
 
@@ -1919,9 +1666,14 @@ function CompanyFocusDrawer({
       const interventions: FinalLockArgs['interventions'] = [];
       for (const p of lockPillars) {
         const subsForP = Array.from(lockSubs).filter(s => pillarFor(s)?.code === p);
-        const fund = lockFund[p] || '';
-        if (subsForP.length === 0) interventions.push({ pillar: p, sub: '', fund_code: fund });
-        else for (const s of subsForP) interventions.push({ pillar: p, sub: s, fund_code: fund });
+        const pillarFund = lockFund[p] || '';
+        if (subsForP.length === 0) {
+          interventions.push({ pillar: p, sub: '', fund_code: pillarFund });
+        } else {
+          for (const s of subsForP) {
+            interventions.push({ pillar: p, sub: s, fund_code: perSubFund[s] || pillarFund });
+          }
+        }
       }
       await onLockDecision({
         companyId: company.company_id,
@@ -2260,55 +2012,76 @@ function CompanyFocusDrawer({
               </Card>
 
               <Card>
-                <CardHeader title="Per-pillar interventions + funds" />
-                <div className="space-y-1.5">
-                  {PILLARS.map(p => (
-                    <div key={p.code} className="rounded-md border border-slate-200 p-2 dark:border-navy-700">
-                      <div className="flex items-center justify-between gap-2">
-                        <label className="flex cursor-pointer items-center gap-2 text-xs">
-                          <input
-                            type="checkbox"
-                            checked={lockPillars.has(p.code)}
-                            onChange={() => togglePillar(p.code, lockPillars, setLockPillars, lockSubs, setLockSubs)}
-                          />
-                          <span className="font-bold">{p.label}</span>
-                        </label>
-                        {lockPillars.has(p.code) && (
-                          <select
-                            value={lockFund[p.code] || ''}
-                            onChange={e => setLockFund({ ...lockFund, [p.code]: e.currentTarget.value })}
-                            className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
-                          >
-                            <option value="">Fund?</option>
-                            <option value="97060">Dutch (97060)</option>
-                            <option value="91763">SIDA (91763)</option>
-                          </select>
+                <CardHeader title="Interventions + donor" subtitle="Pick a pillar, then sub + donor for each. Sub-level donor wins over pillar-level." />
+                <div className="space-y-2">
+                  {PILLARS.map(p => {
+                    const isOn = lockPillars.has(p.code);
+                    const pillarFund = lockFund[p.code] || '';
+                    return (
+                      <div key={p.code} className="rounded-md border border-slate-200 dark:border-navy-700">
+                        <div className="flex items-center justify-between gap-2 bg-slate-50 px-2 py-1 dark:bg-navy-800/50">
+                          <label className="flex flex-1 cursor-pointer items-center gap-2 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={isOn}
+                              onChange={() => togglePillar(p.code, lockPillars, setLockPillars, lockSubs, setLockSubs)}
+                              className="h-3.5 w-3.5"
+                            />
+                            <span className="font-bold text-navy-500 dark:text-slate-100">{p.label}</span>
+                          </label>
+                          {isOn && (
+                            <select
+                              value={pillarFund}
+                              onChange={e => setLockFund({ ...lockFund, [p.code]: e.currentTarget.value })}
+                              className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+                            >
+                              <option value="">Donor?</option>
+                              <option value="97060">Dutch (97060)</option>
+                              <option value="91763">SIDA (91763)</option>
+                            </select>
+                          )}
+                        </div>
+                        {isOn && p.subInterventions.length > 0 && (
+                          <ul className="space-y-0.5 px-2 py-1">
+                            {p.subInterventions.map(s => {
+                              const subOn = lockSubs.has(s);
+                              const subFund = perSubFund[s] || '';
+                              return (
+                                <li key={s} className="flex items-center justify-between gap-2 text-[11px]">
+                                  <label className="flex flex-1 cursor-pointer items-center gap-1.5">
+                                    <input
+                                      type="checkbox"
+                                      checked={subOn}
+                                      onChange={() => {
+                                        const next = new Set(lockSubs);
+                                        if (next.has(s)) next.delete(s); else next.add(s);
+                                        setLockSubs(next);
+                                        setLockPillars(prev => { const np = new Set(prev); np.add(p.code); return np; });
+                                      }}
+                                      className="h-3 w-3"
+                                    />
+                                    <span className={subOn ? 'font-semibold text-navy-500 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}>{s}</span>
+                                  </label>
+                                  {subOn && (
+                                    <select
+                                      value={subFund}
+                                      onChange={e => setPerSubFund({ ...perSubFund, [s]: e.currentTarget.value })}
+                                      className="rounded border border-slate-200 bg-white px-1 py-0 text-[9px] dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+                                      title="Override pillar-level donor for this sub"
+                                    >
+                                      <option value="">use pillar</option>
+                                      <option value="97060">Dutch</option>
+                                      <option value="91763">SIDA</option>
+                                    </select>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
                         )}
                       </div>
-                      {lockPillars.has(p.code) && p.subInterventions.length > 0 && (
-                        <div className="mt-1 flex flex-wrap gap-1">
-                          {p.subInterventions.map(s => (
-                            <button
-                              key={s}
-                              type="button"
-                              onClick={() => {
-                                const next = new Set(lockSubs);
-                                if (next.has(s)) next.delete(s); else next.add(s);
-                                setLockSubs(next);
-                              }}
-                              className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
-                                lockSubs.has(s)
-                                  ? 'border-brand-teal bg-brand-teal text-white'
-                                  : 'border-slate-300 bg-white text-slate-700 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-300'
-                              }`}
-                            >
-                              {s.replace(/^MA-/, '')}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </Card>
 
