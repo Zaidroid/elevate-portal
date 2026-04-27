@@ -48,6 +48,7 @@ import {
   ACTIVITY_HEADERS,
   ALIAS_HEADERS,
   COMMENTS_HEADERS,
+  PRE_DECISION_HEADERS,
   REMOVED_HEADERS,
   REVIEWS_HEADERS,
   aliasIdFor,
@@ -55,7 +56,8 @@ import {
   summarizeReviews,
 } from './reviewTypes';
 import { repairDashboard } from './repairDashboard';
-import type { CompanyComment, InterviewAlias, RemovedCompany, Review, ReviewSummary } from './reviewTypes';
+import { fuzzyResolve, importExternalSeed, loadSeed } from './importExternalComments';
+import type { CompanyComment, InterviewAlias, PreDecisionRecommendation, RemovedCompany, Review, ReviewSummary } from './reviewTypes';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
 // Company schema so keys are camelCase.
@@ -240,6 +242,7 @@ export function CompaniesPage() {
           ensureSchema(masterSheetId, getTab('companies', 'activity'), ACTIVITY_HEADERS),
           ensureSchema(masterSheetId, getTab('companies', 'interviewAliases'), ALIAS_HEADERS),
           ensureSchema(masterSheetId, getTab('companies', 'removedCompanies'), REMOVED_HEADERS),
+          ensureSchema(masterSheetId, getTab('companies', 'preDecisions'), PRE_DECISION_HEADERS),
         ]);
         if (!cancelled) setSchemaReady(true);
       } catch (err) {
@@ -281,6 +284,16 @@ export function CompaniesPage() {
     schemaReady && masterSheetId ? masterSheetId : null,
     getTab('companies', 'removedCompanies'),
     'removed_id',
+    { userEmail: user?.email }
+  );
+
+  // Pre-decision Recommendations — sourced from Israa's CSV / Raouf's
+  // docx / future seeds via the importer. Used by Final Decision's
+  // pre-fill logic.
+  const preDecisionsDoc = useSheetDoc<PreDecisionRecommendation>(
+    schemaReady && masterSheetId ? masterSheetId : null,
+    getTab('companies', 'preDecisions'),
+    'recommendation_id',
     { userEmail: user?.email }
   );
 
@@ -935,6 +948,56 @@ export function CompaniesPage() {
       setRepairingDash(false);
     }
   };
+
+  // Import external comments + Pre-decision Recommendations from the
+  // /external-comments-seed.json file produced by
+  // sheet-builders/tools/import_external_comments.py. Idempotent —
+  // already-imported entries are skipped.
+  const [importingExt, setImportingExt] = useState(false);
+  const handleImportExternal = async () => {
+    if (!masterSheetId) return;
+    setImportingExt(true);
+    try {
+      const seed = await loadSeed();
+      if (!seed) {
+        toast.error('Seed missing', 'Could not load /external-comments-seed.json. Re-run the Python parser.');
+        return;
+      }
+      // Build a candidate list for fuzzy resolution: every interviewed
+      // company (joined view) plus every master row that has a name
+      // even if not interviewed.
+      const candidates = joined.map(r => ({ company_id: r.company_id, company_name: r.company_name }));
+      const resolve = (name: string) => fuzzyResolve(name, candidates);
+      const result = await importExternalSeed(seed, {
+        resolve,
+        existingComments: comments.rows,
+        existingRecs: preDecisionsDoc.rows,
+        createComment: row => comments.createRow(row),
+        createRecommendation: row => preDecisionsDoc.createRow(row),
+      });
+      const lines: string[] = [];
+      lines.push(`${result.commentsAdded} comments + ${result.recsAdded} recommendations imported.`);
+      if (result.commentsSkipped + result.recsSkipped > 0) {
+        lines.push(`Skipped ${result.commentsSkipped + result.recsSkipped} already-present entries.`);
+      }
+      if (result.commentsUnmatched.length + result.recsUnmatched.length > 0) {
+        const unmatched = Array.from(new Set([...result.commentsUnmatched, ...result.recsUnmatched])).slice(0, 6).join(', ');
+        lines.push(`${result.commentsUnmatched.length + result.recsUnmatched.length} unmatched names (e.g. ${unmatched}). Add aliases or fix spelling.`);
+      }
+      if (result.errors.length > 0) {
+        lines.push(`${result.errors.length} write error(s). Check console.`);
+        console.warn('[importExternal] errors', result.errors);
+      }
+      toast.success('Import complete', lines.join(' '));
+      await comments.refresh();
+      await preDecisionsDoc.refresh();
+    } catch (e) {
+      toast.error('Import failed', (e as Error).message);
+    } finally {
+      setImportingExt(false);
+    }
+  };
+
   const handleMaterialize = async () => {
     if (!admin) return;
     if (needsMaterialize.length === 0) return;
@@ -1558,6 +1621,10 @@ export function CompaniesPage() {
               assignments: assignments.rows as unknown as Record<string, string>[],
             }, user?.email || 'unknown');
           }}
+          comments={comments.rows}
+          preDecisions={preDecisionsDoc.rows}
+          onImportExternal={admin ? handleImportExternal : undefined}
+          importingExternal={importingExt}
           onLockDecision={async (args: FinalLockArgs) => {
             const c = reviewableForView.find(x => x.company_id === args.companyId);
             if (!c) throw new Error('Company not found');

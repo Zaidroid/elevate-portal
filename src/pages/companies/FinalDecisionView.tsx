@@ -14,13 +14,13 @@
 //     different pillars).
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, Download, Lock, Search } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, Download, Lock, Search, Upload } from 'lucide-react';
 import { Badge, Button, Card, CardHeader, EmptyState, useToast } from '../../lib/ui';
 import type { Tone } from '../../lib/ui';
 import { displayName } from '../../config/team';
 import { ACCOUNT_MANAGERS } from '../../config/team';
 import { PILLARS, pillarFor } from '../../config/interventions';
-import type { Review, ReviewDecision } from './reviewTypes';
+import type { CompanyComment, PreDecisionRecommendation, Review, ReviewDecision } from './reviewTypes';
 import { summarizeReviews } from './reviewTypes';
 import type { ReviewableCompany } from './ReviewView';
 
@@ -63,6 +63,10 @@ export function FinalDecisionView({
   existingAssignments,
   onLockDecision,
   onExport,
+  comments = [],
+  preDecisions = [],
+  onImportExternal,
+  importingExternal = false,
 }: {
   companies: ReviewableCompany[];
   reviews: Review[];
@@ -72,6 +76,13 @@ export function FinalDecisionView({
   existingAssignments: Array<{ company_id: string; intervention_type: string; sub_intervention: string; fund_code: string }>;
   onLockDecision: (args: FinalLockArgs) => Promise<void>;
   onExport?: () => Promise<{ tabName: string; rowsWritten: number; errors: string[] } | void>;
+  // New: per-company comments thread (selection-tool + portal merged)
+  // and pre-decision recommendations (Israa CSV / Raouf docx / future
+  // seeds). Used in the row drill-down dossier and the smart pre-fill.
+  comments?: CompanyComment[];
+  preDecisions?: PreDecisionRecommendation[];
+  onImportExternal?: () => Promise<void>;
+  importingExternal?: boolean;
 }) {
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -87,6 +98,24 @@ export function FinalDecisionView({
     }
     return m;
   }, [reviews]);
+
+  const commentsByCompany = useMemo(() => {
+    const m = new Map<string, CompanyComment[]>();
+    for (const c of comments) {
+      if (!c.company_id) continue;
+      (m.get(c.company_id) || m.set(c.company_id, []).get(c.company_id)!).push(c);
+    }
+    return m;
+  }, [comments]);
+
+  const preDecisionsByCompany = useMemo(() => {
+    const m = new Map<string, PreDecisionRecommendation[]>();
+    for (const r of preDecisions) {
+      if (!r.company_id) continue;
+      (m.get(r.company_id) || m.set(r.company_id, []).get(r.company_id)!).push(r);
+    }
+    return m;
+  }, [preDecisions]);
 
   const assignsByCompany = useMemo(() => {
     const m = new Map<string, typeof existingAssignments>();
@@ -168,6 +197,17 @@ export function FinalDecisionView({
                   className="w-56 rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
                 />
               </div>
+              {onImportExternal && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={importingExternal}
+                  onClick={onImportExternal}
+                  title="Pull Israa's voting CSV + Raouf's notes into Company Comments + Pre-decision Recommendations. Idempotent."
+                >
+                  <Upload className="h-3.5 w-3.5" /> {importingExternal ? 'Importing…' : 'Import Israa + Raouf'}
+                </Button>
+              )}
               {onExport && (
                 <ExportButton onExport={onExport} />
               )}
@@ -189,6 +229,8 @@ export function FinalDecisionView({
               const summary = summarizeReviews(rs);
               const isOpen = expanded.has(c.company_id);
               const existingForCompany = assignsByCompany.get(c.company_id) || [];
+              const cmtsForCompany = commentsByCompany.get(c.company_id) || [];
+              const preDecsForCompany = preDecisionsByCompany.get(c.company_id) || [];
               return (
                 <li key={c.company_id} className="border-b border-slate-100 dark:border-navy-800 last:border-b-0">
                   <button
@@ -219,7 +261,14 @@ export function FinalDecisionView({
                       {c.status ? <Badge tone={FINAL_TONE[(c.status as FinalStatus)] || 'neutral'}>{c.status}</Badge> : <span className="text-slate-400 italic">—</span>}
                     </span>
                     <span className="font-mono text-slate-600 dark:text-slate-300">
-                      {existingForCompany.length > 0 ? `${existingForCompany.length} locked` : <span className="text-slate-400 italic">none</span>}
+                      <div>{existingForCompany.length > 0 ? `${existingForCompany.length} locked` : <span className="text-slate-400 italic">none</span>}</div>
+                      {(cmtsForCompany.length > 0 || preDecsForCompany.length > 0) && (
+                        <div className="text-[10px] text-slate-400">
+                          {cmtsForCompany.length > 0 && `${cmtsForCompany.length}c`}
+                          {cmtsForCompany.length > 0 && preDecsForCompany.length > 0 && ' · '}
+                          {preDecsForCompany.length > 0 && `${preDecsForCompany.length}r`}
+                        </div>
+                      )}
                     </span>
                     <span className="text-right font-mono text-slate-500">{summary.reviewerEmails.length}</span>
                   </button>

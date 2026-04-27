@@ -38,6 +38,12 @@ export const SHEETS: Record<string, ModuleConfig> = {
       // across all team members. Used to permanently kill duplicates
       // and irrelevant entries.
       removedCompanies: 'Removed Companies',
+      // Structured per-company intervention recommendations made
+      // before the final decision session — populated from Israa's
+      // voting CSV, Raouf's notes docx, and any future seeds. The
+      // Final Decision view's pre-fill logic uses these as the
+      // highest-priority hint after existing locks.
+      preDecisions: 'Pre-decision Recommendations',
     },
   },
   procurement: {

@@ -136,6 +136,45 @@ export function removedIdFor(companyName: string): string {
     .slice(0, 76) || 'unknown');
 }
 
+// Pre-decision Recommendations — structured pillar/sub picks captured
+// before tomorrow's final-selection session. Sourced from Israa's
+// voting CSV + Raouf's docx + future authors. Each row is one
+// (company, author, pillar, sub) recommendation with an optional
+// fund_hint and a free-text note. Used by the Final Decision view as
+// the highest-priority pre-fill source after existing locks.
+export type PreDecisionRecommendation = {
+  recommendation_id: string;
+  company_id: string;
+  company_name: string;
+  author_email: string;
+  pillar: string;
+  sub_intervention: string;
+  fund_hint: string;
+  note: string;
+  source: string;          // 'israa-csv' / 'raouf-docx' / 'manual' / etc.
+  created_at: string;
+};
+
+export const PRE_DECISION_HEADERS = [
+  'recommendation_id',
+  'company_id',
+  'company_name',
+  'author_email',
+  'pillar',
+  'sub_intervention',
+  'fund_hint',
+  'note',
+  'source',
+  'created_at',
+];
+
+export function preDecisionIdFor(companyId: string, author: string, pillar: string, sub: string, source: string): string {
+  return ['rec', companyId, author, pillar, sub || 'all', source]
+    .map(s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-'))
+    .join('-')
+    .slice(0, 100);
+}
+
 // Per-company aggregation of all team reviews — what the kanban card and
 // roster column show: total reviewer count, breakdown by decision, the
 // modal recommendation, and whether there's divergence (>1 distinct vote).
