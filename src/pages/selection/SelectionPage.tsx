@@ -47,7 +47,7 @@ import {
 } from '../../lib/ui';
 import type { TabItem, Tone } from '../../lib/ui';
 import { ACCOUNT_MANAGERS, displayName, isAdmin } from '../../config/team';
-import { PILLARS, pillarFor } from '../../config/interventions';
+import { PILLARS, pillarFor, resolveIntervention } from '../../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from '../companies/interviewedSource';
 import type { ReviewableCompany, SelectionContext } from './ReviewQueueTab';
 import type { FinalLockArgs } from './FinalCohortTab';
@@ -232,6 +232,16 @@ export function SelectionPage() {
     return m;
   }, [master.rows]);
 
+  const applicantByName = useMemo(() => {
+    const m = new Map<string, Applicant>();
+    for (const a of applicants.rows) {
+      const name = a.name || a.companyName || a.company_name || '';
+      const k = norm(name);
+      if (k) m.set(k, a);
+    }
+    return m;
+  }, [applicants.rows]);
+
   const scoringIdx = useMemo(() => indexByCompanyName(scoring.rows), [scoring.rows]);
   const docReviewIdx = useMemo(() => indexByCompanyName(docReviews.rows), [docReviews.rows]);
   const needsIdx = useMemo(() => indexByCompanyName(companyNeeds.rows), [companyNeeds.rows]);
@@ -246,16 +256,19 @@ export function SelectionPage() {
   const shortlistsIdx = useMemo(() => indexByCompanyName(shortlists.rows), [shortlists.rows]);
   const finalCohortIdx = useMemo(() => indexByCompanyName(finalCohortRows.rows), [finalCohortRows.rows]);
 
-  // Build the joined "reviewable companies" list. The previous version
-  // iterated only over applicants, which dropped any interviewed
-  // company that lives only in the Master sheet (or only in the static
-  // INTERVIEWED_NAMES list with an alias mapped to a Master row). Now
-  // we iterate three sources and union by normalized name:
-  //   1) applicants matching interviewedSet
-  //   2) master rows matching interviewedSet (catches manual master adds)
-  //   3) the interviewed list itself (catches names with no row anywhere)
+  // Build the joined "reviewable companies" list. Mirrors the legacy
+  // CompaniesPage logic so existing reviews keyed by company_id still
+  // match:
+  //   - Master rows with post-interview status come in unconditionally
+  //     (their canonical `company_id` like E3-0042 is preserved).
+  //   - Applicants matching interviewedSet are added on top, only if
+  //     not already covered by a master row of the same name.
+  //   - For applicant-only entries we synth `padId(a.id)` (e.g. A-0042),
+  //     matching the historical save format so legacy Reviews rows
+  //     still resolve.
+  const POST_INTERVIEW = new Set(['Interviewed', 'Reviewing', 'Recommended', 'Selected', 'Onboarded', 'Active', 'Graduated']);
   const reviewableForView: ReviewableCompany[] = useMemo(() => {
-    const seen = new Set<string>();
+    const seenName = new Set<string>();
     const out: ReviewableCompany[] = [];
     const buildSelection = (name: string): SelectionContext => ({
       scoring: lookupByName(scoringIdx, name),
@@ -273,18 +286,53 @@ export function SelectionPage() {
       finalCohort: lookupByName(finalCohortIdx, name),
     });
 
-    // 1) Applicants
+    // 1) Master rows with post-interview status. These come from the
+    // Companies workbook regardless of whether the static interviewed
+    // list mentions them — being in master at this status IS the
+    // signal that they are part of the cohort.
+    for (const m of master.rows) {
+      if (!POST_INTERVIEW.has(m.status || '')) continue;
+      const name = m.company_name || '';
+      const nKey = norm(name);
+      if (!nKey || removedSet.has(nKey) || seenName.has(nKey)) continue;
+      seenName.add(nKey);
+      // Pull applicant detail by name so the dossier still has app fields.
+      const a = applicantByName.get(nKey);
+      out.push({
+        route_id: m.company_id,
+        applicant_id: a?.id || '',
+        company_id: m.company_id,
+        company_name: name,
+        sector: m.sector || a?.businessType || a?.sector || '',
+        city: m.city || a?.city || '',
+        governorate: m.governorate || a?.governorate || '',
+        employee_count: m.employee_count || a?.numEmployees || a?.employee_count || '',
+        readiness_score: a?.readinessScore || a?.readiness_score || '',
+        fund_code: m.fund_code || '',
+        status: m.status || 'Interviewed',
+        profile_manager_email: m.profile_manager_email || '',
+        contact_email: a?.email || a?.email_address || a?.contact_email || '',
+        applicantRaw: (a as unknown as Record<string, string>) || null,
+        masterRaw: m as unknown as Record<string, string>,
+        selection: buildSelection(name),
+      });
+    }
+
+    // 2) Applicants flagged as interviewed, but only if not already
+    // covered by a master row above. Applicant-only IDs use the
+    // legacy `A-0042` shape (padId) so older Reviews rows keep
+    // matching by company_id.
     for (const a of applicants.rows) {
       const name = a.name || a.companyName || a.company_name || '';
       const nKey = norm(name);
-      if (!nKey || !interviewedSet.has(nKey) || removedSet.has(nKey) || seen.has(nKey)) continue;
-      seen.add(nKey);
+      if (!nKey || !interviewedSet.has(nKey) || removedSet.has(nKey) || seenName.has(nKey)) continue;
+      seenName.add(nKey);
       const m = masterByName.get(nKey);
-      const company_id = m?.company_id || `E3-A${padId(a.id || '')}`;
+      const company_id = m?.company_id || padId(a.id || '');
       out.push({
-        route_id: company_id,
+        route_id: company_id || nKey,
         applicant_id: a.id || '',
-        company_id,
+        company_id: company_id || nKey,
         company_name: name,
         sector: a.businessType || a.sector || m?.sector || '',
         city: a.city || m?.city || '',
@@ -301,55 +349,10 @@ export function SelectionPage() {
       });
     }
 
-    // 2) Master rows that weren't covered by an applicant
-    for (const m of master.rows) {
-      const name = m.company_name || '';
-      const nKey = norm(name);
-      if (!nKey || !interviewedSet.has(nKey) || removedSet.has(nKey) || seen.has(nKey)) continue;
-      seen.add(nKey);
-      out.push({
-        route_id: m.company_id,
-        applicant_id: '',
-        company_id: m.company_id,
-        company_name: name,
-        sector: m.sector || '',
-        city: m.city || '',
-        governorate: m.governorate || '',
-        employee_count: m.employee_count || '',
-        readiness_score: '',
-        fund_code: m.fund_code || '',
-        status: m.status || 'Interviewed',
-        profile_manager_email: m.profile_manager_email || '',
-        contact_email: '',
-        applicantRaw: null,
-        masterRaw: m as unknown as Record<string, string>,
-        selection: buildSelection(name),
-      });
-    }
-
-    // 3) Static INTERVIEWED_NAMES that have no applicant or master row.
-    // These show up as stubs so the team can SEE the unmatched name and
-    // create an alias from the queue.
-    for (const nKey of interviewedSet) {
-      if (seen.has(nKey) || removedSet.has(nKey)) continue;
-      seen.add(nKey);
-      out.push({
-        route_id: `E3-S${nKey.replace(/[^a-z0-9]+/g, '-').slice(0, 30)}`,
-        applicant_id: '',
-        company_id: `E3-S${nKey.replace(/[^a-z0-9]+/g, '-').slice(0, 30)}`,
-        company_name: nKey.replace(/\b\w/g, m => m.toUpperCase()),
-        sector: '', city: '', governorate: '',
-        employee_count: '', readiness_score: '',
-        fund_code: '', status: 'Interviewed',
-        profile_manager_email: '', contact_email: '',
-        applicantRaw: null, masterRaw: null,
-        selection: buildSelection(nKey),
-      });
-    }
-
     return out.sort((a, b) => a.company_name.localeCompare(b.company_name));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    applicants.rows, master.rows, interviewedSet, removedSet, masterByName,
+    applicants.rows, master.rows, applicantByName, interviewedSet, removedSet, masterByName,
     scoringIdx, docReviewIdx, needsIdx, interviewAssessIdx, interviewDiscIdx, interviewDiscAllIdx,
     committeeIdx, selectionVotesIdx, selectionVotesAllIdx,
     firstFiltrationIdx, additionalFiltrationIdx, shortlistsIdx, finalCohortIdx,
@@ -1405,12 +1408,42 @@ function CompanyFocusDrawer({
   const [locking, setLocking] = useState(false);
 
   // Reset state when the focused company changes.
+  // Both branches run every saved code through `resolveIntervention()`
+  // so legacy taxonomy values (TTH, Upskilling, C-Suite, Conferences,
+  // ElevateBridge, MA-Legal, MA-MKG Agency, ...) get migrated to the
+  // current 3-pillar structure. Without this, existing reviews and
+  // assignments would render as cleared because the old codes don't
+  // match any new pillar checkbox.
   useEffect(() => {
     if (!company) return;
     if (mode === 'review') {
       setDecision((myReview?.decision as 'Recommend' | 'Hold' | 'Waitlist' | '') || '');
-      setProposedPillars(new Set((myReview?.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean)));
-      setProposedSubs(new Set((myReview?.proposed_sub_interventions || '').split(',').map(s => s.trim()).filter(Boolean)));
+      const pSet = new Set<string>();
+      const sSet = new Set<string>();
+      // proposed_pillars CSV may contain old top-level codes; resolveIntervention
+      // returns {pillar, sub} so we can put them in the right buckets.
+      for (const code of (myReview?.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean)) {
+        const r = resolveIntervention(code);
+        if (r) {
+          pSet.add(r.pillar);
+          if (r.sub) sSet.add(r.sub);
+        } else {
+          pSet.add(code);
+        }
+      }
+      // proposed_sub_interventions CSV — resolve and ensure parent pillar
+      // is also marked.
+      for (const code of (myReview?.proposed_sub_interventions || '').split(',').map(s => s.trim()).filter(Boolean)) {
+        const r = resolveIntervention(code);
+        if (r) {
+          pSet.add(r.pillar);
+          if (r.sub) sSet.add(r.sub);
+        } else {
+          sSet.add(code);
+        }
+      }
+      setProposedPillars(pSet);
+      setProposedSubs(sSet);
       setReviewNotes(myReview?.notes || '');
       setCommentDraft('');
     } else {
@@ -1420,20 +1453,28 @@ function CompanyFocusDrawer({
       const sSet = new Set<string>();
       const funds: Record<string, string> = {};
       for (const a of existingAssigns || []) {
-        const code = pillarFor(a.intervention_type)?.code || a.intervention_type;
-        if (code) {
-          pSet.add(code);
-          if (a.fund_code) funds[code] = a.fund_code;
+        // intervention_type might be old (e.g., 'TTH') or new ('CB'); resolve.
+        const r = resolveIntervention(a.intervention_type);
+        const pillarCode = r?.pillar || pillarFor(a.intervention_type)?.code || a.intervention_type;
+        if (pillarCode) {
+          pSet.add(pillarCode);
+          if (a.fund_code) funds[pillarCode] = a.fund_code;
         }
-        if (a.sub_intervention) sSet.add(a.sub_intervention);
+        // The sub from resolve OR the explicit sub_intervention.
+        const sub = r?.sub || a.sub_intervention;
+        if (sub) sSet.add(sub);
       }
-      // Pre-decision pillars also pre-fill
+      // Pre-decision pillars pre-fill when nothing was locked yet.
       if (pSet.size === 0) {
         for (const r of preDecs) {
-          const code = pillarFor(r.pillar)?.code || r.pillar;
-          if (code) pSet.add(code);
-          if (r.sub_intervention) sSet.add(r.sub_intervention);
-          if (code && r.fund_hint && !funds[code]) funds[code] = r.fund_hint;
+          const resolved = resolveIntervention(r.pillar);
+          const pillarCode = resolved?.pillar || pillarFor(r.pillar)?.code || r.pillar;
+          if (pillarCode) {
+            pSet.add(pillarCode);
+            if (r.fund_hint && !funds[pillarCode]) funds[pillarCode] = r.fund_hint;
+          }
+          const sub = resolved?.sub || r.sub_intervention;
+          if (sub) sSet.add(sub);
         }
       }
       setLockPillars(pSet);
