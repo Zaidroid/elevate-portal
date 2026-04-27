@@ -27,9 +27,23 @@ export type SelectionContext = {
   docReview: RawRow | null;
   needs: RawRow | null;
   interviewAssessment: RawRow | null;
+  // Some selection-tool tabs hold multi-row threads per company
+  // (Interview Discussion most notably). We pass the raw row when
+  // there's a single one and the full array when there are several.
   interviewDiscussion: RawRow | null;
+  interviewDiscussionAll?: RawRow[];
   committeeVotes: RawRow | null;
+  // Selection Votes is per-voter — keep both the single-row legacy
+  // shape AND the full array so the per-voter breakdown can render.
   selectionVotes: RawRow | null;
+  selectionVotesAll?: RawRow[];
+  // The four tabs that were silently dropped before — first
+  // filtration, additional factors, shortlists, final cohort. Each
+  // is a per-company snapshot.
+  firstFiltration: RawRow | null;
+  additionalFiltration: RawRow | null;
+  shortlists: RawRow | null;
+  finalCohort: RawRow | null;
 };
 
 export type ReviewableCompany = {
@@ -105,7 +119,7 @@ const APPLICATION_KEY_FIELDS: Array<[string, string[]]> = [
   ['Revenue', ['annualRevenue', 'revenueBracket', 'revenue', 'arr']],
 ];
 
-type EvalTab = 'glance' | 'application' | 'scoring' | 'docReview' | 'interview' | 'committee' | 'team';
+type EvalTab = 'glance' | 'application' | 'scoring' | 'docReview' | 'filtration' | 'interview' | 'committee' | 'finalList' | 'team';
 
 // Maps application 'wantsXXX' fields → pillar codes. Drives the "Requested"
 // badge on each pillar in the picker so the reviewer sees what the company
@@ -433,12 +447,21 @@ export function ReviewView({
   const application = company.applicantRaw || {};
   const sel = company.selection;
 
+  const interviewDiscussionRows = (sel.interviewDiscussionAll && sel.interviewDiscussionAll.length > 0)
+    ? sel.interviewDiscussionAll
+    : (sel.interviewDiscussion ? [sel.interviewDiscussion] : []);
+  const selectionVotesRows = (sel.selectionVotesAll && sel.selectionVotesAll.length > 0)
+    ? sel.selectionVotesAll
+    : (sel.selectionVotes ? [sel.selectionVotes] : []);
+
   const has = {
     scoring: !!sel.scoring,
     docReview: !!sel.docReview,
     needs: !!sel.needs,
-    interview: !!(sel.interviewAssessment || sel.interviewDiscussion),
-    committee: !!(sel.committeeVotes || sel.selectionVotes),
+    filtration: !!(sel.firstFiltration || sel.additionalFiltration),
+    interview: !!(sel.interviewAssessment || interviewDiscussionRows.length > 0),
+    committee: !!(sel.committeeVotes || selectionVotesRows.length > 0),
+    finalList: !!(sel.shortlists || sel.finalCohort),
   };
 
   const evalTabs: Array<{ id: EvalTab; label: string; icon: React.ReactNode; available: boolean; count?: number }> = [
@@ -446,8 +469,10 @@ export function ReviewView({
     { id: 'application', label: 'Application', icon: <FileText className="h-3.5 w-3.5" />, available: Object.keys(application).length > 0 },
     { id: 'scoring', label: 'Scoring & Needs', icon: <Activity className="h-3.5 w-3.5" />, available: has.scoring || has.needs },
     { id: 'docReview', label: 'Doc Review', icon: <ClipboardCheck className="h-3.5 w-3.5" />, available: has.docReview },
-    { id: 'interview', label: 'Interview', icon: <BookOpen className="h-3.5 w-3.5" />, available: has.interview },
-    { id: 'committee', label: 'Committee', icon: <Vote className="h-3.5 w-3.5" />, available: has.committee },
+    { id: 'filtration', label: 'Filtration', icon: <ClipboardCheck className="h-3.5 w-3.5" />, available: has.filtration },
+    { id: 'interview', label: 'Interview', icon: <BookOpen className="h-3.5 w-3.5" />, available: has.interview, count: interviewDiscussionRows.length > 1 ? interviewDiscussionRows.length : undefined },
+    { id: 'committee', label: 'Committee', icon: <Vote className="h-3.5 w-3.5" />, available: has.committee, count: selectionVotesRows.length > 1 ? selectionVotesRows.length : undefined },
+    { id: 'finalList', label: 'Final list', icon: <CheckCircle2 className="h-3.5 w-3.5" />, available: has.finalList },
     { id: 'team', label: 'Team thread', icon: <Users className="h-3.5 w-3.5" />, available: true, count: companyReviews.length + companyComments.length },
   ];
 
@@ -594,8 +619,10 @@ export function ReviewView({
                 : <EmptyHint icon={<ClipboardCheck className="h-5 w-5" />} text="No doc review on file." />}
             </Card>
           )}
+          {evalTab === 'filtration' && <FiltrationTab sel={sel} />}
           {evalTab === 'interview' && <InterviewTab sel={sel} />}
           {evalTab === 'committee' && <CommitteeTab sel={sel} />}
+          {evalTab === 'finalList' && <FinalListTab sel={sel} />}
           {evalTab === 'team' && (
             <TeamThreadTab
               companyReviews={companyReviews}
@@ -843,7 +870,17 @@ function GlanceTab({
       <Card>
         <SectionHeader title="Snapshot" subtitle="Pulled from selection-tool + application" />
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-          <BigStat label="Score" value={pickValue(sel.scoring, /^(class|tier|grade)$/i) || '—'} hint={pickValue(sel.scoring, /total.*score|^score$|weighted/i)} tone="teal" />
+          <BigStat
+            label="Score"
+            value={pickValue(sel.scoring, /^(class|tier|grade|score.?class)$/i) || '—'}
+            hint={(() => {
+              const total = pickValue(sel.scoring, /total.*score|^score$|weighted/i);
+              const rank = pickValue(sel.scoring, /^rank$|^position$/i);
+              const parts = [total && `Total ${total}`, rank && `Rank #${rank}`].filter(Boolean) as string[];
+              return parts.join(' · ') || undefined;
+            })()}
+            tone="teal"
+          />
           <BigStat label="Readiness" value={company.readiness_score || pickValue(sel.needs, /readiness/i) || '—'} hint={pickValue(sel.needs, /total.*intervention|count/i)} tone="amber" />
           <BigStat label="Interview" value={pickValue(sel.interviewAssessment, /rating|score|grade|recommend/i) || '—'} hint={pickValue(sel.interviewAssessment, /interviewer|by/i)} tone="teal" />
           <BigStat label="Committee" value={pickValue(sel.committeeVotes, /vote|decision|recommend|outcome/i) || '—'} hint={pickValue(sel.committeeVotes, /reason|note/i)} tone="orange" />
@@ -1001,6 +1038,9 @@ function ScoringTab({ sel }: { sel: SelectionContext }) {
 }
 
 function InterviewTab({ sel }: { sel: SelectionContext }) {
+  const discussionRows = (sel.interviewDiscussionAll && sel.interviewDiscussionAll.length > 0)
+    ? sel.interviewDiscussionAll
+    : (sel.interviewDiscussion ? [sel.interviewDiscussion] : []);
   return (
     <div className="space-y-3">
       <Card>
@@ -1009,15 +1049,51 @@ function InterviewTab({ sel }: { sel: SelectionContext }) {
           : <EmptyHint icon={<BookOpen className="h-5 w-5" />} text="No assessment on file." />}
       </Card>
       <Card>
-        <SectionHeader title="Team interview discussion" subtitle="What we said about them post-interview" />
-        {sel.interviewDiscussion ? <BucketedFields entries={meaningfulEntries(sel.interviewDiscussion)} buckets={INTERVIEW_BUCKETS} />
-          : <EmptyHint icon={<MessageCircle className="h-5 w-5" />} text="No discussion captured." />}
+        <SectionHeader
+          title="Team interview discussion"
+          subtitle={discussionRows.length > 1 ? `${discussionRows.length} entries — full thread` : 'What we said about them post-interview'}
+        />
+        {discussionRows.length === 0 ? (
+          <EmptyHint icon={<MessageCircle className="h-5 w-5" />} text="No discussion captured." />
+        ) : (
+          <div className="space-y-3">
+            {discussionRows.map((row, i) => (
+              <div key={i} className={discussionRows.length > 1 ? 'rounded-md border border-slate-200 p-2 dark:border-navy-700' : ''}>
+                {discussionRows.length > 1 && (
+                  <div className="mb-2 flex items-center justify-between gap-2 text-[11px] font-semibold text-slate-500">
+                    <span>Entry {i + 1}</span>
+                    <DiscussionMeta row={row} />
+                  </div>
+                )}
+                <BucketedFields entries={meaningfulEntries(row)} buckets={INTERVIEW_BUCKETS} />
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
     </div>
   );
 }
 
+// Surface reviewer + timestamp metadata when present so multi-row
+// threads identify who said what.
+function DiscussionMeta({ row }: { row: RawRow }) {
+  const reviewer = row['reviewer_email'] || row['reviewer'] || row['author'] || row['author_email'] || row['email'] || '';
+  const ts = row['updated_at'] || row['created_at'] || row['timestamp'] || row['date'] || '';
+  if (!reviewer && !ts) return null;
+  return (
+    <span className="font-normal text-slate-400">
+      {reviewer && <span>{displayName(reviewer)}</span>}
+      {reviewer && ts && <span> · </span>}
+      {ts && <span>{ts}</span>}
+    </span>
+  );
+}
+
 function CommitteeTab({ sel }: { sel: SelectionContext }) {
+  const votesRows = (sel.selectionVotesAll && sel.selectionVotesAll.length > 0)
+    ? sel.selectionVotesAll
+    : (sel.selectionVotes ? [sel.selectionVotes] : []);
   return (
     <div className="space-y-3">
       <Card>
@@ -1026,9 +1102,61 @@ function CommitteeTab({ sel }: { sel: SelectionContext }) {
           : <EmptyHint icon={<Vote className="h-5 w-5" />} text="No committee vote on file." />}
       </Card>
       <Card>
-        <SectionHeader title="Selection votes" subtitle="Per-person votes from selection" />
-        {sel.selectionVotes ? <BucketedFields entries={meaningfulEntries(sel.selectionVotes)} buckets={COMMITTEE_BUCKETS} />
-          : <EmptyHint icon={<Vote className="h-5 w-5" />} text="No selection vote on file." />}
+        <SectionHeader
+          title="Selection votes"
+          subtitle={votesRows.length > 1 ? `${votesRows.length} voters — full breakdown` : 'Per-person votes from selection'}
+        />
+        {votesRows.length === 0 ? (
+          <EmptyHint icon={<Vote className="h-5 w-5" />} text="No selection vote on file." />
+        ) : (
+          <div className="space-y-3">
+            {votesRows.map((row, i) => (
+              <div key={i} className={votesRows.length > 1 ? 'rounded-md border border-slate-200 p-2 dark:border-navy-700' : ''}>
+                {votesRows.length > 1 && (
+                  <div className="mb-2 flex items-center justify-between gap-2 text-[11px] font-semibold text-slate-500">
+                    <span>Voter {i + 1}</span>
+                    <DiscussionMeta row={row} />
+                  </div>
+                )}
+                <BucketedFields entries={meaningfulEntries(row)} buckets={COMMITTEE_BUCKETS} />
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function FiltrationTab({ sel }: { sel: SelectionContext }) {
+  return (
+    <div className="space-y-3">
+      <Card>
+        <SectionHeader title="1st Filtration" subtitle="Initial pass / fail outcome with reasoning" />
+        {sel.firstFiltration ? <BucketedFields entries={meaningfulEntries(sel.firstFiltration)} buckets={COMMITTEE_BUCKETS} />
+          : <EmptyHint icon={<ClipboardCheck className="h-5 w-5" />} text="No filtration row on file." />}
+      </Card>
+      <Card>
+        <SectionHeader title="Additional Factors Filtration" subtitle="Secondary review notes (sector, geography, fit)" />
+        {sel.additionalFiltration ? <BucketedFields entries={meaningfulEntries(sel.additionalFiltration)} buckets={COMMITTEE_BUCKETS} />
+          : <EmptyHint icon={<ClipboardCheck className="h-5 w-5" />} text="No additional-factors row on file." />}
+      </Card>
+    </div>
+  );
+}
+
+function FinalListTab({ sel }: { sel: SelectionContext }) {
+  return (
+    <div className="space-y-3">
+      <Card>
+        <SectionHeader title="Shortlists" subtitle="Where this company sits on the shortlist" />
+        {sel.shortlists ? <BucketedFields entries={meaningfulEntries(sel.shortlists)} buckets={COMMITTEE_BUCKETS} />
+          : <EmptyHint icon={<CheckCircle2 className="h-5 w-5" />} text="Not on a shortlist." />}
+      </Card>
+      <Card>
+        <SectionHeader title="Final cohort" subtitle="What selection-tool already locked" />
+        {sel.finalCohort ? <BucketedFields entries={meaningfulEntries(sel.finalCohort)} buckets={COMMITTEE_BUCKETS} />
+          : <EmptyHint icon={<CheckCircle2 className="h-5 w-5" />} text="Not on the final cohort." />}
       </Card>
     </div>
   );

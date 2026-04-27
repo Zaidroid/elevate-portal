@@ -41,7 +41,7 @@ import type { ReviewableCompany, SelectionContext } from './ReviewView';
 import { FinalDecisionView } from './FinalDecisionView';
 import type { FinalLockArgs } from './FinalDecisionView';
 import { exportReviewToSheet } from './exportReview';
-import { indexByCompanyName, lookupByName } from './selectionContext';
+import { indexByCompanyName, indexAllByCompanyName, lookupByName, lookupAllByName } from './selectionContext';
 import { ExpandableCompanyCard } from './ExpandableCompanyCard';
 import type { CardCompany } from './ExpandableCompanyCard';
 import {
@@ -57,7 +57,9 @@ import {
 } from './reviewTypes';
 import { repairDashboard } from './repairDashboard';
 import { fuzzyResolve, importExternalSeed, loadSeed } from './importExternalComments';
-import type { CompanyComment, InterviewAlias, PreDecisionRecommendation, RemovedCompany, Review, ReviewSummary } from './reviewTypes';
+import { appendActivity } from './activityLog';
+import type { ActivityAction } from './activityLog';
+import type { ActivityRow, CompanyComment, InterviewAlias, PreDecisionRecommendation, RemovedCompany, Review, ReviewSummary } from './reviewTypes';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
 // Company schema so keys are camelCase.
@@ -213,6 +215,13 @@ export function CompaniesPage() {
   const interviewDiscussion = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'interviewDiscussion'), 'id', selOpts);
   const committeeVotes = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'committeeVotes'), 'id', selOpts);
   const selectionVotes = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'selectionVotes'), 'id', selOpts);
+  // 4 selection tabs the team fills in but the portal previously ignored.
+  // Adding them so Filtration / Shortlist / Final Cohort context is
+  // surfaced inline in the Review view alongside the existing tabs.
+  const firstFiltration = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'firstFiltration'), 'id', selOpts);
+  const additionalFiltration = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'additionalFiltration'), 'id', selOpts);
+  const shortlists = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'shortlists'), 'id', selOpts);
+  const finalCohort = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'finalCohort'), 'id', selOpts);
 
   // Intervention Assignments tab — drives the per-card pillar dots and the
   // "(N interventions)" badges on the kanban + roster. The detail page owns
@@ -296,6 +305,33 @@ export function CompaniesPage() {
     'recommendation_id',
     { userEmail: user?.email }
   );
+
+  // Activity Log feed. Tab is auto-created via ensureSchema; we read
+  // back so per-company timelines and the global feed surface in the UI.
+  const activityDoc = useSheetDoc<ActivityRow>(
+    schemaReady && masterSheetId ? masterSheetId : null,
+    getTab('companies', 'activity'),
+    'activity_id',
+    { userEmail: user?.email }
+  );
+
+  // Lightweight wrapper so write paths can log without re-stating the
+  // workbook context every call.
+  const logActivity = (
+    action: ActivityAction,
+    company_id?: string,
+    extra?: { field?: string; old_value?: string; new_value?: string; details?: string },
+  ) => {
+    if (!masterSheetId) return;
+    void appendActivity({
+      sheetId: masterSheetId,
+      tabName: getTab('companies', 'activity'),
+      user_email: user?.email,
+      company_id,
+      action,
+      ...extra,
+    });
+  };
 
   const removedSet = useMemo(() => {
     const s = new Set<string>();
@@ -391,7 +427,10 @@ export function CompaniesPage() {
     const now = new Date().toISOString();
     try {
       if (!t) {
-        if (existing) await aliasesDoc.deleteRow(id);
+        if (existing) {
+          await aliasesDoc.deleteRow(id);
+          logActivity('alias_clear', undefined, { field: 'schedule_name', old_value: scheduleName });
+        }
         return;
       }
       if (existing) {
@@ -400,6 +439,7 @@ export function CompaniesPage() {
           updated_at: now,
           updated_by: user?.email || '',
         });
+        logActivity('alias_update', undefined, { field: scheduleName, old_value: existing.applicant_company_name || '', new_value: t });
       } else {
         await aliasesDoc.createRow({
           alias_id: id,
@@ -410,6 +450,7 @@ export function CompaniesPage() {
           updated_at: now,
           updated_by: user?.email || '',
         });
+        logActivity('alias_create', undefined, { field: scheduleName, new_value: t });
       }
       // Auto-materialize the matched company into Companies Master so the
       // alias is reflected in the related sheet immediately, not waiting
@@ -939,6 +980,7 @@ export function CompaniesPage() {
       const res = await repairDashboard(masterSheetId);
       if (res.errors.length === 0) {
         toast.success('Dashboard rebuilt', `Wrote ${res.rowsWritten} rows of canonical formulas to the Dashboard tab.`);
+        logActivity('dashboard_repair', undefined, { details: `${res.rowsWritten} rows written` });
       } else {
         toast.error('Dashboard rebuild had errors', res.errors[0]);
       }
@@ -989,6 +1031,9 @@ export function CompaniesPage() {
         console.warn('[importExternal] errors', result.errors);
       }
       toast.success('Import complete', lines.join(' '));
+      logActivity('import_external', undefined, {
+        details: `${result.commentsAdded}c+${result.recsAdded}r added; ${result.commentsSkipped + result.recsSkipped} skipped; ${result.commentsUnmatched.length + result.recsUnmatched.length} unmatched`,
+      });
       await comments.refresh();
       await preDecisionsDoc.refresh();
     } catch (e) {
@@ -1045,6 +1090,7 @@ export function CompaniesPage() {
             skipped > 0 ? `${skipped} already had a row` : '',
             failed > 0 ? `${failed} failed (likely permission)` : '',
           ].filter(Boolean).join(' · '));
+        logActivity('materialize', undefined, { details: `${created} created · ${skipped} skipped · ${failed} failed` });
       } else if (failed > 0) {
         toast.error('Materialize failed', `${failed} write${failed === 1 ? '' : 's'} rejected. Check Drive sharing.`);
       }
@@ -1231,8 +1277,15 @@ export function CompaniesPage() {
   const needsIdx = useMemo(() => indexByCompanyName(companyNeeds.rows), [companyNeeds.rows]);
   const interviewAssessIdx = useMemo(() => indexByCompanyName(interviewAssessments.rows), [interviewAssessments.rows]);
   const interviewDiscIdx = useMemo(() => indexByCompanyName(interviewDiscussion.rows), [interviewDiscussion.rows]);
+  const interviewDiscAllIdx = useMemo(() => indexAllByCompanyName(interviewDiscussion.rows), [interviewDiscussion.rows]);
   const committeeIdx = useMemo(() => indexByCompanyName(committeeVotes.rows), [committeeVotes.rows]);
   const selectionVotesIdx = useMemo(() => indexByCompanyName(selectionVotes.rows), [selectionVotes.rows]);
+  const selectionVotesAllIdx = useMemo(() => indexAllByCompanyName(selectionVotes.rows), [selectionVotes.rows]);
+  // 4 newly-wired selection tabs.
+  const firstFiltrationIdx = useMemo(() => indexByCompanyName(firstFiltration.rows), [firstFiltration.rows]);
+  const additionalFiltrationIdx = useMemo(() => indexByCompanyName(additionalFiltration.rows), [additionalFiltration.rows]);
+  const shortlistsIdx = useMemo(() => indexByCompanyName(shortlists.rows), [shortlists.rows]);
+  const finalCohortIdx = useMemo(() => indexByCompanyName(finalCohort.rows), [finalCohort.rows]);
 
   const reviewableForView: ReviewableCompany[] = useMemo(() => {
     return reviewableCompanies.map(r => {
@@ -1242,8 +1295,14 @@ export function CompaniesPage() {
         needs: lookupByName(needsIdx, r.company_name),
         interviewAssessment: lookupByName(interviewAssessIdx, r.company_name),
         interviewDiscussion: lookupByName(interviewDiscIdx, r.company_name),
+        interviewDiscussionAll: lookupAllByName(interviewDiscAllIdx, r.company_name),
         committeeVotes: lookupByName(committeeIdx, r.company_name),
         selectionVotes: lookupByName(selectionVotesIdx, r.company_name),
+        selectionVotesAll: lookupAllByName(selectionVotesAllIdx, r.company_name),
+        firstFiltration: lookupByName(firstFiltrationIdx, r.company_name),
+        additionalFiltration: lookupByName(additionalFiltrationIdx, r.company_name),
+        shortlists: lookupByName(shortlistsIdx, r.company_name),
+        finalCohort: lookupByName(finalCohortIdx, r.company_name),
       };
       return {
         route_id: r.route_id,
@@ -1264,7 +1323,7 @@ export function CompaniesPage() {
         selection,
       };
     });
-  }, [reviewableCompanies, applicantByName, masterById, scoringIdx, docReviewIdx, needsIdx, interviewAssessIdx, interviewDiscIdx, committeeIdx, selectionVotesIdx]);
+  }, [reviewableCompanies, applicantByName, masterById, scoringIdx, docReviewIdx, needsIdx, interviewAssessIdx, interviewDiscIdx, interviewDiscAllIdx, committeeIdx, selectionVotesIdx, selectionVotesAllIdx, firstFiltrationIdx, additionalFiltrationIdx, shortlistsIdx, finalCohortIdx]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
@@ -1458,8 +1517,15 @@ export function CompaniesPage() {
             } else {
               await reviews.createRow(r);
             }
+            logActivity('review_saved', r.company_id, {
+              new_value: r.decision || '',
+              details: r.proposed_pillars ? `pillars: ${r.proposed_pillars}` : '',
+            });
           }}
-          onAddComment={async c => { await comments.createRow(c); }}
+          onAddComment={async c => {
+            await comments.createRow(c);
+            logActivity('comment_added', c.company_id, { details: c.body.slice(0, 200) });
+          }}
           onAssignPM={async (companyId, pmEmail) => {
             // Upsert the master row's PM assignment. If the company is
             // applicant-only (synthesized id), create a master row first
@@ -1481,6 +1547,7 @@ export function CompaniesPage() {
                 governorate: c.governorate || '',
               } as Master);
             }
+            logActivity('pm_assigned', companyId, { field: 'profile_manager_email', new_value: pmEmail });
           }}
           onFinalize={async ({ companyId, pmEmail, status, interventions }) => {
             // 1) Lock the master row (status + optional PM). Create if needed.
@@ -1532,6 +1599,11 @@ export function CompaniesPage() {
                 notes: '',
               } as Assignment);
             }
+            logActivity('finalize_locked', companyId, {
+              field: 'status',
+              new_value: status,
+              details: `${interventions.length} intervention(s); PM=${pmEmail || '—'}`,
+            });
           }}
           onJumpToCompany={rid => navigate(`/companies/${encodeURIComponent(rid)}`)}
           onRemoveCompany={async (companyId, companyName) => {
@@ -1593,6 +1665,11 @@ export function CompaniesPage() {
                 }
               }
               toast.success('Removed', `${companyName} hidden from the system across the team.`);
+              logActivity('company_removed', companyId, {
+                field: 'company_name',
+                old_value: companyName,
+                details: 'Removed via Companies page',
+              });
               await master.refresh();
             } catch (e) {
               toast.error('Remove failed', (e as Error).message);
@@ -1614,15 +1691,18 @@ export function CompaniesPage() {
           }))}
           onExport={async () => {
             if (!masterSheetId) throw new Error('No companies workbook configured');
-            return exportReviewToSheet(masterSheetId, {
+            const out = await exportReviewToSheet(masterSheetId, {
               companies: reviewableForView,
               reviews: reviews.rows,
               comments: comments.rows,
               assignments: assignments.rows as unknown as Record<string, string>[],
             }, user?.email || 'unknown');
+            logActivity('export', undefined, { details: 'Cohort review exported' });
+            return out;
           }}
           comments={comments.rows}
           preDecisions={preDecisionsDoc.rows}
+          activity={activityDoc.rows}
           onImportExternal={admin ? handleImportExternal : undefined}
           importingExternal={importingExt}
           onLockDecision={async (args: FinalLockArgs) => {
@@ -1678,6 +1758,11 @@ export function CompaniesPage() {
                 notes: '',
               } as Assignment);
             }
+            logActivity('finalize_locked', args.companyId, {
+              field: 'status',
+              new_value: args.status,
+              details: `${args.interventions.length} intervention(s) [${args.interventions.map(i => `${i.pillar}/${i.fund_code}`).join(', ')}]; PM=${args.pmEmail || '—'}`,
+            });
             await master.refresh();
             await assignments.refresh();
           }}

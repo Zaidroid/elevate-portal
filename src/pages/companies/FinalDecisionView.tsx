@@ -20,9 +20,10 @@ import type { Tone } from '../../lib/ui';
 import { displayName } from '../../config/team';
 import { ACCOUNT_MANAGERS } from '../../config/team';
 import { PILLARS, pillarFor } from '../../config/interventions';
-import type { CompanyComment, PreDecisionRecommendation, Review, ReviewDecision } from './reviewTypes';
+import type { ActivityRow, CompanyComment, PreDecisionRecommendation, Review, ReviewDecision } from './reviewTypes';
 import { summarizeReviews } from './reviewTypes';
 import type { ReviewableCompany } from './ReviewView';
+import { ActivityTimeline } from './ActivityTimeline';
 
 const FINAL_STATUSES = ['Selected', 'Recommended', 'Reviewing', 'Hold', 'Rejected'] as const;
 type FinalStatus = (typeof FINAL_STATUSES)[number];
@@ -65,6 +66,7 @@ export function FinalDecisionView({
   onExport,
   comments = [],
   preDecisions = [],
+  activity = [],
   onImportExternal,
   importingExternal = false,
 }: {
@@ -81,6 +83,8 @@ export function FinalDecisionView({
   // seeds). Used in the row drill-down dossier and the smart pre-fill.
   comments?: CompanyComment[];
   preDecisions?: PreDecisionRecommendation[];
+  // Activity log feed — surfaced inline per row drill-down.
+  activity?: ActivityRow[];
   onImportExternal?: () => Promise<void>;
   importingExternal?: boolean;
 }) {
@@ -279,6 +283,9 @@ export function FinalDecisionView({
                       reviewerEmail={reviewerEmail}
                       existingAssigns={existingForCompany}
                       onLock={onLockDecision}
+                      comments={cmtsForCompany}
+                      preDecs={preDecsForCompany}
+                      activity={activity}
                     />
                   )}
                 </li>
@@ -299,12 +306,18 @@ function FinalDecisionRow({
   reviewerEmail,
   existingAssigns,
   onLock,
+  comments = [],
+  preDecs = [],
+  activity = [],
 }: {
   company: ReviewableCompany;
   reviews: Review[];
   reviewerEmail: string;
   existingAssigns: Array<{ company_id: string; intervention_type: string; sub_intervention: string; fund_code: string }>;
   onLock: (args: FinalLockArgs) => Promise<void>;
+  comments?: CompanyComment[];
+  preDecs?: PreDecisionRecommendation[];
+  activity?: ActivityRow[];
 }) {
   const toast = useToast();
 
@@ -354,34 +367,50 @@ function FinalDecisionRow({
   //   2. My own review picks                       (preserve admin intent)
   //   3. Union of every reviewer's picks           (team consensus)
   //   4. The applicant's wantsXXX flags            (last-resort fallback)
+  // Smart pre-fill priority (plan Phase 6):
+  //   1) Existing locked assignment for this pillar (don't undo a lock).
+  //   2) Pre-decision recommendations from Israa CSV / Raouf docx — the
+  //      "before tomorrow" team consensus that was imported.
+  //   3) Majority of team Recommend reviews from the per-reviewer step.
+  //   4) Interview Assessment's assessedInterventions.
+  //   5) Applicant's wantsXXX flags as a last resort.
   const initialPillars = useMemo(() => {
     const set = new Set<string>();
-    // 1) existing assignments
+    // (1) existing assignments
     for (const a of existingAssigns) {
       const p = pillarFor(a.intervention_type)?.code || a.intervention_type;
       if (p) set.add(p);
     }
-    // 2) my own picks
-    if (myReview) {
-      for (const p of (myReview.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean)) set.add(p);
+    // (2) pre-decision recommendations
+    for (const r of preDecs) {
+      const p = pillarFor(r.pillar)?.code || r.pillar;
+      if (p) set.add(p);
     }
-    // 3) team union when nothing else surfaced
+    // (3) majority team Recommend
     if (set.size === 0) {
       for (const [p] of proposedPillars) set.add(p);
     }
-    // 4) applicant's asked-for set as the last fallback (still empty)
+    // (3b) my own picks fall back here too
+    if (set.size === 0 && myReview) {
+      for (const p of (myReview.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean)) set.add(p);
+    }
+    // (4 / 5) applicant's asked-for set as the last fallback
     if (set.size === 0) {
       for (const [code, key] of Object.entries(WANTED_KEY)) {
         if (asBool(company.applicantRaw?.[key])) set.add(code);
       }
     }
     return set;
-  }, [existingAssigns, myReview, proposedPillars, company.applicantRaw]);
+  }, [existingAssigns, preDecs, myReview, proposedPillars, company.applicantRaw]);
 
   const initialSubs = useMemo(() => {
     const set = new Set<string>();
     for (const a of existingAssigns) {
       const s = (a.sub_intervention || '').trim();
+      if (s) set.add(s);
+    }
+    for (const r of preDecs) {
+      const s = (r.sub_intervention || '').trim();
       if (s) set.add(s);
     }
     if (myReview) {
@@ -391,16 +420,22 @@ function FinalDecisionRow({
       for (const [s] of proposedSubs) set.add(s);
     }
     return set;
-  }, [existingAssigns, myReview, proposedSubs]);
+  }, [existingAssigns, preDecs, myReview, proposedSubs]);
 
   const initialFunds: Record<string, string> = useMemo(() => {
     const m: Record<string, string> = {};
+    // (1) existing locked fund_code wins.
     for (const a of existingAssigns) {
       const p = pillarFor(a.intervention_type)?.code || a.intervention_type;
       if (p && a.fund_code) m[p] = a.fund_code;
     }
+    // (2) pre-decision fund_hint fills the rest.
+    for (const r of preDecs) {
+      const p = pillarFor(r.pillar)?.code || r.pillar;
+      if (p && !m[p] && r.fund_hint) m[p] = r.fund_hint;
+    }
     return m;
-  }, [existingAssigns]);
+  }, [existingAssigns, preDecs]);
 
   const [status, setStatus] = useState<FinalStatus>(
     (company.status === 'Selected' || company.status === 'Hold' || company.status === 'Rejected'
@@ -657,8 +692,78 @@ function FinalDecisionRow({
             <span className="font-bold"> Intervention Assignments</span> (one row per included pillar with its per-pillar fund_code).
             Idempotent — re-locking won't duplicate existing pairs.
           </p>
+          {(existingAssigns.length > 0 || preDecs.length > 0 || proposedPillars.size > 0) && (
+            <div className="mt-2 space-y-0.5 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[10px] text-slate-500 dark:border-navy-700 dark:bg-navy-900">
+              <div className="font-bold uppercase tracking-wider text-slate-400">Pre-filled from</div>
+              {existingAssigns.length > 0 && <div>· {existingAssigns.length} locked assignment(s)</div>}
+              {preDecs.length > 0 && <div>· {preDecs.length} pre-decision rec(s) [{Array.from(new Set(preDecs.map(p => p.author_email.split('@')[0]))).join(', ')}]</div>}
+              {proposedPillars.size > 0 && <div>· {proposedPillars.size} team-proposed pillar(s)</div>}
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Dossier: per-company comments thread + pre-decision recs +
+          activity timeline. Shown inline so the team sees the full
+          context for the decision without leaving the row. */}
+      {(comments.length > 0 || preDecs.length > 0 || activity.some(a => a.company_id === company.company_id)) && (
+        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+          <div className="space-y-2">
+            <h4 className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              Pre-decision recommendations ({preDecs.length})
+            </h4>
+            {preDecs.length === 0 ? (
+              <p className="text-xs italic text-slate-400">No external recommendations yet.</p>
+            ) : (
+              <ul className="space-y-1">
+                {preDecs.map(r => (
+                  <li key={r.recommendation_id} className="rounded border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-navy-500 dark:text-slate-100">
+                        {r.pillar}{r.sub_intervention ? ` · ${r.sub_intervention}` : ''}
+                      </span>
+                      <span className="text-[10px] text-slate-500">{displayName(r.author_email)}</span>
+                    </div>
+                    {r.fund_hint && (
+                      <div className="text-[10px] text-slate-500">Fund hint: {r.fund_hint}</div>
+                    )}
+                    {r.note && (
+                      <div className="mt-1 whitespace-pre-wrap text-[11px] text-slate-700 dark:text-slate-300">{r.note}</div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <h4 className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              Comments ({comments.length})
+            </h4>
+            {comments.length === 0 ? (
+              <p className="text-xs italic text-slate-400">No comments yet.</p>
+            ) : (
+              <ul className="space-y-1">
+                {comments
+                  .slice()
+                  .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
+                  .map(c => (
+                    <li key={c.comment_id} className="rounded border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-navy-500 dark:text-slate-100">{displayName(c.author_email)}</span>
+                        <span className="text-[10px] text-slate-500">{c.created_at}</span>
+                      </div>
+                      <div className="mt-1 whitespace-pre-wrap text-[11px] text-slate-700 dark:text-slate-300">{c.body}</div>
+                    </li>
+                  ))}
+              </ul>
+            )}
+          </div>
+
+          <div>
+            <h4 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Activity timeline</h4>
+            <ActivityTimeline rows={activity} companyId={company.company_id} limit={20} emptyText="No activity recorded yet for this company." />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

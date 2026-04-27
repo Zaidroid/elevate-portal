@@ -39,8 +39,9 @@ import {
   useToast,
 } from '../../lib/ui';
 import type { TabItem } from '../../lib/ui';
-import type { Review } from './reviewTypes';
+import type { ActivityRow, Review } from './reviewTypes';
 import { summarizeReviews } from './reviewTypes';
+import { ActivityTimeline as AuditLogTimeline } from './ActivityTimeline';
 
 type Company = Record<string, string>;
 type Contact = Record<string, string>;
@@ -98,6 +99,7 @@ export function CompanyDetailPage() {
   const contacts = useSheetDoc<Contact>(companiesSheet || null, getTab('companies', 'contacts'), 'contact_id', { userEmail: user?.email });
   const assignments = useSheetDoc<Assignment>(companiesSheet || null, getTab('companies', 'assignments'), 'assignment_id', { userEmail: user?.email });
   const reviewsDoc = useSheetDoc<Review>(companiesSheet || null, getTab('companies', 'reviews'), 'review_id', { userEmail: user?.email });
+  const activityDoc = useSheetDoc<ActivityRow>(companiesSheet || null, getTab('companies', 'activity'), 'activity_id', { userEmail: user?.email });
 
   // Source Data from Selection workbook is the authoritative applicant list.
   const sourceData = useSheetDoc<Record<string, string>>(
@@ -468,6 +470,8 @@ export function CompanyDetailPage() {
             payments={companyPayments}
             confs={companyConfs}
             docs={companyDocs}
+            auditLog={activityDoc.rows}
+            companyId={masterKey}
             onQuickAction={(kind, prefill) => {
               setQuickPrefill(prefill || {});
               setQuickAction(kind);
@@ -1585,6 +1589,8 @@ function ActivityTab({
   payments,
   confs,
   docs,
+  auditLog = [],
+  companyId,
   onQuickAction,
   masterKey,
 }: {
@@ -1593,11 +1599,17 @@ function ActivityTab({
   payments: Payment[];
   confs: ConferenceRow[];
   docs: Doc[];
+  auditLog?: ActivityRow[];
+  companyId?: string;
   onQuickAction: (kind: 'intervention' | 'pr' | 'payment' | 'agreement', prefill?: Record<string, string>) => void;
   masterKey: string;
 }) {
+  const auditForCompany = useMemo(
+    () => (companyId ? auditLog.filter(r => r.company_id === companyId) : []),
+    [auditLog, companyId],
+  );
   const total = assignments.length + prs.length + payments.length + confs.length + docs.length;
-  if (total === 0) {
+  if (total === 0 && auditForCompany.length === 0) {
     return (
       <EmptyState
         title="No activity yet"
@@ -1698,6 +1710,17 @@ function ActivityTab({
       >
         {docs.length > 0 && <DocsTable rows={docs} />}
       </Section>
+
+      {auditForCompany.length > 0 && (
+        <Section
+          title="Audit log"
+          count={auditForCompany.length}
+          icon={<Activity className="h-4 w-4" />}
+          empty=""
+        >
+          <AuditLogTimeline rows={auditForCompany} companyId={companyId} limit={50} />
+        </Section>
+      )}
     </div>
   );
 }

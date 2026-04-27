@@ -69,6 +69,38 @@ export function lookupByName(map: Map<string, RawRow>, companyName: string): Raw
   return null;
 }
 
+// Multi-row variant: keeps every matching row instead of dropping
+// duplicates. Required for tabs like Interview Discussion + Selection
+// Votes where a single company can have multiple entries (one per
+// reviewer / per session). Returns Map<normName, RawRow[]>.
+export function indexAllByCompanyName(rows: RawRow[]): Map<string, RawRow[]> {
+  const out = new Map<string, RawRow[]>();
+  if (rows.length === 0) return out;
+  const sample = rows[0];
+  const key = findCompanyKey(sample);
+  if (!key) return out;
+  for (const r of rows) {
+    const n = fuzzyName(r[key] || '');
+    if (!n) continue;
+    const arr = out.get(n);
+    if (arr) arr.push(r);
+    else out.set(n, [r]);
+  }
+  return out;
+}
+
+export function lookupAllByName(map: Map<string, RawRow[]>, companyName: string): RawRow[] {
+  const k = fuzzyName(companyName);
+  if (!k) return [];
+  if (map.has(k)) return map.get(k)!;
+  const merged: RawRow[] = [];
+  for (const [other, rows] of map) {
+    if (other.length < 4) continue;
+    if (other.includes(k) || k.includes(other)) merged.push(...rows);
+  }
+  return merged;
+}
+
 // Strip empty / id / housekeeping columns so the UI shows real signal.
 const SKIP_KEY_PATTERNS = [
   /^id$/i, /^.*_id$/, /^index$/i, /^row[_ ]?number$/i,
