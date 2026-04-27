@@ -1,304 +1,226 @@
-// Rebuild the Dashboard tab in the Companies workbook with canonical
-// COUNTIF formulas keyed off the current Companies / Intervention
-// Assignments / Reviews schemas. Idempotent — overwrites the tab's
-// content but doesn't change the tab itself.
+// Rebuilds the Companies workbook's Dashboard tab so the live result
+// is visually identical to the build-time output of
+// sheet-builders/builders/companies_master.py and matches the
+// helper-driven pattern used by the other workbooks
+// (sheet-builders/gsg_sheets/dashboard.py).
 //
-// We never touch the Companies / Assignments / Reviews data tabs; this
-// only rewrites the Dashboard so its KPIs match the cohort that's
-// actually in the sheet (e.g., 'Interviewed', 'Reviewing',
-// 'Recommended', 'Selected', 'Onboarded', 'Active', 'Graduated',
-// 'Withdrawn').
+// Layout: 12-column virtual grid.
+//  - Title row: navy fill, white bold 18pt, merged A:L
+//  - Subtitle row: muted slate, merged A:L
+//  - Section header: navy bar with white bold text, merged A:L
+//  - KPI tile: 3 cols wide × 2 rows (label band + value band). 4 per row.
+//  - Funnel row: A=label bold navy, B=value navy, C:L merged as the bar.
+//
+// Formula ranges go to row 2000 to match the bumped headcount.
 
 import { batchUpdate, ensureSchema, getSpreadsheetMeta, updateRange } from '../../lib/sheets/client';
 
+// ─── canonical taxonomy ──────────────────────────────────────────────
 const COMPANY_STATUSES = [
   'Applicant', 'Shortlisted', 'Interviewed', 'Reviewing', 'Recommended',
   'Selected', 'Onboarded', 'Active', 'Graduated', 'Withdrawn',
 ];
 
-const FUND_CODES = ['97060', '91763'];
+const FUND_CODES: Array<{ code: string; label: string }> = [
+  { code: '97060', label: '97060 (Dutch)' },
+  { code: '91763', label: '91763 (SIDA)' },
+];
 
 const PILLARS = ['TTH', 'Upskilling', 'MKG', 'MA', 'ElevateBridge', 'C-Suite', 'Conferences'];
+
+// ─── brand palette (mirrors gsg_sheets/brand.py) ─────────────────────
+const BRAND_NAVY = { red: 0.07, green: 0.15, blue: 0.27 };
+const BRAND_TEAL = { red: 0.0, green: 0.66, blue: 0.74 };
+const BRAND_RED = { red: 0.84, green: 0.27, blue: 0.18 };
+const BRAND_AMBER = { red: 0.55, green: 0.42, blue: 0.07 };
+const BRAND_GREEN = { red: 0.18, green: 0.49, blue: 0.31 };
+const TILE_NAVY = { fill: BRAND_NAVY, fg: { red: 1, green: 1, blue: 1 } };
+const TILE_TEAL = { fill: { red: 0.90, green: 0.95, blue: 0.97 }, fg: BRAND_TEAL };
+const TILE_GREEN = { fill: { red: 0.91, green: 0.96, blue: 0.92 }, fg: BRAND_GREEN };
+const TILE_AMBER = { fill: { red: 0.99, green: 0.95, blue: 0.85 }, fg: BRAND_AMBER };
+const TILE_RED = { fill: { red: 0.99, green: 0.93, blue: 0.91 }, fg: BRAND_RED };
+const MUTED = { red: 0.4, green: 0.45, blue: 0.55 };
+const WHITE = { red: 1, green: 1, blue: 1 };
+
+const FONT = 'Source Sans Pro';
+const MONO = 'Roboto Mono';
+
+const TARGET_COL_WIDTH = 12; // 12-col virtual grid (A:L)
 
 export type RepairResult = {
   rowsWritten: number;
   errors: string[];
 };
 
-// Builds a list of [string][] rows that get pasted into A1:onwards on
-// the Dashboard tab. We use plain text + formulas so the rebuild is
-// portable across Sheets / Excel and survives if the team renames the
-// brand colors.
-// Internal row shape — keeps a tag so we know later which rows to bold,
-// which to color as a value, etc. when we apply formatting via
-// batchUpdate.
-type DashboardRow = {
-  tag: 'title' | 'subtitle' | 'section' | 'metric' | 'blank';
-  cells: (string | number | boolean)[];
-};
+// Range strings for the funnel formulas. Bumped to 2000 so the live
+// result matches the build-time builder.
+const COMPANY_STATUS_RNG = 'Companies!M2:M2000';
+const COMPANY_NAME_RNG = 'Companies!B2:B2000';
+const COMPANY_FUND_RNG = 'Companies!K2:K2000';
+const ASSIGN_PILLAR_RNG = "'Intervention Assignments'!C2:C2000";
+const REVIEWS_DECISION_RNG = 'Reviews!D2:D2000';
+const REVIEWS_ID_RNG = 'Reviews!A2:A2000';
 
-// Every dashboard row is exactly 3 columns: [label, value, bar]. The
-// content gets padded to 26 columns at write time so any legacy
-// multi-column content from the original Python builder gets cleared.
-function buildDashboardRows(): DashboardRow[] {
-  const rows: DashboardRow[] = [];
+// ─── content model ───────────────────────────────────────────────────
+type Block =
+  | { kind: 'title'; text: string }
+  | { kind: 'subtitle'; text: string }
+  | { kind: 'section'; text: string }
+  | { kind: 'kpiRow'; tiles: Array<{ label: string; formula: string; tone: 'navy' | 'teal' | 'green' | 'amber' | 'red' }> }
+  | { kind: 'bar'; label: string; valueFormula: string; barFormula: string; tone?: 'teal' | 'red' }
+  | { kind: 'spacer' };
 
-  const section = (label: string) => rows.push({ tag: 'section', cells: [label, '', ''] });
-  const metric = (label: string, valueFormula: string, barFormula: string = '') =>
-    rows.push({ tag: 'metric', cells: [label, valueFormula, barFormula] });
-  const blank = () => rows.push({ tag: 'blank', cells: ['', '', ''] });
-
-  // Title.
-  rows.push({ tag: 'title', cells: ['Companies Master Dashboard', '', ''] });
-  rows.push({ tag: 'subtitle', cells: ['Live mirror of the Companies module in the Elevate Portal.', '', ''] });
-  blank();
-
-  // Top metrics — vertical, one per row.
-  section('Top metrics');
-  metric('Total companies in master', '=COUNTA(Companies!B2:B2000)');
-  metric('Interviewed', '=COUNTIF(Companies!M2:M2000,"Interviewed")');
-  metric('Selected', '=COUNTIF(Companies!M2:M2000,"Selected")');
-  metric('Onboarded', '=COUNTIF(Companies!M2:M2000,"Onboarded")');
-  metric('Active', '=COUNTIF(Companies!M2:M2000,"Active")');
-  blank();
-
-  // Funnel by status — every current status with a count + bar.
-  section('Funnel by status');
-  for (const s of COMPANY_STATUSES) {
-    metric(
-      s,
-      `=COUNTIF(Companies!M2:M2000,"${s}")`,
-      `=IFERROR(REPT("█",MIN(40,ROUND(COUNTIF(Companies!M2:M2000,"${s}")/MAX(1,COUNTA(Companies!M2:M2000))*40,0))),"")`,
-    );
-  }
-  blank();
-
-  // By fund.
-  section('By fund');
-  for (const f of FUND_CODES) {
-    const label = f === '97060' ? `${f} (Dutch)` : f === '91763' ? `${f} (SIDA)` : f;
-    metric(
-      label,
-      `=COUNTIF(Companies!K2:K2000,"${f}")`,
-      `=IFERROR(REPT("█",MIN(40,ROUND(COUNTIF(Companies!K2:K2000,"${f}")/MAX(1,COUNTA(Companies!K2:K2000))*40,0))),"")`,
-    );
-  }
-  blank();
-
-  // Assignments by intervention pillar.
-  section('Assignments by intervention');
-  for (const p of PILLARS) {
-    metric(
-      p,
-      `=COUNTIF('Intervention Assignments'!C2:C2000,"${p}")`,
-      `=IFERROR(REPT("█",MIN(40,ROUND(COUNTIF('Intervention Assignments'!C2:C2000,"${p}")/MAX(1,COUNTA('Intervention Assignments'!C2:C2000))*40,0))),"")`,
-    );
-  }
-  blank();
-
-  // Reviews summary — pulls from the Reviews tab.
-  section('Reviews');
-  metric('Total reviews', `=COUNTA(Reviews!A2:A2000)`);
-  metric(
-    'Recommended',
-    `=COUNTIF(Reviews!D2:D2000,"Recommend")`,
-    `=IFERROR(REPT("█",MIN(40,ROUND(COUNTIF(Reviews!D2:D2000,"Recommend")/MAX(1,COUNTA(Reviews!D2:D2000))*40,0))),"")`,
-  );
-  metric(
-    'Hold',
-    `=COUNTIF(Reviews!D2:D2000,"Hold")`,
-    `=IFERROR(REPT("█",MIN(40,ROUND(COUNTIF(Reviews!D2:D2000,"Hold")/MAX(1,COUNTA(Reviews!D2:D2000))*40,0))),"")`,
-  );
-  metric(
-    'Reject',
-    `=COUNTIF(Reviews!D2:D2000,"Reject")`,
-    `=IFERROR(REPT("█",MIN(40,ROUND(COUNTIF(Reviews!D2:D2000,"Reject")/MAX(1,COUNTA(Reviews!D2:D2000))*40,0))),"")`,
-  );
-  blank();
-
-  return rows;
+function bar(label: string, countFormula: string, totalFormula: string, tone: 'teal' | 'red' = 'red'): Block {
+  return {
+    kind: 'bar',
+    label,
+    valueFormula: countFormula,
+    barFormula: `=IFERROR(REPT("█",MIN(40,ROUND(${countFormula}/MAX(1,${totalFormula})*40,0)))&REPT("░",MAX(0,40-MIN(40,ROUND(${countFormula}/MAX(1,${totalFormula})*40,0)))),"")`,
+    tone,
+  };
 }
 
-function colLetter(n: number): string {
-  let s = '';
-  while (n >= 0) {
-    s = String.fromCharCode(65 + (n % 26)) + s;
-    n = Math.floor(n / 26) - 1;
-  }
-  return s;
-}
+function buildBlocks(): Block[] {
+  const blocks: Block[] = [];
+  blocks.push({ kind: 'title', text: 'Companies Master Dashboard' });
+  blocks.push({ kind: 'subtitle', text: 'Live mirror of the Companies module in the Elevate Portal.' });
+  blocks.push({ kind: 'spacer' });
 
-// Brand palette used for cell styling. Mirrors the GSG portal palette
-// so the dashboard tab looks like the rest of the system.
-const BRAND_NAVY = { red: 0.07, green: 0.15, blue: 0.27 };       // navy-500
-const BRAND_TEAL = { red: 0.0, green: 0.66, blue: 0.74 };        // brand teal
-const BRAND_BG_LIGHT = { red: 0.96, green: 0.97, blue: 0.99 };   // header row tint
-const WHITE = { red: 1, green: 1, blue: 1 };
-
-const TARGET_COL_WIDTH = 26;
-
-export async function repairDashboard(sheetId: string): Promise<RepairResult> {
-  const errors: string[] = [];
-
-  await ensureSchema(sheetId, 'Dashboard', ['Companies Master Dashboard']);
-
-  // Resolve the Dashboard tab's numeric sheetId for the batchUpdate
-  // formatting requests later.
-  let dashboardSheetId: number | null = null;
-  try {
-    const meta = await getSpreadsheetMeta(sheetId);
-    const dash = meta.sheets.find(s => s.title === 'Dashboard');
-    if (dash) dashboardSheetId = dash.sheetId;
-  } catch (err) {
-    errors.push(`could not look up Dashboard tab id: ${(err as Error).message}`);
-  }
-
-  // Unmerge every merged range on the Dashboard tab + reset cell
-  // formatting. Non-fatal if it fails.
-  if (dashboardSheetId !== null) {
-    try {
-      await batchUpdate(sheetId, [
-        { unmergeCells: { range: rangeRef(dashboardSheetId, 0, 200, 0, TARGET_COL_WIDTH) } },
-        {
-          repeatCell: {
-            range: rangeRef(dashboardSheetId, 0, 200, 0, TARGET_COL_WIDTH),
-            cell: { userEnteredFormat: {} },
-            fields: 'userEnteredFormat',
-          },
-        },
-      ]);
-    } catch (err) {
-      errors.push(`unmerge / format-reset failed (non-fatal): ${(err as Error).message}`);
-    }
-  }
-
-  // Build content + write across the full 26-col width so any legacy
-  // values in cells D-Z get blanked. Without this, the previous 12-col
-  // 'Top metrics' row had labels like 'Active'/'Onboarded'/'Selected'
-  // sitting in cols E/H/K which our 3-col write left untouched.
-  const rows = buildDashboardRows();
-  const padded = rows.map(r => {
-    const out: (string | number | boolean)[] = [...r.cells];
-    while (out.length < TARGET_COL_WIDTH) out.push('');
-    return out;
+  // Top KPI tiles (4 across).
+  blocks.push({ kind: 'section', text: 'Top metrics' });
+  blocks.push({
+    kind: 'kpiRow',
+    tiles: [
+      { label: 'Total in master', formula: `=COUNTA(${COMPANY_NAME_RNG})`, tone: 'navy' },
+      { label: 'Interviewed+', formula: `=COUNTIF(${COMPANY_STATUS_RNG},"Interviewed")+COUNTIF(${COMPANY_STATUS_RNG},"Reviewing")+COUNTIF(${COMPANY_STATUS_RNG},"Recommended")+COUNTIF(${COMPANY_STATUS_RNG},"Selected")+COUNTIF(${COMPANY_STATUS_RNG},"Onboarded")+COUNTIF(${COMPANY_STATUS_RNG},"Active")`, tone: 'teal' },
+      { label: 'Selected', formula: `=COUNTIF(${COMPANY_STATUS_RNG},"Selected")`, tone: 'green' },
+      { label: 'Active', formula: `=COUNTIF(${COMPANY_STATUS_RNG},"Active")`, tone: 'amber' },
+    ],
   });
 
-  const lastCol = colLetter(TARGET_COL_WIDTH - 1);
-  try {
-    await updateRange(sheetId, `Dashboard!A1:${lastCol}${padded.length}`, padded);
-  } catch (err) {
-    errors.push(`content write failed: ${(err as Error).message}`);
-    return { rowsWritten: 0, errors };
+  // Funnel by status.
+  blocks.push({ kind: 'section', text: 'Funnel by status' });
+  for (const s of COMPANY_STATUSES) {
+    blocks.push(bar(s, `COUNTIF(${COMPANY_STATUS_RNG},"${s}")`, `COUNTA(${COMPANY_STATUS_RNG})`, 'red'));
+  }
+  blocks.push({ kind: 'spacer' });
+
+  // By fund.
+  blocks.push({ kind: 'section', text: 'By fund' });
+  for (const f of FUND_CODES) {
+    blocks.push(bar(f.label, `COUNTIF(${COMPANY_FUND_RNG},"${f.code}")`, `COUNTA(${COMPANY_FUND_RNG})`, 'teal'));
+  }
+  blocks.push({ kind: 'spacer' });
+
+  // Assignments by intervention pillar.
+  blocks.push({ kind: 'section', text: 'Assignments by intervention' });
+  for (const p of PILLARS) {
+    blocks.push(bar(p, `COUNTIF(${ASSIGN_PILLAR_RNG},"${p}")`, `COUNTA(${ASSIGN_PILLAR_RNG})`, 'teal'));
+  }
+  blocks.push({ kind: 'spacer' });
+
+  // Reviews summary.
+  blocks.push({ kind: 'section', text: 'Reviews' });
+  blocks.push({
+    kind: 'kpiRow',
+    tiles: [
+      { label: 'Total reviews', formula: `=COUNTA(${REVIEWS_ID_RNG})`, tone: 'navy' },
+      { label: 'Recommend', formula: `=COUNTIF(${REVIEWS_DECISION_RNG},"Recommend")`, tone: 'green' },
+      { label: 'Hold', formula: `=COUNTIF(${REVIEWS_DECISION_RNG},"Hold")`, tone: 'amber' },
+      { label: 'Reject', formula: `=COUNTIF(${REVIEWS_DECISION_RNG},"Reject")`, tone: 'red' },
+    ],
+  });
+  for (const dec of ['Recommend', 'Hold', 'Reject'] as const) {
+    blocks.push(bar(dec, `COUNTIF(${REVIEWS_DECISION_RNG},"${dec}")`, `COUNTA(${REVIEWS_DECISION_RNG})`, 'teal'));
   }
 
-  // Wipe stale rows below.
-  const wipeStartRow = padded.length + 1;
-  const wipeEndRow = padded.length + 80;
-  const wipe = new Array(wipeEndRow - wipeStartRow + 1)
-    .fill(0)
-    .map(() => new Array(TARGET_COL_WIDTH).fill(''));
-  try {
-    await updateRange(sheetId, `Dashboard!A${wipeStartRow}:${lastCol}${wipeEndRow}`, wipe, { valueInput: 'RAW' });
-  } catch (err) {
-    errors.push(`stale-row wipe failed (non-fatal): ${(err as Error).message}`);
-  }
+  return blocks;
+}
 
-  // Apply formatting per row tag. Title gets a large bold navy font;
-  // section headers get bold + tinted background; metric rows get
-  // bold first column + monospace value column.
-  if (dashboardSheetId !== null) {
-    const requests: unknown[] = [];
+// ─── flattening: blocks → cell rows + formatting requests ────────────
+type CellGrid = (string | number | boolean)[][];
 
-    // Column widths so the layout is readable: A label wide, B value
-    // narrow, C bar wide.
-    requests.push(setColWidth(dashboardSheetId, 0, 260));   // A
-    requests.push(setColWidth(dashboardSheetId, 1, 90));    // B
-    requests.push(setColWidth(dashboardSheetId, 2, 380));   // C
+type RowRange = { start: number; end: number; tag: Block['kind']; tone?: string; tilesIdx?: number };
 
-    rows.forEach((r, i) => {
-      const rowIdx = i;
-      switch (r.tag) {
-        case 'title':
-          requests.push({
-            mergeCells: { range: rangeRef(dashboardSheetId!, rowIdx, rowIdx + 1, 0, 4), mergeType: 'MERGE_ROWS' },
-          });
-          requests.push(formatRow(dashboardSheetId, rowIdx, 0, 4, {
-            backgroundColor: BRAND_NAVY,
-            textFormat: { fontSize: 18, bold: true, foregroundColor: WHITE, fontFamily: 'Source Sans Pro' },
-            verticalAlignment: 'MIDDLE',
-            horizontalAlignment: 'LEFT',
-            padding: { top: 8, bottom: 8, left: 12, right: 12 },
-          }));
-          requests.push(setRowHeight(dashboardSheetId, rowIdx, 38));
-          break;
-        case 'subtitle':
-          requests.push({
-            mergeCells: { range: rangeRef(dashboardSheetId!, rowIdx, rowIdx + 1, 0, 4), mergeType: 'MERGE_ROWS' },
-          });
-          requests.push(formatRow(dashboardSheetId, rowIdx, 0, 4, {
-            textFormat: { fontSize: 11, italic: true, foregroundColor: { red: 0.4, green: 0.45, blue: 0.55 }, fontFamily: 'Source Sans Pro' },
-            horizontalAlignment: 'LEFT',
-            padding: { top: 4, bottom: 8, left: 12, right: 12 },
-          }));
-          break;
-        case 'section':
-          requests.push(formatRow(dashboardSheetId, rowIdx, 0, TARGET_COL_WIDTH, {
-            backgroundColor: BRAND_BG_LIGHT,
-            textFormat: { fontSize: 11, bold: true, foregroundColor: BRAND_NAVY, fontFamily: 'Source Sans Pro' },
-            horizontalAlignment: 'LEFT',
-            padding: { top: 6, bottom: 6, left: 8, right: 8 },
-          }));
-          requests.push(setRowHeight(dashboardSheetId, rowIdx, 26));
-          // top + bottom border for section header
-          requests.push({
-            updateBorders: {
-              range: rangeRef(dashboardSheetId!, rowIdx, rowIdx + 1, 0, 3),
-              top: { style: 'SOLID', width: 1, color: BRAND_TEAL },
-              bottom: { style: 'SOLID', width: 1, color: { red: 0.85, green: 0.88, blue: 0.92 } },
-            },
-          });
-          break;
-        case 'metric':
-          // Label cell (col A) bold navy
-          requests.push(formatRow(dashboardSheetId, rowIdx, 0, 1, {
-            textFormat: { fontSize: 11, bold: true, foregroundColor: BRAND_NAVY, fontFamily: 'Source Sans Pro' },
-            horizontalAlignment: 'LEFT',
-            padding: { top: 4, bottom: 4, left: 12, right: 4 },
-          }));
-          // Value cell (col B) right-aligned mono
-          requests.push(formatRow(dashboardSheetId, rowIdx, 1, 2, {
-            textFormat: { fontSize: 11, bold: true, foregroundColor: BRAND_NAVY, fontFamily: 'Roboto Mono' },
-            horizontalAlignment: 'RIGHT',
-            padding: { top: 4, bottom: 4, left: 4, right: 12 },
-          }));
-          // Bar cell (col C) teal
-          requests.push(formatRow(dashboardSheetId, rowIdx, 2, 3, {
-            textFormat: { fontSize: 11, foregroundColor: BRAND_TEAL, fontFamily: 'Roboto Mono' },
-            horizontalAlignment: 'LEFT',
-            padding: { top: 4, bottom: 4, left: 8, right: 8 },
-          }));
-          break;
-        default:
-          break;
+function flattenBlocks(blocks: Block[]): { grid: CellGrid; ranges: RowRange[] } {
+  const grid: CellGrid = [];
+  const ranges: RowRange[] = [];
+
+  const blank = () => new Array(TARGET_COL_WIDTH).fill('');
+
+  for (const b of blocks) {
+    switch (b.kind) {
+      case 'title': {
+        const idx = grid.length;
+        const r = blank();
+        r[0] = b.text;
+        grid.push(r);
+        ranges.push({ start: idx, end: idx + 1, tag: 'title' });
+        break;
       }
-    });
-
-    if (requests.length > 0) {
-      try {
-        // batchUpdate has a request size cap; split into chunks of 100.
-        const chunks: unknown[][] = [];
-        for (let i = 0; i < requests.length; i += 100) chunks.push(requests.slice(i, i + 100));
-        for (const c of chunks) await batchUpdate(sheetId, c);
-      } catch (err) {
-        errors.push(`formatting failed (non-fatal): ${(err as Error).message}`);
+      case 'subtitle': {
+        const idx = grid.length;
+        const r = blank();
+        r[0] = b.text;
+        grid.push(r);
+        ranges.push({ start: idx, end: idx + 1, tag: 'subtitle' });
+        break;
+      }
+      case 'spacer': {
+        grid.push(blank());
+        break;
+      }
+      case 'section': {
+        const idx = grid.length;
+        const r = blank();
+        r[0] = b.text;
+        grid.push(r);
+        ranges.push({ start: idx, end: idx + 1, tag: 'section' });
+        break;
+      }
+      case 'kpiRow': {
+        // Two rows: label band (small caps) + value band (big number).
+        const labelRowIdx = grid.length;
+        const valueRowIdx = labelRowIdx + 1;
+        const labelRow = blank();
+        const valueRow = blank();
+        const cols = [0, 3, 6, 9]; // start columns for the 4 tiles
+        b.tiles.forEach((t, i) => {
+          const c = cols[i];
+          if (c === undefined) return;
+          labelRow[c] = t.label.toUpperCase();
+          valueRow[c] = t.formula;
+        });
+        grid.push(labelRow);
+        grid.push(valueRow);
+        // One range per tile so we can apply the tone-specific fill.
+        b.tiles.forEach((t, i) => {
+          const c = cols[i];
+          if (c === undefined) return;
+          ranges.push({ start: labelRowIdx, end: labelRowIdx + 1, tag: 'kpiRow', tone: t.tone, tilesIdx: c });
+          ranges.push({ start: valueRowIdx, end: valueRowIdx + 1, tag: 'kpiRow', tone: t.tone, tilesIdx: 100 + c }); // 100+ marks "value band"
+        });
+        // gutter row below the tiles
+        grid.push(blank());
+        break;
+      }
+      case 'bar': {
+        const idx = grid.length;
+        const r = blank();
+        r[0] = b.label;
+        r[1] = `=${b.valueFormula}`;
+        r[2] = b.barFormula;
+        grid.push(r);
+        ranges.push({ start: idx, end: idx + 1, tag: 'bar', tone: b.tone || 'teal' });
+        break;
       }
     }
   }
 
-  return { rowsWritten: padded.length, errors };
+  return { grid, ranges };
 }
 
-// ─────────── batchUpdate request helpers ───────────
+// ─── batchUpdate request helpers ─────────────────────────────────────
 
 function rangeRef(sheetId: number, startRow: number, endRow: number, startCol: number, endCol: number) {
   return {
@@ -310,27 +232,17 @@ function rangeRef(sheetId: number, startRow: number, endRow: number, startCol: n
   };
 }
 
-function formatRow(
-  sheetId: number,
-  rowIdx: number,
-  startCol: number,
-  endCol: number,
-  format: Record<string, unknown>,
-): unknown {
+function repeatCell(_dashSheetId: number, range: ReturnType<typeof rangeRef>, format: Record<string, unknown>): unknown {
   const fields = Object.keys(format).map(k => `userEnteredFormat.${k}`).join(',');
   return {
-    repeatCell: {
-      range: rangeRef(sheetId, rowIdx, rowIdx + 1, startCol, endCol),
-      cell: { userEnteredFormat: format },
-      fields,
-    },
+    repeatCell: { range, cell: { userEnteredFormat: format }, fields },
   };
 }
 
-function setColWidth(sheetId: number, colIdx: number, pixels: number): unknown {
+function setColWidth(dashSheetId: number, startCol: number, endCol: number, pixels: number): unknown {
   return {
     updateDimensionProperties: {
-      range: { sheetId, dimension: 'COLUMNS', startIndex: colIdx, endIndex: colIdx + 1 },
+      range: { sheetId: dashSheetId, dimension: 'COLUMNS', startIndex: startCol, endIndex: endCol },
       properties: { pixelSize: pixels },
       fields: 'pixelSize',
     },
@@ -345,4 +257,213 @@ function setRowHeight(sheetId: number, rowIdx: number, pixels: number): unknown 
       fields: 'pixelSize',
     },
   };
+}
+
+function colLetter(n: number): string {
+  let s = '';
+  let m = n;
+  while (m >= 0) {
+    s = String.fromCharCode(65 + (m % 26)) + s;
+    m = Math.floor(m / 26) - 1;
+  }
+  return s;
+}
+
+const TONE_TILE: Record<string, { fill: { red: number; green: number; blue: number }; fg: { red: number; green: number; blue: number } }> = {
+  navy: TILE_NAVY,
+  teal: TILE_TEAL,
+  green: TILE_GREEN,
+  amber: TILE_AMBER,
+  red: TILE_RED,
+};
+
+// ─── main ────────────────────────────────────────────────────────────
+
+export async function repairDashboard(sheetId: string): Promise<RepairResult> {
+  const errors: string[] = [];
+
+  await ensureSchema(sheetId, 'Dashboard', ['Companies Master Dashboard']);
+
+  let dashboardSheetId: number | null = null;
+  try {
+    const meta = await getSpreadsheetMeta(sheetId);
+    const dash = meta.sheets.find(s => s.title === 'Dashboard');
+    if (dash) dashboardSheetId = dash.sheetId;
+  } catch (err) {
+    errors.push(`could not look up Dashboard tab id: ${(err as Error).message}`);
+  }
+
+  const blocks = buildBlocks();
+  const { grid, ranges } = flattenBlocks(blocks);
+
+  // Pad grid to the wide format that legacy dashboards used so any
+  // stale content beyond column L gets blanked out.
+  const WIPE_COL_WIDTH = 26;
+  const padded = grid.map(r => {
+    const out = [...r];
+    while (out.length < WIPE_COL_WIDTH) out.push('');
+    return out;
+  });
+
+  // 1) Reset formatting + unmerge across the whole working area.
+  if (dashboardSheetId !== null) {
+    try {
+      await batchUpdate(sheetId, [
+        { unmergeCells: { range: rangeRef(dashboardSheetId, 0, 250, 0, WIPE_COL_WIDTH) } },
+        repeatCell(dashboardSheetId, rangeRef(dashboardSheetId, 0, 250, 0, WIPE_COL_WIDTH), {}),
+      ]);
+    } catch (err) {
+      errors.push(`unmerge / format-reset failed (non-fatal): ${(err as Error).message}`);
+    }
+  }
+
+  // 2) Write the cell values + formulas.
+  const lastCol = colLetter(WIPE_COL_WIDTH - 1);
+  try {
+    await updateRange(sheetId, `Dashboard!A1:${lastCol}${padded.length}`, padded);
+  } catch (err) {
+    errors.push(`content write failed: ${(err as Error).message}`);
+    return { rowsWritten: 0, errors };
+  }
+
+  // 3) Wipe stale rows below.
+  const wipeStartRow = padded.length + 1;
+  const wipeEndRow = padded.length + 80;
+  const wipe = new Array(wipeEndRow - wipeStartRow + 1)
+    .fill(0)
+    .map(() => new Array(WIPE_COL_WIDTH).fill(''));
+  try {
+    await updateRange(sheetId, `Dashboard!A${wipeStartRow}:${lastCol}${wipeEndRow}`, wipe, { valueInput: 'RAW' });
+  } catch (err) {
+    errors.push(`stale-row wipe failed (non-fatal): ${(err as Error).message}`);
+  }
+
+  // 4) Apply formatting via batchUpdate.
+  if (dashboardSheetId !== null) {
+    const requests: unknown[] = [];
+
+    // 12-col grid: each col ~92px wide so the whole strip is ~1100px.
+    requests.push(setColWidth(dashboardSheetId, 0, 12, 92));
+    // hide gridlines on the dashboard
+    requests.push({
+      updateSheetProperties: {
+        properties: { sheetId: dashboardSheetId, gridProperties: { hideGridlines: true } },
+        fields: 'gridProperties.hideGridlines',
+      },
+    });
+
+    for (const r of ranges) {
+      switch (r.tag) {
+        case 'title':
+          requests.push({
+            mergeCells: { range: rangeRef(dashboardSheetId, r.start, r.end, 0, 12), mergeType: 'MERGE_ROWS' },
+          });
+          requests.push(repeatCell(dashboardSheetId, rangeRef(dashboardSheetId, r.start, r.end, 0, 12), {
+            backgroundColor: WHITE,
+            textFormat: { fontSize: 18, bold: true, foregroundColor: BRAND_NAVY, fontFamily: FONT },
+            verticalAlignment: 'MIDDLE',
+            horizontalAlignment: 'LEFT',
+            padding: { top: 8, bottom: 4, left: 12, right: 12 },
+          }));
+          requests.push(setRowHeight(dashboardSheetId, r.start, 36));
+          break;
+        case 'subtitle':
+          requests.push({
+            mergeCells: { range: rangeRef(dashboardSheetId, r.start, r.end, 0, 12), mergeType: 'MERGE_ROWS' },
+          });
+          requests.push(repeatCell(dashboardSheetId, rangeRef(dashboardSheetId, r.start, r.end, 0, 12), {
+            textFormat: { fontSize: 11, italic: true, foregroundColor: MUTED, fontFamily: FONT },
+            horizontalAlignment: 'LEFT',
+            padding: { top: 0, bottom: 8, left: 12, right: 12 },
+          }));
+          break;
+        case 'section':
+          requests.push({
+            mergeCells: { range: rangeRef(dashboardSheetId, r.start, r.end, 0, 12), mergeType: 'MERGE_ROWS' },
+          });
+          requests.push(repeatCell(dashboardSheetId, rangeRef(dashboardSheetId, r.start, r.end, 0, 12), {
+            backgroundColor: BRAND_NAVY,
+            textFormat: { fontSize: 12, bold: true, foregroundColor: WHITE, fontFamily: FONT },
+            horizontalAlignment: 'LEFT',
+            verticalAlignment: 'MIDDLE',
+            padding: { top: 6, bottom: 6, left: 12, right: 12 },
+          }));
+          requests.push(setRowHeight(dashboardSheetId, r.start, 26));
+          break;
+        case 'kpiRow': {
+          // tone metadata: tilesIdx < 100 ⇒ label band, ≥ 100 ⇒ value band
+          const tone = TONE_TILE[r.tone || 'navy'];
+          const isValueBand = (r.tilesIdx || 0) >= 100;
+          const startCol = (r.tilesIdx || 0) % 100;
+          const endCol = startCol + 3;
+          requests.push({
+            mergeCells: { range: rangeRef(dashboardSheetId, r.start, r.end, startCol, endCol), mergeType: 'MERGE_ROWS' },
+          });
+          if (isValueBand) {
+            requests.push(repeatCell(dashboardSheetId, rangeRef(dashboardSheetId, r.start, r.end, startCol, endCol), {
+              backgroundColor: tone.fill,
+              textFormat: { fontSize: 22, bold: true, foregroundColor: tone.fg, fontFamily: FONT },
+              horizontalAlignment: 'LEFT',
+              verticalAlignment: 'MIDDLE',
+              padding: { top: 4, bottom: 4, left: 12, right: 12 },
+            }));
+            requests.push(setRowHeight(dashboardSheetId, r.start, 38));
+          } else {
+            requests.push(repeatCell(dashboardSheetId, rangeRef(dashboardSheetId, r.start, r.end, startCol, endCol), {
+              backgroundColor: tone.fill,
+              textFormat: { fontSize: 9, bold: true, foregroundColor: tone.fg, fontFamily: FONT },
+              horizontalAlignment: 'LEFT',
+              verticalAlignment: 'MIDDLE',
+              padding: { top: 4, bottom: 4, left: 12, right: 12 },
+            }));
+            requests.push(setRowHeight(dashboardSheetId, r.start, 18));
+          }
+          break;
+        }
+        case 'bar': {
+          // Label cell A
+          requests.push(repeatCell(dashboardSheetId, rangeRef(dashboardSheetId, r.start, r.end, 0, 1), {
+            textFormat: { fontSize: 11, bold: true, foregroundColor: BRAND_NAVY, fontFamily: FONT },
+            horizontalAlignment: 'LEFT',
+            verticalAlignment: 'MIDDLE',
+            padding: { top: 4, bottom: 4, left: 12, right: 4 },
+          }));
+          // Value cell B
+          requests.push(repeatCell(dashboardSheetId, rangeRef(dashboardSheetId, r.start, r.end, 1, 2), {
+            textFormat: { fontSize: 11, bold: true, foregroundColor: BRAND_NAVY, fontFamily: MONO },
+            horizontalAlignment: 'RIGHT',
+            verticalAlignment: 'MIDDLE',
+            padding: { top: 4, bottom: 4, left: 4, right: 8 },
+          }));
+          // Bar cells C:L merged
+          const tone = r.tone === 'red' ? BRAND_RED : BRAND_TEAL;
+          requests.push({
+            mergeCells: { range: rangeRef(dashboardSheetId, r.start, r.end, 2, 12), mergeType: 'MERGE_ROWS' },
+          });
+          requests.push(repeatCell(dashboardSheetId, rangeRef(dashboardSheetId, r.start, r.end, 2, 12), {
+            textFormat: { fontSize: 11, foregroundColor: tone, fontFamily: MONO },
+            horizontalAlignment: 'LEFT',
+            verticalAlignment: 'MIDDLE',
+            padding: { top: 4, bottom: 4, left: 8, right: 8 },
+          }));
+          requests.push(setRowHeight(dashboardSheetId, r.start, 22));
+          break;
+        }
+      }
+    }
+
+    // batchUpdate has a request size cap; ship in chunks of 100.
+    const chunks: unknown[][] = [];
+    for (let i = 0; i < requests.length; i += 100) chunks.push(requests.slice(i, i + 100));
+    for (const c of chunks) {
+      try {
+        await batchUpdate(sheetId, c);
+      } catch (err) {
+        errors.push(`formatting chunk failed (non-fatal): ${(err as Error).message}`);
+        // keep going — partial formatting is better than none
+      }
+    }
+  }
+
+  return { rowsWritten: padded.length, errors };
 }
