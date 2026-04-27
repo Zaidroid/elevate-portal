@@ -60,7 +60,6 @@ export function FinalDecisionView({
   companies,
   reviews,
   reviewerEmail,
-  isAdmin,
   existingAssignments,
   onLockDecision,
   onExport,
@@ -68,7 +67,6 @@ export function FinalDecisionView({
   companies: ReviewableCompany[];
   reviews: Review[];
   reviewerEmail: string;
-  isAdmin: boolean;
   // Existing intervention assignments so the form can pre-fill picks
   // that have already been materialized for this company.
   existingAssignments: Array<{ company_id: string; intervention_type: string; sub_intervention: string; fund_code: string }>;
@@ -133,18 +131,10 @@ export function FinalDecisionView({
     );
   }
 
-  if (!isAdmin) {
-    return (
-      <Card>
-        <EmptyState
-          icon={<Lock className="h-8 w-8" />}
-          title="Final Decision is admin-only"
-          description="Reviews are still open for everyone — only admins can lock the final cohort and intervention pack."
-        />
-      </Card>
-    );
-  }
-
+  // Final Decision is open to the whole team. Drive sharing on the
+  // Companies workbook controls who can actually write — so a
+  // non-editor will get a clear "no edit access" error from the API
+  // when they try to Lock, instead of being walled off here.
   const toggle = (id: string) => {
     const next = new Set(expanded);
     if (next.has(id)) next.delete(id); else next.add(id);

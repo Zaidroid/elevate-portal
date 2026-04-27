@@ -1543,7 +1543,6 @@ export function CompaniesPage() {
           companies={reviewableForView}
           reviews={reviews.rows}
           reviewerEmail={user?.email || ''}
-          isAdmin={admin}
           existingAssignments={assignments.rows.map(a => ({
             company_id: a.company_id,
             intervention_type: a.intervention_type,
