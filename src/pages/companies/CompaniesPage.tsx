@@ -38,6 +38,8 @@ import { pillarFor } from '../../config/interventions';
 import { INTERVIEWED_NAMES, INTERVIEWED_RAW, isInterviewed } from './interviewedSource';
 import { ReviewView } from './ReviewView';
 import type { ReviewableCompany, SelectionContext } from './ReviewView';
+import { FinalDecisionView } from './FinalDecisionView';
+import type { FinalLockArgs } from './FinalDecisionView';
 import { indexByCompanyName, lookupByName } from './selectionContext';
 import { ExpandableCompanyCard } from './ExpandableCompanyCard';
 import type { CardCompany } from './ExpandableCompanyCard';
@@ -167,8 +169,8 @@ export function CompaniesPage() {
 
   // Hoisted up front so the Selection-workbook hooks below can lazy-mount
   // when the Review view isn't open. Cuts polling load substantially.
-  const [view, setView] = useState<'review' | 'dashboard' | 'pipeline' | 'roster'>('review');
-  const reviewActive = view === 'review';
+  const [view, setView] = useState<'review' | 'finalize' | 'dashboard' | 'pipeline' | 'roster'>('review');
+  const reviewActive = view === 'review' || view === 'finalize';
   // Read-only context tabs barely change; poll them every 5 minutes
   // instead of the default 30 seconds. The user still sees fresh data
   // because every visibility-change fires an immediate refresh.
@@ -1122,8 +1124,20 @@ export function CompaniesPage() {
     [reviewableCompanies, reviewSummaryByCompany]
   );
 
+  // Final decision unlocks once every company in scope has at least
+  // one team review. Admin-only — non-admins still see the tab so
+  // they know it's coming, but it routes to a "still gathering reviews"
+  // state in the view itself.
+  const finalReady = reviewableCompanies.length > 0 && reviewedAnyone === reviewableCompanies.length;
+
   const tabs: TabItem[] = [
     { value: 'review', label: `Review · ${reviewedAnyone}/${reviewableCompanies.length}`, icon: <MessageCircle className="h-4 w-4" /> },
+    {
+      value: 'finalize',
+      label: finalReady ? `Final Decision · ready` : `Final Decision · ${reviewableCompanies.length - reviewedAnyone} left`,
+      icon: <BarChart3 className="h-4 w-4" />,
+      disabled: !finalReady,
+    },
     { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
     { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: counts.total },
     { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: counts.filtered },
@@ -1519,6 +1533,77 @@ export function CompaniesPage() {
             } catch (e) {
               toast.error('Remove failed', (e as Error).message);
             }
+          }}
+        />
+      )}
+
+      {view === 'finalize' && (
+        <FinalDecisionView
+          companies={reviewableForView}
+          reviews={reviews.rows}
+          reviewerEmail={user?.email || ''}
+          isAdmin={admin}
+          existingAssignments={assignments.rows.map(a => ({
+            company_id: a.company_id,
+            intervention_type: a.intervention_type,
+            sub_intervention: a.sub_intervention,
+            fund_code: a.fund_code,
+          }))}
+          onLockDecision={async (args: FinalLockArgs) => {
+            const c = reviewableForView.find(x => x.company_id === args.companyId);
+            if (!c) throw new Error('Company not found');
+            // Upsert master row.
+            const existing = master.rows.find(m => m.company_id === args.companyId);
+            // Determine the company-level fund_code: first per-pillar fund picked,
+            // so the master sheet's status panel still shows a representative fund.
+            const repFund = args.interventions.find(i => i.fund_code)?.fund_code || c.fund_code || '';
+            if (existing) {
+              await master.updateRow(args.companyId, {
+                status: args.status,
+                profile_manager_email: args.pmEmail,
+                ...(repFund ? { fund_code: repFund } : {}),
+              });
+            } else {
+              await master.createRow({
+                company_id: args.companyId,
+                company_name: args.companyName,
+                cohort: 'E3',
+                status: args.status,
+                stage: args.status,
+                sector: c.sector || '',
+                city: c.city || '',
+                governorate: c.governorate || '',
+                employee_count: c.employee_count || '',
+                fund_code: repFund,
+                profile_manager_email: args.pmEmail,
+              } as Master);
+            }
+            // Materialize the per-pillar Intervention Assignment rows.
+            const now = new Date().toISOString();
+            const existingPairs = new Set(
+              assignments.rows
+                .filter(a => a.company_id === args.companyId)
+                .map(a => `${a.intervention_type}::${a.sub_intervention || ''}`)
+            );
+            for (const i of args.interventions) {
+              const key = `${i.pillar}::${i.sub || ''}`;
+              if (existingPairs.has(key)) continue;
+              await assignments.createRow({
+                assignment_id: `asn-${args.companyId}-${i.pillar}-${i.sub || 'all'}-${now}`,
+                company_id: args.companyId,
+                intervention_type: i.pillar,
+                sub_intervention: i.sub || '',
+                fund_code: i.fund_code,
+                status: 'Planned',
+                start_date: '',
+                end_date: '',
+                owner_email: args.pmEmail,
+                budget_usd: '',
+                notes: '',
+              } as Assignment);
+            }
+            await master.refresh();
+            await assignments.refresh();
           }}
         />
       )}

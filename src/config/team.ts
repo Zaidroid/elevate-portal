@@ -21,6 +21,15 @@ export const AUTHORIZED_USERS: TeamMember[] = [
   { email: 'mzourob@gazaskygeeks.com', name: 'Mohammed Zourob', role: 'user', tier: 'member', active: true, title: 'ElevateBridge Filtration' },
 ];
 
+// Account Managers — the three team members who own a finalized
+// company's day-to-day after selection. Used by the Final Decision
+// surface in the Companies page (Mohammad / Doaa / Muna).
+export const ACCOUNT_MANAGERS: { email: string; name: string }[] = [
+  { email: 'ayesh@gazaskygeeks.com', name: 'Mohammed Ayesh' },
+  { email: 'doaa@gazaskygeeks.com', name: 'Doaa Younis' },
+  { email: 'muna@gazaskygeeks.com', name: 'Muna Mahroum' },
+];
+
 export const ALLOWED_DOMAIN = import.meta.env.VITE_DOMAIN_ALLOWLIST || 'gazaskygeeks.com';
 
 const normalize = (email: string) => email.trim().toLowerCase();
