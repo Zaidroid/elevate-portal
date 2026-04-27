@@ -18,7 +18,6 @@
 // (already in useSheetDoc) surfaces a banner via the form's catch.
 
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import {
   Activity as ActivityIcon,
   BarChart3,
@@ -40,20 +39,18 @@ import {
   Button,
   Card,
   CardHeader,
+  Drawer,
   EmptyState,
   PageHeader,
   Tabs,
   useToast,
 } from '../../lib/ui';
 import type { TabItem, Tone } from '../../lib/ui';
-import { ACCOUNT_MANAGERS, displayName, getProfileManagers, isAdmin } from '../../config/team';
+import { ACCOUNT_MANAGERS, displayName, isAdmin } from '../../config/team';
 import { PILLARS, pillarFor } from '../../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from '../companies/interviewedSource';
-import { ReviewView } from './ReviewQueueTab';
 import type { ReviewableCompany, SelectionContext } from './ReviewQueueTab';
-import { FinalDecisionView } from './FinalCohortTab';
 import type { FinalLockArgs } from './FinalCohortTab';
-import { exportReviewToSheet } from './exportReview';
 import { fuzzyResolve, importExternalSeed, loadSeed } from './importExternal';
 import {
   ACTIVITY_HEADERS,
@@ -134,7 +131,6 @@ type Stage = 'review' | 'finalize' | 'output' | 'insights' | 'imports' | 'activi
 // ─── main page ───────────────────────────────────────────────────────
 
 export function SelectionPage() {
-  const navigate = useNavigate();
   const { user } = useAuth();
   const toast = useToast();
   const admin = user ? isAdmin(user.email) : false;
@@ -250,29 +246,41 @@ export function SelectionPage() {
   const shortlistsIdx = useMemo(() => indexByCompanyName(shortlists.rows), [shortlists.rows]);
   const finalCohortIdx = useMemo(() => indexByCompanyName(finalCohortRows.rows), [finalCohortRows.rows]);
 
+  // Build the joined "reviewable companies" list. The previous version
+  // iterated only over applicants, which dropped any interviewed
+  // company that lives only in the Master sheet (or only in the static
+  // INTERVIEWED_NAMES list with an alias mapped to a Master row). Now
+  // we iterate three sources and union by normalized name:
+  //   1) applicants matching interviewedSet
+  //   2) master rows matching interviewedSet (catches manual master adds)
+  //   3) the interviewed list itself (catches names with no row anywhere)
   const reviewableForView: ReviewableCompany[] = useMemo(() => {
+    const seen = new Set<string>();
     const out: ReviewableCompany[] = [];
+    const buildSelection = (name: string): SelectionContext => ({
+      scoring: lookupByName(scoringIdx, name),
+      docReview: lookupByName(docReviewIdx, name),
+      needs: lookupByName(needsIdx, name),
+      interviewAssessment: lookupByName(interviewAssessIdx, name),
+      interviewDiscussion: lookupByName(interviewDiscIdx, name),
+      interviewDiscussionAll: lookupAllByName(interviewDiscAllIdx, name),
+      committeeVotes: lookupByName(committeeIdx, name),
+      selectionVotes: lookupByName(selectionVotesIdx, name),
+      selectionVotesAll: lookupAllByName(selectionVotesAllIdx, name),
+      firstFiltration: lookupByName(firstFiltrationIdx, name),
+      additionalFiltration: lookupByName(additionalFiltrationIdx, name),
+      shortlists: lookupByName(shortlistsIdx, name),
+      finalCohort: lookupByName(finalCohortIdx, name),
+    });
+
+    // 1) Applicants
     for (const a of applicants.rows) {
       const name = a.name || a.companyName || a.company_name || '';
       const nKey = norm(name);
-      if (!nKey || !interviewedSet.has(nKey) || removedSet.has(nKey)) continue;
+      if (!nKey || !interviewedSet.has(nKey) || removedSet.has(nKey) || seen.has(nKey)) continue;
+      seen.add(nKey);
       const m = masterByName.get(nKey);
       const company_id = m?.company_id || `E3-A${padId(a.id || '')}`;
-      const selection: SelectionContext = {
-        scoring: lookupByName(scoringIdx, name),
-        docReview: lookupByName(docReviewIdx, name),
-        needs: lookupByName(needsIdx, name),
-        interviewAssessment: lookupByName(interviewAssessIdx, name),
-        interviewDiscussion: lookupByName(interviewDiscIdx, name),
-        interviewDiscussionAll: lookupAllByName(interviewDiscAllIdx, name),
-        committeeVotes: lookupByName(committeeIdx, name),
-        selectionVotes: lookupByName(selectionVotesIdx, name),
-        selectionVotesAll: lookupAllByName(selectionVotesAllIdx, name),
-        firstFiltration: lookupByName(firstFiltrationIdx, name),
-        additionalFiltration: lookupByName(additionalFiltrationIdx, name),
-        shortlists: lookupByName(shortlistsIdx, name),
-        finalCohort: lookupByName(finalCohortIdx, name),
-      };
       out.push({
         route_id: company_id,
         applicant_id: a.id || '',
@@ -289,18 +297,63 @@ export function SelectionPage() {
         contact_email: a.email || a.email_address || a.contact_email || '',
         applicantRaw: a as unknown as Record<string, string>,
         masterRaw: (m as unknown as Record<string, string>) || null,
-        selection,
+        selection: buildSelection(name),
       });
     }
+
+    // 2) Master rows that weren't covered by an applicant
+    for (const m of master.rows) {
+      const name = m.company_name || '';
+      const nKey = norm(name);
+      if (!nKey || !interviewedSet.has(nKey) || removedSet.has(nKey) || seen.has(nKey)) continue;
+      seen.add(nKey);
+      out.push({
+        route_id: m.company_id,
+        applicant_id: '',
+        company_id: m.company_id,
+        company_name: name,
+        sector: m.sector || '',
+        city: m.city || '',
+        governorate: m.governorate || '',
+        employee_count: m.employee_count || '',
+        readiness_score: '',
+        fund_code: m.fund_code || '',
+        status: m.status || 'Interviewed',
+        profile_manager_email: m.profile_manager_email || '',
+        contact_email: '',
+        applicantRaw: null,
+        masterRaw: m as unknown as Record<string, string>,
+        selection: buildSelection(name),
+      });
+    }
+
+    // 3) Static INTERVIEWED_NAMES that have no applicant or master row.
+    // These show up as stubs so the team can SEE the unmatched name and
+    // create an alias from the queue.
+    for (const nKey of interviewedSet) {
+      if (seen.has(nKey) || removedSet.has(nKey)) continue;
+      seen.add(nKey);
+      out.push({
+        route_id: `E3-S${nKey.replace(/[^a-z0-9]+/g, '-').slice(0, 30)}`,
+        applicant_id: '',
+        company_id: `E3-S${nKey.replace(/[^a-z0-9]+/g, '-').slice(0, 30)}`,
+        company_name: nKey.replace(/\b\w/g, m => m.toUpperCase()),
+        sector: '', city: '', governorate: '',
+        employee_count: '', readiness_score: '',
+        fund_code: '', status: 'Interviewed',
+        profile_manager_email: '', contact_email: '',
+        applicantRaw: null, masterRaw: null,
+        selection: buildSelection(nKey),
+      });
+    }
+
     return out.sort((a, b) => a.company_name.localeCompare(b.company_name));
   }, [
-    applicants.rows, interviewedSet, removedSet, masterByName,
+    applicants.rows, master.rows, interviewedSet, removedSet, masterByName,
     scoringIdx, docReviewIdx, needsIdx, interviewAssessIdx, interviewDiscIdx, interviewDiscAllIdx,
     committeeIdx, selectionVotesIdx, selectionVotesAllIdx,
     firstFiltrationIdx, additionalFiltrationIdx, shortlistsIdx, finalCohortIdx,
   ]);
-
-  const pms = useMemo(() => getProfileManagers(), []);
 
   // ─── activity log helper ───
   const logActivity = (action: ActivityAction, company_id?: string, extra?: { field?: string; old_value?: string; new_value?: string; details?: string }) => {
@@ -501,65 +554,27 @@ export function SelectionPage() {
 
       <div className="min-h-[280px]">
         {stage === 'review' && (
-          <ReviewView
+          <ReviewQueueBoard
             companies={reviewableForView}
             reviews={reviewsDoc.rows}
             comments={commentsDoc.rows}
+            preDecisions={preDecisionsDoc.rows}
             reviewerEmail={user?.email || ''}
-            isAdmin={admin}
-            profileManagers={pms}
             onSaveReview={onSaveReview}
             onAddComment={onAddComment}
-            onAssignPM={onAssignPM}
-            onFinalize={async ({ companyId, pmEmail, status, interventions }) => {
-              // Convert the legacy onFinalize args to the new lock shape (no per-pillar fund picker in ReviewView; uses company's fund_code).
-              const c = reviewableForView.find(x => x.company_id === companyId);
-              if (!c) return;
-              const repFund = c.fund_code || '';
-              const allowed = ['Selected', 'Recommended', 'Reviewing', 'Hold', 'Rejected'] as const;
-              type LockStatus = typeof allowed[number];
-              const narrowedStatus: LockStatus = allowed.includes(status as LockStatus) ? (status as LockStatus) : 'Selected';
-              await onLockDecision({
-                companyId,
-                companyName: c.company_name,
-                status: narrowedStatus,
-                pmEmail: pmEmail || '',
-                interventions: interventions.map(i => ({ pillar: i.pillar, sub: i.sub, fund_code: repFund })),
-              });
-            }}
-            onJumpToCompany={rid => navigate(`/companies/${encodeURIComponent(rid)}`)}
-            onRemoveCompany={async () => { /* remove flow handled in CompaniesPage; not exposed here */ }}
           />
         )}
 
         {stage === 'finalize' && (
-          <FinalDecisionView
+          <FinalCohortBoard
             companies={reviewableForView}
             reviews={reviewsDoc.rows}
-            reviewerEmail={user?.email || ''}
-            existingAssignments={assignments.rows.map(a => ({
-              company_id: a.company_id,
-              intervention_type: a.intervention_type,
-              sub_intervention: a.sub_intervention,
-              fund_code: a.fund_code,
-            }))}
-            onExport={async () => {
-              if (!masterSheetId) throw new Error('No companies workbook configured');
-              const out = await exportReviewToSheet(masterSheetId, {
-                companies: reviewableForView,
-                reviews: reviewsDoc.rows,
-                comments: commentsDoc.rows,
-                assignments: assignments.rows as unknown as Record<string, string>[],
-              }, user?.email || 'unknown');
-              logActivity('export', undefined, { details: 'Cohort review exported' });
-              return out;
-            }}
             comments={commentsDoc.rows}
             preDecisions={preDecisionsDoc.rows}
-            activity={activityDoc.rows}
-            onImportExternal={admin ? handleImportExternal : undefined}
-            importingExternal={importingExt}
+            assignments={assignments.rows}
+            reviewerEmail={user?.email || ''}
             onLockDecision={onLockDecision}
+            onAssignPM={onAssignPM}
           />
         )}
 
@@ -680,295 +695,6 @@ function StageIndicator({
   );
 }
 
-// ─── InsightsDashboard ───────────────────────────────────────────────
-
-function InsightsDashboard({
-  companies,
-  reviews,
-  assignments,
-  preDecisions,
-}: {
-  companies: ReviewableCompany[];
-  reviews: Review[];
-  assignments: Assignment[];
-  preDecisions: PreDecisionRecommendation[];
-}) {
-  // Decision distribution
-  const decisionCounts = useMemo(() => {
-    let recommend = 0, hold = 0, reject = 0;
-    for (const r of reviews) {
-      if (r.decision === 'Recommend') recommend++;
-      else if (r.decision === 'Hold') hold++;
-      else if (r.decision === 'Reject') reject++;
-    }
-    return { recommend, hold, reject, total: reviews.length };
-  }, [reviews]);
-
-  // Per-company consensus distribution
-  const consensusCounts = useMemo(() => {
-    const out = { Recommend: 0, Hold: 0, Reject: 0, Mixed: 0, None: 0, divergent: 0 };
-    const reviewsByCompany = new Map<string, Review[]>();
-    for (const r of reviews) {
-      const arr = reviewsByCompany.get(r.company_id) || [];
-      arr.push(r);
-      reviewsByCompany.set(r.company_id, arr);
-    }
-    for (const c of companies) {
-      const rs = reviewsByCompany.get(c.company_id) || [];
-      const s = summarizeReviews(rs);
-      if (s.total === 0) out.None++;
-      else if (s.consensus === 'Recommend') out.Recommend++;
-      else if (s.consensus === 'Hold') out.Hold++;
-      else if (s.consensus === 'Reject') out.Reject++;
-      else out.Mixed++;
-      if (s.divergence) out.divergent++;
-    }
-    return out;
-  }, [companies, reviews]);
-
-  // Pillar allocation count from reviews (every reviewer's proposed_pillars)
-  const pillarFromReviews = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of reviews) {
-      const ps = (r.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean);
-      for (const p of ps) m.set(p, (m.get(p) || 0) + 1);
-    }
-    return m;
-  }, [reviews]);
-
-  // Pillar allocation from locked assignments
-  const pillarFromLocks = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const a of assignments) {
-      const code = pillarFor(a.intervention_type)?.code || a.intervention_type;
-      if (code) m.set(code, (m.get(code) || 0) + 1);
-    }
-    return m;
-  }, [assignments]);
-
-  // Sub-intervention allocation count from reviews
-  const subFromReviews = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of reviews) {
-      const ss = (r.proposed_sub_interventions || '').split(',').map(s => s.trim()).filter(Boolean);
-      for (const s of ss) m.set(s, (m.get(s) || 0) + 1);
-    }
-    return m;
-  }, [reviews]);
-
-  // Sub-intervention allocation from locked assignments
-  const subFromLocks = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const a of assignments) {
-      const s = (a.sub_intervention || '').trim();
-      if (s) m.set(s, (m.get(s) || 0) + 1);
-    }
-    return m;
-  }, [assignments]);
-
-  // Per-AM locked counts
-  const amCounts = useMemo(() => {
-    const m = new Map<string, number>();
-    const lockedByCompany = new Map<string, Set<string>>(); // companyId → set of pillars
-    for (const a of assignments) {
-      const set = lockedByCompany.get(a.company_id) || new Set();
-      set.add(a.intervention_type);
-      lockedByCompany.set(a.company_id, set);
-    }
-    for (const a of ACCOUNT_MANAGERS) m.set(a.email, 0);
-    let unassigned = 0;
-    for (const c of companies) {
-      if (!lockedByCompany.has(c.company_id)) continue;
-      const am = c.profile_manager_email || '';
-      if (am && m.has(am)) m.set(am, (m.get(am) || 0) + 1);
-      else if (am) m.set(am, (m.get(am) || 0) + 1);
-      else unassigned++;
-    }
-    return { perAm: m, unassigned };
-  }, [companies, assignments]);
-
-  // Per-fund split (locked)
-  const fundCounts = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const a of assignments) m.set(a.fund_code || 'unset', (m.get(a.fund_code || 'unset') || 0) + 1);
-    return m;
-  }, [assignments]);
-
-  // Pre-decision agreement rate: of locked pillars, how many were ALSO in preDecisions for the same company?
-  const preDecisionAgreement = useMemo(() => {
-    if (preDecisions.length === 0 || assignments.length === 0) return null;
-    const recsByCompany = new Map<string, Set<string>>();
-    for (const r of preDecisions) {
-      const set = recsByCompany.get(r.company_id) || new Set();
-      const code = pillarFor(r.pillar)?.code || r.pillar;
-      if (code) set.add(code);
-      recsByCompany.set(r.company_id, set);
-    }
-    let matched = 0, total = 0;
-    for (const a of assignments) {
-      total++;
-      const recs = recsByCompany.get(a.company_id);
-      const code = pillarFor(a.intervention_type)?.code || a.intervention_type;
-      if (recs && code && recs.has(code)) matched++;
-    }
-    return { matched, total, pct: total > 0 ? Math.round((matched / total) * 100) : 0 };
-  }, [preDecisions, assignments]);
-
-  return (
-    <div className="space-y-3">
-      {/* Top KPI strip */}
-      <Card>
-        <CardHeader title="Insights at a glance" subtitle="Live aggregates from today's reviews + locked decisions." />
-        <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-          <KPI label="In scope" value={companies.length} hint="reviewable" tone="navy" />
-          <KPI label="Reviews captured" value={decisionCounts.total} hint={`${decisionCounts.recommend}R · ${decisionCounts.hold}H · ${decisionCounts.reject}X`} tone="teal" />
-          <KPI label="Consensus Recommend" value={consensusCounts.Recommend} hint={`${consensusCounts.divergent} divergent`} tone="green" />
-          <KPI label="Locked decisions" value={Array.from(new Set(assignments.map(a => a.company_id))).length} hint={`${assignments.length} interventions`} tone="amber" />
-          <KPI label="Pre-decision agreement" value={preDecisionAgreement ? `${preDecisionAgreement.pct}%` : '—'} hint={preDecisionAgreement ? `${preDecisionAgreement.matched}/${preDecisionAgreement.total} match Israa+Raouf` : 'no data yet'} tone="orange" />
-        </div>
-      </Card>
-
-      {/* Pillar allocation: reviews vs locks */}
-      <Card>
-        <CardHeader title="Pillar allocation" subtitle="How many times each pillar was proposed by team reviewers vs locked into Intervention Assignments." />
-        <BarTable
-          rows={PILLARS.map(p => ({
-            label: p.label,
-            sub: p.shortLabel,
-            a: pillarFromReviews.get(p.code) || 0,
-            aLabel: 'Reviews',
-            b: pillarFromLocks.get(p.code) || 0,
-            bLabel: 'Locked',
-          }))}
-        />
-      </Card>
-
-      {/* Sub-intervention allocation */}
-      <Card>
-        <CardHeader title="Sub-intervention allocation" subtitle="How many times each sub-intervention was proposed by reviewers vs locked." />
-        {(() => {
-          const allKeys = new Set([...subFromReviews.keys(), ...subFromLocks.keys()]);
-          const rows = Array.from(allKeys)
-            .map(s => ({
-              label: s.replace(/^MA-/, 'MA · '),
-              sub: '',
-              a: subFromReviews.get(s) || 0,
-              aLabel: 'Reviews',
-              b: subFromLocks.get(s) || 0,
-              bLabel: 'Locked',
-            }))
-            .sort((x, y) => (y.a + y.b) - (x.a + x.b));
-          if (rows.length === 0) {
-            return <p className="text-xs italic text-slate-500">No sub-intervention picks yet — show up once reviewers tag MA / Upskilling sub-tracks.</p>;
-          }
-          return <BarTable rows={rows} />;
-        })()}
-      </Card>
-
-      {/* Decision distribution */}
-      <Card>
-        <CardHeader title="Per-company consensus" subtitle="How the team's reviews shake out per company." />
-        <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-          <KPI label="Recommend" value={consensusCounts.Recommend} tone="green" />
-          <KPI label="Hold" value={consensusCounts.Hold} tone="amber" />
-          <KPI label="Reject" value={consensusCounts.Reject} tone="navy" />
-          <KPI label="Mixed" value={consensusCounts.Mixed} hint={`${consensusCounts.divergent} divergent`} tone="orange" />
-          <KPI label="No reviews yet" value={consensusCounts.None} tone="navy" />
-        </div>
-      </Card>
-
-      {/* AM workload + fund split */}
-      <div className="grid gap-3 md:grid-cols-2">
-        <Card>
-          <CardHeader title="Per-AM locked companies" subtitle="Workload distribution across Mohammed / Doaa / Muna." />
-          <ul className="space-y-1.5">
-            {ACCOUNT_MANAGERS.map(am => {
-              const n = amCounts.perAm.get(am.email) || 0;
-              return (
-                <li key={am.email} className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-navy-700 dark:bg-navy-900">
-                  <span className="font-bold text-navy-500 dark:text-slate-100">{am.name}</span>
-                  <span className="font-mono">{n}</span>
-                </li>
-              );
-            })}
-            {amCounts.unassigned > 0 && (
-              <li className="flex items-center justify-between rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs dark:border-amber-800 dark:bg-amber-950">
-                <span className="font-bold text-amber-800 dark:text-amber-200">Unassigned</span>
-                <span className="font-mono">{amCounts.unassigned}</span>
-              </li>
-            )}
-          </ul>
-        </Card>
-        <Card>
-          <CardHeader title="Per-fund split" subtitle="How many intervention assignments each fund covers." />
-          <ul className="space-y-1.5">
-            {Array.from(fundCounts.entries())
-              .sort((a, b) => b[1] - a[1])
-              .map(([code, n]) => (
-                <li key={code} className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-navy-700 dark:bg-navy-900">
-                  <span className="font-bold text-navy-500 dark:text-slate-100">
-                    {code === '97060' ? 'Dutch (97060)' : code === '91763' ? 'SIDA (91763)' : code === 'unset' ? 'Unset' : code}
-                  </span>
-                  <span className="font-mono">{n}</span>
-                </li>
-              ))}
-            {fundCounts.size === 0 && <li className="text-xs italic text-slate-500">No fund codes set yet.</li>}
-          </ul>
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-function KPI({ label, value, hint, tone }: { label: string; value: number | string; hint?: string; tone: 'navy' | 'teal' | 'green' | 'amber' | 'orange' }) {
-  const cls =
-    tone === 'navy' ? 'bg-navy-50 text-navy-800 dark:bg-navy-900 dark:text-slate-100'
-    : tone === 'teal' ? 'bg-teal-50 text-brand-teal dark:bg-teal-950'
-    : tone === 'green' ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200'
-    : tone === 'amber' ? 'bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-200'
-    : 'bg-orange-50 text-orange-900 dark:bg-orange-950 dark:text-orange-200';
-  return (
-    <div className={`rounded-md border border-slate-200 px-3 py-2 dark:border-navy-700 ${cls}`}>
-      <div className="text-[9px] font-bold uppercase tracking-wider opacity-70">{label}</div>
-      <div className="text-xl font-bold">{value}</div>
-      {hint && <div className="text-[10px] opacity-70">{hint}</div>}
-    </div>
-  );
-}
-
-function BarTable({ rows }: { rows: Array<{ label: string; sub: string; a: number; aLabel: string; b: number; bLabel: string }> }) {
-  const max = Math.max(1, ...rows.map(r => Math.max(r.a, r.b)));
-  return (
-    <div className="overflow-hidden rounded-md border border-slate-200 dark:border-navy-700">
-      <div className="grid grid-cols-[1fr_60px_1fr_60px] border-b border-slate-200 bg-slate-50 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-500 dark:border-navy-700 dark:bg-navy-800">
-        <span>Pillar / sub</span>
-        <span className="text-right">{rows[0]?.aLabel || ''}</span>
-        <span>Locked</span>
-        <span className="text-right">{rows[0]?.bLabel || ''}</span>
-      </div>
-      <ul>
-        {rows.map((r, i) => (
-          <li key={i} className="grid grid-cols-[1fr_60px_1fr_60px] items-center gap-1 border-b border-slate-100 px-2 py-1.5 text-xs last:border-b-0 dark:border-navy-800">
-            <span>
-              <div className="font-bold text-navy-500 dark:text-slate-100">{r.label}</div>
-              {r.sub && <div className="text-[10px] text-slate-500">{r.sub}</div>}
-            </span>
-            <span className="text-right font-mono text-slate-700 dark:text-slate-300">{r.a}</span>
-            <div className="flex items-center gap-1">
-              <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
-                <div
-                  className="h-full bg-brand-teal"
-                  style={{ width: `${Math.round((r.b / max) * 100)}%` }}
-                />
-              </div>
-            </div>
-            <span className="text-right font-mono text-slate-700 dark:text-slate-300">{r.b}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
 
 // ─── FinalCohortOutput ───────────────────────────────────────────────
 
@@ -1194,5 +920,1243 @@ function SelectionActivityView({ rows }: { rows: ActivityRow[] }) {
         <ActivityTimeline rows={filtered} limit={200} />
       )}
     </Card>
+  );
+}
+
+// ─── KPI tile (shared) ───────────────────────────────────────────────
+
+function KPI({ label, value, hint, tone }: { label: string; value: number | string; hint?: string; tone: 'navy' | 'teal' | 'green' | 'amber' | 'orange' | 'red' }) {
+  const cls =
+    tone === 'navy' ? 'bg-navy-50 text-navy-800 dark:bg-navy-900 dark:text-slate-100'
+    : tone === 'teal' ? 'bg-teal-50 text-brand-teal dark:bg-teal-950'
+    : tone === 'green' ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200'
+    : tone === 'amber' ? 'bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-200'
+    : tone === 'red' ? 'bg-red-50 text-red-800 dark:bg-red-950 dark:text-red-200'
+    : 'bg-orange-50 text-orange-900 dark:bg-orange-950 dark:text-orange-200';
+  return (
+    <div className={`rounded-md border border-slate-200 px-3 py-2 dark:border-navy-700 ${cls}`}>
+      <div className="text-[9px] font-bold uppercase tracking-wider opacity-70">{label}</div>
+      <div className="text-xl font-bold">{value}</div>
+      {hint && <div className="text-[10px] opacity-70">{hint}</div>}
+    </div>
+  );
+}
+
+// ─── ReviewQueueBoard (Stage 1) ──────────────────────────────────────
+// Kanban-style by my-review status. Columns: To review (mine) /
+// Recommend / Hold / Reject. Each column shows compact cards with
+// company name + sector + Israa/Raouf signal + team consensus from
+// other reviewers. Click any card to open the focus drawer with the
+// full dossier and decision form.
+
+function ReviewQueueBoard({
+  companies,
+  reviews,
+  comments,
+  preDecisions,
+  reviewerEmail,
+  onSaveReview,
+  onAddComment,
+}: {
+  companies: ReviewableCompany[];
+  reviews: Review[];
+  comments: CompanyComment[];
+  preDecisions: PreDecisionRecommendation[];
+  reviewerEmail: string;
+  onSaveReview: (r: Review) => Promise<void>;
+  onAddComment: (c: CompanyComment) => Promise<void>;
+}) {
+  const [focused, setFocused] = useState<ReviewableCompany | null>(null);
+
+  const myReviewByCompany = useMemo(() => {
+    const m = new Map<string, Review>();
+    for (const r of reviews) {
+      if (r.reviewer_email?.toLowerCase() === reviewerEmail.toLowerCase()) {
+        m.set(r.company_id, r);
+      }
+    }
+    return m;
+  }, [reviews, reviewerEmail]);
+
+  const teamSummaryByCompany = useMemo(() => {
+    const byCompany = new Map<string, Review[]>();
+    for (const r of reviews) {
+      const arr = byCompany.get(r.company_id) || [];
+      arr.push(r);
+      byCompany.set(r.company_id, arr);
+    }
+    const m = new Map<string, ReturnType<typeof summarizeReviews>>();
+    for (const [cid, rs] of byCompany) m.set(cid, summarizeReviews(rs));
+    return m;
+  }, [reviews]);
+
+  const preDecsByCompany = useMemo(() => {
+    const m = new Map<string, PreDecisionRecommendation[]>();
+    for (const r of preDecisions) {
+      const arr = m.get(r.company_id) || [];
+      arr.push(r);
+      m.set(r.company_id, arr);
+    }
+    return m;
+  }, [preDecisions]);
+
+  const commentsByCompany = useMemo(() => {
+    const m = new Map<string, CompanyComment[]>();
+    for (const c of comments) {
+      const arr = m.get(c.company_id) || [];
+      arr.push(c);
+      m.set(c.company_id, arr);
+    }
+    return m;
+  }, [comments]);
+
+  // Bucket companies by MY review state.
+  type Bucket = 'unreviewed' | 'Recommend' | 'Hold' | 'Reject';
+  const buckets: Record<Bucket, ReviewableCompany[]> = { unreviewed: [], Recommend: [], Hold: [], Reject: [] };
+  for (const c of companies) {
+    const my = myReviewByCompany.get(c.company_id);
+    if (!my || !my.decision) buckets.unreviewed.push(c);
+    else if (my.decision === 'Recommend') buckets.Recommend.push(c);
+    else if (my.decision === 'Hold') buckets.Hold.push(c);
+    else if (my.decision === 'Reject') buckets.Reject.push(c);
+    else buckets.unreviewed.push(c);
+  }
+
+  const COLUMNS: Array<{ id: Bucket; label: string; tone: string; bg: string }> = [
+    { id: 'unreviewed', label: 'To review (you)', tone: 'text-slate-700', bg: 'bg-slate-50 dark:bg-navy-800/50' },
+    { id: 'Recommend', label: 'Recommend', tone: 'text-emerald-700', bg: 'bg-emerald-50 dark:bg-emerald-950/30' },
+    { id: 'Hold', label: 'Hold', tone: 'text-amber-700', bg: 'bg-amber-50 dark:bg-amber-950/30' },
+    { id: 'Reject', label: 'Reject', tone: 'text-red-700', bg: 'bg-red-50 dark:bg-red-950/30' },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+        <span>Click any company to open the focus view. Your reviews land in the Reviews tab; team consensus is computed live.</span>
+      </div>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+        {COLUMNS.map(col => (
+          <div key={col.id} className={`rounded-xl border border-slate-200 p-2 dark:border-navy-700 ${col.bg}`}>
+            <div className="mb-2 flex items-center justify-between gap-2 px-1">
+              <div className={`text-xs font-bold uppercase tracking-wider ${col.tone}`}>{col.label}</div>
+              <Badge tone="neutral">{buckets[col.id].length}</Badge>
+            </div>
+            <ul className="space-y-1.5">
+              {buckets[col.id].length === 0 && (
+                <li className="rounded-md border border-dashed border-slate-200 px-2 py-3 text-center text-[10px] italic text-slate-400 dark:border-navy-700">
+                  Empty
+                </li>
+              )}
+              {buckets[col.id].map(c => {
+                const teamSummary = teamSummaryByCompany.get(c.company_id);
+                const recs = preDecsByCompany.get(c.company_id) || [];
+                const israa = recs.some(r => r.author_email.startsWith('israa'));
+                const raouf = recs.some(r => r.author_email.startsWith('raouf'));
+                const my = myReviewByCompany.get(c.company_id);
+                return (
+                  <li key={c.company_id}>
+                    <button
+                      type="button"
+                      onClick={() => setFocused(c)}
+                      className="block w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-left transition hover:border-brand-teal hover:shadow-sm dark:border-navy-700 dark:bg-navy-900 dark:hover:border-brand-teal"
+                    >
+                      <div className="truncate text-xs font-bold text-navy-500 dark:text-slate-100">{c.company_name}</div>
+                      {c.sector && <div className="truncate text-[10px] text-slate-500">{c.sector}</div>}
+                      <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
+                        {teamSummary && teamSummary.total > 0 && (
+                          <span className={`rounded px-1 py-0.5 font-bold ${teamSummary.consensus === 'Recommend' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200' : teamSummary.consensus === 'Hold' ? 'bg-amber-100 text-amber-800' : teamSummary.consensus === 'Reject' ? 'bg-red-100 text-red-800' : 'bg-slate-200'}`}>
+                            {teamSummary.total}× {teamSummary.consensus}
+                            {teamSummary.divergence ? ' · div' : ''}
+                          </span>
+                        )}
+                        {israa && <span className="rounded bg-purple-100 px-1 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200">I</span>}
+                        {raouf && <span className="rounded bg-purple-100 px-1 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200">R</span>}
+                        {my?.proposed_pillars && (
+                          <span className="text-[9px] text-slate-500" title={my.proposed_pillars}>
+                            {my.proposed_pillars.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3).join(', ')}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </div>
+
+      <CompanyFocusDrawer
+        company={focused}
+        onClose={() => setFocused(null)}
+        comments={focused ? (commentsByCompany.get(focused.company_id) || []) : []}
+        preDecs={focused ? (preDecsByCompany.get(focused.company_id) || []) : []}
+        reviewsForCompany={focused ? reviews.filter(r => r.company_id === focused.company_id) : []}
+        myReview={focused ? myReviewByCompany.get(focused.company_id) : undefined}
+        reviewerEmail={reviewerEmail}
+        mode="review"
+        onSaveReview={onSaveReview}
+        onAddComment={onAddComment}
+      />
+    </div>
+  );
+}
+
+// ─── FinalCohortBoard (Stage 2) ──────────────────────────────────────
+// Three AM lanes (Mohammed / Doaa / Muna) + an Unassigned lane. Each
+// card shows status, fund, locked pillars. Click → open focus drawer
+// with the lock-decision form. Drag-and-drop is intentionally not
+// added now (small surface, the click-to-open flow is fast enough).
+
+function FinalCohortBoard({
+  companies,
+  reviews,
+  comments,
+  preDecisions,
+  assignments,
+  reviewerEmail,
+  onLockDecision,
+  onAssignPM,
+}: {
+  companies: ReviewableCompany[];
+  reviews: Review[];
+  comments: CompanyComment[];
+  preDecisions: PreDecisionRecommendation[];
+  assignments: Assignment[];
+  reviewerEmail: string;
+  onLockDecision: (args: FinalLockArgs) => Promise<void>;
+  onAssignPM: (companyId: string, pmEmail: string) => Promise<void>;
+}) {
+  const [focused, setFocused] = useState<ReviewableCompany | null>(null);
+
+  const assignsByCompany = useMemo(() => {
+    const m = new Map<string, Assignment[]>();
+    for (const a of assignments) {
+      const arr = m.get(a.company_id) || [];
+      arr.push(a);
+      m.set(a.company_id, arr);
+    }
+    return m;
+  }, [assignments]);
+
+  const preDecsByCompany = useMemo(() => {
+    const m = new Map<string, PreDecisionRecommendation[]>();
+    for (const r of preDecisions) {
+      const arr = m.get(r.company_id) || [];
+      arr.push(r);
+      m.set(r.company_id, arr);
+    }
+    return m;
+  }, [preDecisions]);
+
+  const commentsByCompany = useMemo(() => {
+    const m = new Map<string, CompanyComment[]>();
+    for (const c of comments) {
+      const arr = m.get(c.company_id) || [];
+      arr.push(c);
+      m.set(c.company_id, arr);
+    }
+    return m;
+  }, [comments]);
+
+  // Lanes. ACCOUNT_MANAGERS first, then unassigned at the end.
+  const lanes: Array<{ amEmail: string; label: string; companies: ReviewableCompany[] }> = [];
+  for (const am of ACCOUNT_MANAGERS) {
+    lanes.push({ amEmail: am.email, label: am.name.split(' ')[0], companies: [] });
+  }
+  lanes.push({ amEmail: '', label: 'Unassigned', companies: [] });
+
+  for (const c of companies) {
+    const lane = lanes.find(l => l.amEmail === c.profile_manager_email) || lanes[lanes.length - 1];
+    lane.companies.push(c);
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+        <span>Click any company to open the lock-decision form. Cards in the Unassigned lane need an AM picked first.</span>
+      </div>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+        {lanes.map(lane => {
+          const colTone = lane.amEmail
+            ? 'bg-teal-50/60 dark:bg-teal-950/20'
+            : 'bg-amber-50/60 dark:bg-amber-950/20';
+          const lockedInLane = lane.companies.filter(c => assignsByCompany.has(c.company_id)).length;
+          return (
+            <div key={lane.amEmail || 'unassigned'} className={`rounded-xl border border-slate-200 p-2 dark:border-navy-700 ${colTone}`}>
+              <div className="mb-2 flex items-center justify-between gap-2 px-1">
+                <div className="text-xs font-bold uppercase tracking-wider text-navy-500 dark:text-slate-100">{lane.label}</div>
+                <Badge tone={lane.amEmail ? 'teal' : 'amber'}>
+                  {lockedInLane}/{lane.companies.length}
+                </Badge>
+              </div>
+              <ul className="space-y-1.5">
+                {lane.companies.length === 0 && (
+                  <li className="rounded-md border border-dashed border-slate-200 px-2 py-3 text-center text-[10px] italic text-slate-400 dark:border-navy-700">
+                    Empty
+                  </li>
+                )}
+                {lane.companies.map(c => {
+                  const assigns = assignsByCompany.get(c.company_id) || [];
+                  const locked = assigns.length > 0;
+                  const pillars = Array.from(new Set(assigns.map(a => pillarFor(a.intervention_type)?.code || a.intervention_type)));
+                  const recs = preDecsByCompany.get(c.company_id) || [];
+                  return (
+                    <li key={c.company_id}>
+                      <button
+                        type="button"
+                        onClick={() => setFocused(c)}
+                        className={`block w-full rounded-md border bg-white px-2 py-1.5 text-left transition hover:shadow-sm dark:bg-navy-900 ${
+                          locked
+                            ? 'border-emerald-300 dark:border-emerald-800'
+                            : 'border-slate-200 hover:border-brand-teal dark:border-navy-700 dark:hover:border-brand-teal'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="truncate text-xs font-bold text-navy-500 dark:text-slate-100">{c.company_name}</div>
+                            {c.sector && <div className="truncate text-[10px] text-slate-500">{c.sector}</div>}
+                          </div>
+                          {locked && <span className="rounded bg-emerald-500 px-1 py-0.5 text-[9px] font-bold text-white">LOCKED</span>}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px]">
+                          {c.status && c.status !== 'Interviewed' && (
+                            <span className={`rounded px-1 py-0.5 font-bold ${c.status === 'Selected' ? 'bg-emerald-100 text-emerald-800' : c.status === 'Hold' ? 'bg-amber-100 text-amber-800' : 'bg-slate-200 text-slate-700'}`}>
+                              {c.status}
+                            </span>
+                          )}
+                          {c.fund_code && (
+                            <span className={`rounded px-1 py-0.5 font-bold ${c.fund_code === '97060' ? 'bg-teal-100 text-brand-teal' : 'bg-amber-100 text-amber-800'}`}>
+                              {c.fund_code === '97060' ? 'Dutch' : 'SIDA'}
+                            </span>
+                          )}
+                          {pillars.slice(0, 4).map(p => (
+                            <span key={p} className="rounded bg-slate-100 px-1 py-0.5 font-semibold text-slate-700 dark:bg-navy-800 dark:text-slate-200">{p}</span>
+                          ))}
+                          {recs.length > 0 && (
+                            <span className="rounded bg-purple-100 px-1 py-0.5 font-bold text-purple-800 dark:bg-purple-950 dark:text-purple-200" title={`${recs.length} pre-decision rec(s)`}>
+                              {recs.length}rec
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+
+      <CompanyFocusDrawer
+        company={focused}
+        onClose={() => setFocused(null)}
+        comments={focused ? (commentsByCompany.get(focused.company_id) || []) : []}
+        preDecs={focused ? (preDecsByCompany.get(focused.company_id) || []) : []}
+        reviewsForCompany={focused ? reviews.filter(r => r.company_id === focused.company_id) : []}
+        existingAssigns={focused ? (assignsByCompany.get(focused.company_id) || []) : []}
+        reviewerEmail={reviewerEmail}
+        mode="lock"
+        onLockDecision={onLockDecision}
+        onAssignPM={onAssignPM}
+      />
+    </div>
+  );
+}
+
+// ─── Shared focus drawer ─────────────────────────────────────────────
+// Right-side drawer used by both Stage 1 and Stage 2. Shows the company
+// dossier on top, then a mode-specific form: review form for Stage 1,
+// lock-decision form for Stage 2.
+
+function CompanyFocusDrawer({
+  company,
+  onClose,
+  comments,
+  preDecs,
+  reviewsForCompany,
+  existingAssigns,
+  myReview,
+  reviewerEmail,
+  mode,
+  onSaveReview,
+  onAddComment,
+  onLockDecision,
+  onAssignPM,
+}: {
+  company: ReviewableCompany | null;
+  onClose: () => void;
+  comments: CompanyComment[];
+  preDecs: PreDecisionRecommendation[];
+  reviewsForCompany: Review[];
+  existingAssigns?: Assignment[];
+  myReview?: Review | undefined;
+  reviewerEmail: string;
+  mode: 'review' | 'lock';
+  onSaveReview?: (r: Review) => Promise<void>;
+  onAddComment?: (c: CompanyComment) => Promise<void>;
+  onLockDecision?: (args: FinalLockArgs) => Promise<void>;
+  onAssignPM?: (companyId: string, pmEmail: string) => Promise<void>;
+}) {
+  // Local form state
+  const [decision, setDecision] = useState<'Recommend' | 'Hold' | 'Reject' | ''>('');
+  const [proposedPillars, setProposedPillars] = useState<Set<string>>(new Set());
+  const [proposedSubs, setProposedSubs] = useState<Set<string>>(new Set());
+  const [reviewNotes, setReviewNotes] = useState('');
+  const [commentDraft, setCommentDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [posting, setPosting] = useState(false);
+  // Lock form state
+  const [lockStatus, setLockStatus] = useState<'Selected' | 'Hold' | 'Rejected'>('Selected');
+  const [lockPm, setLockPm] = useState('');
+  const [lockPillars, setLockPillars] = useState<Set<string>>(new Set());
+  const [lockSubs, setLockSubs] = useState<Set<string>>(new Set());
+  const [lockFund, setLockFund] = useState<Record<string, string>>({});
+  const [locking, setLocking] = useState(false);
+
+  // Reset state when the focused company changes.
+  useEffect(() => {
+    if (!company) return;
+    if (mode === 'review') {
+      setDecision((myReview?.decision as 'Recommend' | 'Hold' | 'Reject' | '') || '');
+      setProposedPillars(new Set((myReview?.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean)));
+      setProposedSubs(new Set((myReview?.proposed_sub_interventions || '').split(',').map(s => s.trim()).filter(Boolean)));
+      setReviewNotes(myReview?.notes || '');
+      setCommentDraft('');
+    } else {
+      setLockStatus((company.status === 'Hold' || company.status === 'Rejected' ? company.status : 'Selected'));
+      setLockPm(company.profile_manager_email || '');
+      const pSet = new Set<string>();
+      const sSet = new Set<string>();
+      const funds: Record<string, string> = {};
+      for (const a of existingAssigns || []) {
+        const code = pillarFor(a.intervention_type)?.code || a.intervention_type;
+        if (code) {
+          pSet.add(code);
+          if (a.fund_code) funds[code] = a.fund_code;
+        }
+        if (a.sub_intervention) sSet.add(a.sub_intervention);
+      }
+      // Pre-decision pillars also pre-fill
+      if (pSet.size === 0) {
+        for (const r of preDecs) {
+          const code = pillarFor(r.pillar)?.code || r.pillar;
+          if (code) pSet.add(code);
+          if (r.sub_intervention) sSet.add(r.sub_intervention);
+          if (code && r.fund_hint && !funds[code]) funds[code] = r.fund_hint;
+        }
+      }
+      setLockPillars(pSet);
+      setLockSubs(sSet);
+      setLockFund({ ...Object.fromEntries(PILLARS.map(p => [p.code, '97060'])), ...funds });
+    }
+  }, [company, myReview, mode, existingAssigns, preDecs]);
+
+  if (!company) return null;
+
+  const togglePillar = (code: string, set: Set<string>, setSet: (s: Set<string>) => void, subs: Set<string>, setSubsFn: (s: Set<string>) => void) => {
+    const next = new Set(set);
+    if (next.has(code)) {
+      next.delete(code);
+      const dead = new Set(PILLARS.find(p => p.code === code)?.subInterventions || []);
+      if (dead.size > 0) {
+        const ns = new Set(subs);
+        for (const s of dead) ns.delete(s);
+        setSubsFn(ns);
+      }
+    } else next.add(code);
+    setSet(next);
+  };
+
+  const handleSaveReview = async () => {
+    if (!onSaveReview || !decision) return;
+    setSaving(true);
+    try {
+      const now = new Date().toISOString();
+      const id = `rev-${company.company_id}-${reviewerEmail.split('@')[0]}`.toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 80);
+      await onSaveReview({
+        review_id: myReview?.review_id || id,
+        company_id: company.company_id,
+        reviewer_email: reviewerEmail,
+        decision,
+        proposed_pillars: Array.from(proposedPillars).join(','),
+        proposed_sub_interventions: Array.from(proposedSubs).join(','),
+        notes: reviewNotes,
+        created_at: myReview?.created_at || now,
+        updated_at: now,
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handlePostComment = async () => {
+    if (!onAddComment || !commentDraft.trim()) return;
+    setPosting(true);
+    try {
+      const now = new Date().toISOString();
+      const id = `cmt-${company.company_id}-${reviewerEmail.split('@')[0]}-${now}`.toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 80);
+      await onAddComment({
+        comment_id: id,
+        company_id: company.company_id,
+        author_email: reviewerEmail,
+        body: commentDraft.trim(),
+        created_at: now,
+        updated_at: now,
+      });
+      setCommentDraft('');
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  const handleLock = async () => {
+    if (!onLockDecision || !lockPm) return;
+    setLocking(true);
+    try {
+      const interventions: FinalLockArgs['interventions'] = [];
+      for (const p of lockPillars) {
+        const subsForP = Array.from(lockSubs).filter(s => pillarFor(s)?.code === p);
+        const fund = lockFund[p] || '';
+        if (subsForP.length === 0) interventions.push({ pillar: p, sub: '', fund_code: fund });
+        else for (const s of subsForP) interventions.push({ pillar: p, sub: s, fund_code: fund });
+      }
+      await onLockDecision({
+        companyId: company.company_id,
+        companyName: company.company_name,
+        status: lockStatus,
+        pmEmail: lockPm,
+        interventions,
+      });
+      onClose();
+    } finally {
+      setLocking(false);
+    }
+  };
+
+  const teamSummary = summarizeReviews(reviewsForCompany);
+
+  return (
+    <Drawer
+      open={!!company}
+      onClose={onClose}
+      width="max-w-3xl"
+      title={company.company_name}
+      subtitle={[company.sector, company.city, company.governorate].filter(Boolean).join(' · ')}
+    >
+      <div className="grid gap-4 p-4 lg:grid-cols-2">
+        {/* LEFT: dossier */}
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            <KPI
+              label="Score"
+              value={firstField(company.selection?.scoring, ['class', 'tier', 'grade']) || '—'}
+              hint={firstField(company.selection?.scoring, ['total_score', 'total score', 'score', 'weighted'])}
+              tone="teal"
+            />
+            <KPI
+              label="Interview"
+              value={firstField(company.selection?.interviewAssessment, ['rating', 'score', 'grade', 'recommend']) || '—'}
+              tone="navy"
+            />
+            <KPI
+              label="Team consensus"
+              value={teamSummary.total > 0 ? `${teamSummary.total}× ${teamSummary.consensus}` : 'no reviews'}
+              hint={teamSummary.divergence ? 'divergent' : undefined}
+              tone={teamSummary.consensus === 'Recommend' ? 'green' : teamSummary.consensus === 'Reject' ? 'red' : 'amber'}
+            />
+            <KPI
+              label="Pre-decision"
+              value={preDecs.length}
+              hint={preDecs.length > 0 ? Array.from(new Set(preDecs.map(p => displayName(p.author_email).split(' ')[0]))).join(', ') : undefined}
+              tone="orange"
+            />
+          </div>
+
+          {/* Requested vs Recommended pillar matrix — compact */}
+          <Card>
+            <CardHeader title="Requested vs Recommended" subtitle="ASKED = applicant wantsXXX. REC = team interview/needs + Israa/Raouf." />
+            <table className="w-full text-[11px]">
+              <thead className="bg-slate-50 dark:bg-navy-800">
+                <tr>
+                  <th className="px-1.5 py-1 text-left">Pillar</th>
+                  <th className="px-1.5 py-1 text-center">Asked</th>
+                  <th className="px-1.5 py-1 text-center">Rec</th>
+                  <th className="px-1.5 py-1 text-center">Israa+Raouf</th>
+                </tr>
+              </thead>
+              <tbody>
+                {PILLARS.map(p => {
+                  const asked = wantsBoolFor(company.applicantRaw, p.code);
+                  const recs = preDecs.filter(r => (pillarFor(r.pillar)?.code || r.pillar) === p.code);
+                  // Heuristic for team-recommended: if any reviewer's proposed_pillars contains this code.
+                  const teamRec = reviewsForCompany.some(r => (r.proposed_pillars || '').split(',').map(s => s.trim()).includes(p.code));
+                  return (
+                    <tr key={p.code} className="border-t border-slate-100 dark:border-navy-800">
+                      <td className="px-1.5 py-1 font-bold text-navy-500 dark:text-slate-100">{p.shortLabel}</td>
+                      <td className="px-1.5 py-1 text-center">{asked ? '✓' : '—'}</td>
+                      <td className="px-1.5 py-1 text-center">{teamRec ? '✓' : '—'}</td>
+                      <td className="px-1.5 py-1 text-center">{recs.length > 0 ? `${recs.length}` : '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </Card>
+
+          {/* Pre-decision recs detail */}
+          {preDecs.length > 0 && (
+            <Card className="border-l-4 border-l-purple-500">
+              <CardHeader title={`Israa + Raouf · ${preDecs.length}`} />
+              <ul className="space-y-1">
+                {preDecs.map(r => (
+                  <li key={r.recommendation_id} className="rounded border border-purple-100 bg-purple-50 p-1.5 text-[11px] dark:border-purple-900 dark:bg-purple-950/30">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-purple-800 dark:text-purple-200">
+                        {r.pillar}{r.sub_intervention ? ` · ${r.sub_intervention}` : ''}
+                      </span>
+                      <span className="text-[10px] text-purple-600">{displayName(r.author_email)}</span>
+                    </div>
+                    {r.note && <div className="mt-0.5 whitespace-pre-wrap text-slate-700 dark:text-slate-300">{r.note}</div>}
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
+          {/* Comments thread */}
+          {comments.length > 0 && (
+            <Card>
+              <CardHeader title={`Comments · ${comments.length}`} />
+              <ul className="space-y-1">
+                {comments.slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || '')).map(c => (
+                  <li key={c.comment_id} className="rounded border border-slate-200 p-1.5 text-[11px] dark:border-navy-700">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold">{displayName(c.author_email)}</span>
+                      <span className="text-[9px] text-slate-500">{c.created_at}</span>
+                    </div>
+                    <div className="mt-0.5 whitespace-pre-wrap">{c.body}</div>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
+          {/* Other reviewers */}
+          {reviewsForCompany.length > 0 && (
+            <Card>
+              <CardHeader title={`Team reviews · ${reviewsForCompany.length}`} />
+              <ul className="space-y-1">
+                {reviewsForCompany.map(r => (
+                  <li key={r.review_id} className="rounded border border-slate-200 p-1.5 text-[11px] dark:border-navy-700">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold">{displayName(r.reviewer_email)}</span>
+                      {r.decision && <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${r.decision === 'Recommend' ? 'bg-emerald-100 text-emerald-800' : r.decision === 'Hold' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'}`}>{r.decision}</span>}
+                    </div>
+                    {r.proposed_pillars && (
+                      <div className="mt-0.5 text-slate-600 dark:text-slate-400">{r.proposed_pillars}</div>
+                    )}
+                    {r.notes && <div className="mt-0.5 whitespace-pre-wrap">{r.notes}</div>}
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+        </div>
+
+        {/* RIGHT: form */}
+        <div className="space-y-3">
+          {mode === 'review' ? (
+            <>
+              <Card>
+                <CardHeader title="Your decision" />
+                <div className="grid grid-cols-3 gap-1">
+                  {(['Recommend', 'Hold', 'Reject'] as const).map(d => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => setDecision(d)}
+                      className={`rounded-md border-2 px-2 py-2 text-xs font-bold ${
+                        decision === d
+                          ? d === 'Recommend' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : d === 'Hold' ? 'border-amber-500 bg-amber-50 text-amber-800' : 'border-red-500 bg-red-50 text-red-800'
+                          : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200'
+                      }`}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              </Card>
+              <Card>
+                <CardHeader title="Pillars" subtitle="Pick what this company should get." />
+                <div className="space-y-1.5">
+                  {PILLARS.map(p => (
+                    <div key={p.code}>
+                      <label className="flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-2 py-1.5 text-xs hover:border-brand-teal dark:border-navy-700">
+                        <input
+                          type="checkbox"
+                          checked={proposedPillars.has(p.code)}
+                          onChange={() => togglePillar(p.code, proposedPillars, setProposedPillars, proposedSubs, setProposedSubs)}
+                        />
+                        <span className="font-bold">{p.label}</span>
+                        <span className="text-[10px] text-slate-500">{p.shortLabel}</span>
+                      </label>
+                      {proposedPillars.has(p.code) && p.subInterventions.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1 px-2">
+                          {p.subInterventions.map(s => (
+                            <button
+                              key={s}
+                              type="button"
+                              onClick={() => {
+                                const next = new Set(proposedSubs);
+                                if (next.has(s)) next.delete(s); else next.add(s);
+                                setProposedSubs(next);
+                              }}
+                              className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                                proposedSubs.has(s)
+                                  ? 'border-brand-teal bg-brand-teal text-white'
+                                  : 'border-slate-300 bg-white text-slate-700 hover:border-brand-teal dark:border-navy-700 dark:bg-navy-900 dark:text-slate-300'
+                              }`}
+                            >
+                              {s.replace(/^MA-/, '')}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </Card>
+              <Card>
+                <CardHeader title="Notes" />
+                <textarea
+                  rows={4}
+                  value={reviewNotes}
+                  onChange={e => setReviewNotes(e.currentTarget.value)}
+                  placeholder="Reasoning, context, concerns…"
+                  className="w-full rounded-md border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+                />
+              </Card>
+              <div className="flex justify-end gap-2">
+                <Button variant="ghost" onClick={onClose}>Cancel</Button>
+                <Button onClick={handleSaveReview} disabled={saving || !decision}>
+                  {saving ? 'Saving…' : myReview ? 'Update review' : 'Save review'}
+                </Button>
+              </div>
+
+              <Card>
+                <CardHeader title="Add a comment" subtitle="Visible to the whole team." />
+                <textarea
+                  rows={2}
+                  value={commentDraft}
+                  onChange={e => setCommentDraft(e.currentTarget.value)}
+                  placeholder="Quick comment…"
+                  className="w-full rounded-md border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+                />
+                <div className="mt-2 flex justify-end">
+                  <Button size="sm" onClick={handlePostComment} disabled={posting || !commentDraft.trim()}>
+                    {posting ? 'Posting…' : 'Post'}
+                  </Button>
+                </div>
+              </Card>
+            </>
+          ) : (
+            <>
+              <Card>
+                <CardHeader title="Final status" />
+                <div className="grid grid-cols-3 gap-1">
+                  {(['Selected', 'Hold', 'Rejected'] as const).map(s => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setLockStatus(s)}
+                      className={`rounded-md border-2 px-2 py-2 text-xs font-bold ${
+                        lockStatus === s
+                          ? s === 'Selected' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : s === 'Hold' ? 'border-amber-500 bg-amber-50 text-amber-800' : 'border-red-500 bg-red-50 text-red-800'
+                          : 'border-slate-200 bg-white text-slate-700 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200'
+                      }`}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </Card>
+
+              <Card>
+                <CardHeader title="Account Manager" />
+                <div className="grid grid-cols-3 gap-1">
+                  {ACCOUNT_MANAGERS.map(am => (
+                    <button
+                      key={am.email}
+                      type="button"
+                      onClick={() => setLockPm(am.email)}
+                      className={`rounded-md border-2 px-2 py-2 text-xs font-bold ${
+                        lockPm === am.email ? 'border-brand-teal bg-teal-50 text-brand-teal dark:bg-teal-950' : 'border-slate-200 bg-white text-slate-700 dark:border-navy-700 dark:bg-navy-900'
+                      }`}
+                    >
+                      {am.name.split(' ')[0]}
+                    </button>
+                  ))}
+                </div>
+                {!company.profile_manager_email && lockPm && onAssignPM && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="mt-2"
+                    onClick={() => onAssignPM(company.company_id, lockPm)}
+                  >
+                    Assign without locking
+                  </Button>
+                )}
+              </Card>
+
+              <Card>
+                <CardHeader title="Per-pillar interventions + funds" />
+                <div className="space-y-1.5">
+                  {PILLARS.map(p => (
+                    <div key={p.code} className="rounded-md border border-slate-200 p-2 dark:border-navy-700">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="flex cursor-pointer items-center gap-2 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={lockPillars.has(p.code)}
+                            onChange={() => togglePillar(p.code, lockPillars, setLockPillars, lockSubs, setLockSubs)}
+                          />
+                          <span className="font-bold">{p.label}</span>
+                        </label>
+                        {lockPillars.has(p.code) && (
+                          <select
+                            value={lockFund[p.code] || ''}
+                            onChange={e => setLockFund({ ...lockFund, [p.code]: e.currentTarget.value })}
+                            className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
+                          >
+                            <option value="">Fund?</option>
+                            <option value="97060">Dutch (97060)</option>
+                            <option value="91763">SIDA (91763)</option>
+                          </select>
+                        )}
+                      </div>
+                      {lockPillars.has(p.code) && p.subInterventions.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {p.subInterventions.map(s => (
+                            <button
+                              key={s}
+                              type="button"
+                              onClick={() => {
+                                const next = new Set(lockSubs);
+                                if (next.has(s)) next.delete(s); else next.add(s);
+                                setLockSubs(next);
+                              }}
+                              className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                                lockSubs.has(s)
+                                  ? 'border-brand-teal bg-brand-teal text-white'
+                                  : 'border-slate-300 bg-white text-slate-700 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-300'
+                              }`}
+                            >
+                              {s.replace(/^MA-/, '')}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </Card>
+
+              <div className="flex justify-end gap-2">
+                <Button variant="ghost" onClick={onClose}>Cancel</Button>
+                <Button onClick={handleLock} disabled={locking || !lockPm || lockPillars.size === 0}>
+                  {locking ? 'Locking…' : 'Lock decision'}
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </Drawer>
+  );
+}
+
+function firstField(row: Record<string, string> | null | undefined, keys: string[]): string {
+  if (!row) return '';
+  for (const k of keys) {
+    const lower = k.toLowerCase();
+    for (const [rk, rv] of Object.entries(row)) {
+      if (rk.toLowerCase() === lower && rv) return rv;
+    }
+  }
+  for (const k of keys) {
+    const lower = k.toLowerCase();
+    for (const [rk, rv] of Object.entries(row)) {
+      if (rk.toLowerCase().includes(lower) && rv) return rv;
+    }
+  }
+  return '';
+}
+
+function wantsBoolFor(applicant: Record<string, string> | null | undefined, pillarCode: string): boolean {
+  if (!applicant) return false;
+  const map: Record<string, string[]> = {
+    TTH: ['wantsTrainToHire'],
+    Upskilling: ['wantsUpskilling'],
+    MKG: ['wantsMarketingSupport'],
+    MA: ['wantsLegalSupport'],
+    'C-Suite': ['wantsDomainCoaching'],
+    Conferences: ['wantsConferences'],
+    ElevateBridge: ['wantsElevateBridge'],
+  };
+  const keys = map[pillarCode] || [];
+  for (const k of keys) {
+    const v = (applicant[k] || '').trim().toLowerCase();
+    if (v === 'true' || v === 'yes' || v === '1' || v === 'y') return true;
+  }
+  return false;
+}
+
+// ─── InsightsDashboard (action-oriented) ─────────────────────────────
+// Real signals, not just counts. Surfaces things the team actually
+// needs to react to in the live session.
+
+function InsightsDashboard({
+  companies,
+  reviews,
+  assignments,
+  preDecisions,
+}: {
+  companies: ReviewableCompany[];
+  reviews: Review[];
+  assignments: Assignment[];
+  preDecisions: PreDecisionRecommendation[];
+}) {
+  const reviewsByCompany = useMemo(() => {
+    const m = new Map<string, Review[]>();
+    for (const r of reviews) {
+      const arr = m.get(r.company_id) || [];
+      arr.push(r);
+      m.set(r.company_id, arr);
+    }
+    return m;
+  }, [reviews]);
+
+  const recsByCompany = useMemo(() => {
+    const m = new Map<string, PreDecisionRecommendation[]>();
+    for (const r of preDecisions) {
+      const arr = m.get(r.company_id) || [];
+      arr.push(r);
+      m.set(r.company_id, arr);
+    }
+    return m;
+  }, [preDecisions]);
+
+  const lockedSet = useMemo(() => new Set(assignments.map(a => a.company_id)), [assignments]);
+
+  // ── Action items ─────────────────────────────────────────
+  const noReviewYet = companies.filter(c => (reviewsByCompany.get(c.company_id)?.length || 0) === 0);
+  const divergent = companies.filter(c => summarizeReviews(reviewsByCompany.get(c.company_id) || []).divergence);
+  const teamYesPreNo = companies.filter(c => {
+    const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
+    if (s.consensus !== 'Recommend') return false;
+    const recs = recsByCompany.get(c.company_id) || [];
+    return recs.length === 0;
+  });
+  const preYesTeamNo = companies.filter(c => {
+    const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
+    const recs = recsByCompany.get(c.company_id) || [];
+    return recs.length > 0 && (s.consensus === 'Reject' || s.consensus === 'Hold');
+  });
+  const lockedNoPm = companies.filter(c => lockedSet.has(c.company_id) && !c.profile_manager_email);
+  const recommendNotLocked = companies.filter(c => {
+    const s = summarizeReviews(reviewsByCompany.get(c.company_id) || []);
+    return s.consensus === 'Recommend' && !lockedSet.has(c.company_id);
+  });
+
+  // ── Pillar capacity health ───────────────────────────────
+  const pillarStats = useMemo(() => {
+    const fromReviews = new Map<string, number>();
+    for (const r of reviews) {
+      for (const p of (r.proposed_pillars || '').split(',').map(s => s.trim()).filter(Boolean)) {
+        fromReviews.set(p, (fromReviews.get(p) || 0) + 1);
+      }
+    }
+    const fromLocks = new Map<string, number>();
+    for (const a of assignments) {
+      const code = pillarFor(a.intervention_type)?.code || a.intervention_type;
+      if (code) fromLocks.set(code, (fromLocks.get(code) || 0) + 1);
+    }
+    return PILLARS.map(p => {
+      const proposed = fromReviews.get(p.code) || 0;
+      const locked = fromLocks.get(p.code) || 0;
+      const dropRate = proposed === 0 ? 0 : Math.round(((proposed - locked) / proposed) * 100);
+      return { p, proposed, locked, dropRate };
+    });
+  }, [reviews, assignments]);
+
+  // ── Sub-intervention demand (top 10) ─────────────────────
+  const subStats = useMemo(() => {
+    const fromReviews = new Map<string, number>();
+    for (const r of reviews) {
+      for (const s of (r.proposed_sub_interventions || '').split(',').map(s => s.trim()).filter(Boolean)) {
+        fromReviews.set(s, (fromReviews.get(s) || 0) + 1);
+      }
+    }
+    const fromLocks = new Map<string, number>();
+    for (const a of assignments) {
+      const s = (a.sub_intervention || '').trim();
+      if (s) fromLocks.set(s, (fromLocks.get(s) || 0) + 1);
+    }
+    const all = new Set([...fromReviews.keys(), ...fromLocks.keys()]);
+    return Array.from(all)
+      .map(s => ({ name: s, proposed: fromReviews.get(s) || 0, locked: fromLocks.get(s) || 0 }))
+      .sort((a, b) => (b.proposed + b.locked) - (a.proposed + a.locked))
+      .slice(0, 10);
+  }, [reviews, assignments]);
+
+  // ── AM workload ──────────────────────────────────────────
+  const amStats = useMemo(() => {
+    const m = new Map<string, { locked: number; selected: number }>();
+    for (const am of ACCOUNT_MANAGERS) m.set(am.email, { locked: 0, selected: 0 });
+    let unassigned = 0;
+    for (const c of companies) {
+      const isLocked = lockedSet.has(c.company_id);
+      const am = c.profile_manager_email || '';
+      const cur = m.get(am);
+      if (cur) {
+        if (isLocked) cur.locked++;
+        if (c.status === 'Selected') cur.selected++;
+      } else if (am === '' && isLocked) unassigned++;
+    }
+    return { perAm: m, unassigned };
+  }, [companies, lockedSet]);
+
+  // ── Fund capacity ────────────────────────────────────────
+  const fundStats = useMemo(() => {
+    const dutchLocks = assignments.filter(a => a.fund_code === '97060').length;
+    const sidaLocks = assignments.filter(a => a.fund_code === '91763').length;
+    const noFund = assignments.filter(a => !a.fund_code).length;
+    return { dutchLocks, sidaLocks, noFund, total: assignments.length };
+  }, [assignments]);
+
+  return (
+    <div className="space-y-4">
+      {/* ── Action items at the very top ── */}
+      <Card>
+        <CardHeader title="Action items" subtitle="Things that need attention before tomorrow's session — click any number to drill in." />
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+          <ActionTile
+            label="No review yet"
+            count={noReviewYet.length}
+            tone="red"
+            hint={noReviewYet.length > 0 ? 'Blocks Stage 2' : 'All reviewed ✓'}
+            companies={noReviewYet}
+          />
+          <ActionTile
+            label="Divergent reviews"
+            count={divergent.length}
+            tone="amber"
+            hint="Reviewers disagree — discuss live"
+            companies={divergent}
+          />
+          <ActionTile
+            label="Team Recommend, no Israa+Raouf"
+            count={teamYesPreNo.length}
+            tone="amber"
+            hint="No external endorsement"
+            companies={teamYesPreNo}
+          />
+          <ActionTile
+            label="Israa+Raouf rec'd, team Hold/Reject"
+            count={preYesTeamNo.length}
+            tone="amber"
+            hint="Worth a second look"
+            companies={preYesTeamNo}
+          />
+          <ActionTile
+            label="Recommend but not locked yet"
+            count={recommendNotLocked.length}
+            tone="orange"
+            hint="Ready for Stage 2"
+            companies={recommendNotLocked}
+          />
+          <ActionTile
+            label="Locked but no AM"
+            count={lockedNoPm.length}
+            tone="red"
+            hint="Assign Mohammed/Doaa/Muna"
+            companies={lockedNoPm}
+          />
+        </div>
+      </Card>
+
+      {/* ── Pillar capacity health ── */}
+      <Card>
+        <CardHeader
+          title="Pillar capacity health"
+          subtitle="Reviewer demand vs locked supply per pillar. High drop rate = team proposed but didn't lock — clarify scope or capacity."
+        />
+        <ul className="space-y-1.5">
+          {pillarStats.map(({ p, proposed, locked, dropRate }) => (
+            <li key={p.code} className="grid grid-cols-[1fr_60px_60px_120px_60px] items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-navy-700 dark:bg-navy-900">
+              <div>
+                <div className="font-bold text-navy-500 dark:text-slate-100">{p.label}</div>
+                <div className="text-[10px] text-slate-500">{p.shortLabel}</div>
+              </div>
+              <span className="text-right">
+                <div className="text-[9px] uppercase tracking-wider text-slate-500">Proposed</div>
+                <div className="font-mono font-bold">{proposed}</div>
+              </span>
+              <span className="text-right">
+                <div className="text-[9px] uppercase tracking-wider text-slate-500">Locked</div>
+                <div className="font-mono font-bold">{locked}</div>
+              </span>
+              <div>
+                <div className="h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+                  <div className="h-full bg-brand-teal" style={{ width: `${proposed === 0 ? 0 : Math.min(100, Math.round((locked / proposed) * 100))}%` }} />
+                </div>
+              </div>
+              <span className={`text-right text-xs font-bold ${dropRate > 50 ? 'text-red-700' : dropRate > 20 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                {proposed === 0 ? '—' : `${dropRate}% drop`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </Card>
+
+      {/* ── Sub-intervention demand ── */}
+      <Card>
+        <CardHeader
+          title="Top sub-interventions by demand"
+          subtitle="Which sub-interventions are most-requested. High proposed-vs-locked gap = capacity bottleneck."
+        />
+        {subStats.length === 0 ? (
+          <p className="text-xs italic text-slate-500">No sub-intervention picks yet — appears once reviewers tag MA / Upskilling sub-tracks.</p>
+        ) : (
+          <ul className="space-y-1.5">
+            {subStats.map(s => {
+              const max = Math.max(1, subStats[0]?.proposed || 0, subStats[0]?.locked || 0);
+              return (
+                <li key={s.name} className="grid grid-cols-[1fr_50px_50px_140px] items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-navy-700 dark:bg-navy-900">
+                  <div className="font-bold text-navy-500 dark:text-slate-100">{s.name.replace(/^MA-/, 'MA · ')}</div>
+                  <span className="text-right font-mono">{s.proposed}</span>
+                  <span className="text-right font-mono">{s.locked}</span>
+                  <div className="flex items-center gap-1">
+                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+                      <div className="h-full bg-amber-500" style={{ width: `${Math.round((s.proposed / max) * 100)}%` }} />
+                    </div>
+                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+                      <div className="h-full bg-brand-teal" style={{ width: `${Math.round((s.locked / max) * 100)}%` }} />
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </Card>
+
+      {/* ── AM workload + Fund split ── */}
+      <div className="grid gap-3 md:grid-cols-2">
+        <Card>
+          <CardHeader title="AM workload" subtitle="Locked companies per Account Manager. Avg ≈ N/3 — bigger gap = rebalance opportunity." />
+          {(() => {
+            const lockedTotal = Array.from(amStats.perAm.values()).reduce((s, v) => s + v.locked, 0) + amStats.unassigned;
+            const avg = Math.max(1, lockedTotal / 3);
+            return (
+              <ul className="space-y-1.5">
+                {ACCOUNT_MANAGERS.map(am => {
+                  const cur = amStats.perAm.get(am.email)!;
+                  const dev = cur.locked - avg;
+                  const tone = Math.abs(dev) <= 1 ? 'text-slate-500' : dev > 0 ? 'text-amber-700' : 'text-emerald-700';
+                  return (
+                    <li key={am.email} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-navy-700 dark:bg-navy-900">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold">{am.name}</span>
+                        <span className="font-mono">{cur.locked} <span className={`text-[10px] ${tone}`}>({dev >= 0 ? '+' : ''}{dev.toFixed(1)} vs avg)</span></span>
+                      </div>
+                    </li>
+                  );
+                })}
+                {amStats.unassigned > 0 && (
+                  <li className="rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs dark:border-amber-800 dark:bg-amber-950">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-amber-800 dark:text-amber-200">Unassigned</span>
+                      <span className="font-mono">{amStats.unassigned}</span>
+                    </div>
+                  </li>
+                )}
+              </ul>
+            );
+          })()}
+        </Card>
+        <Card>
+          <CardHeader title="Fund commitment" subtitle="How locked interventions split across Dutch (97060) and SIDA (91763)." />
+          <div className="space-y-1.5">
+            <FundBar label="Dutch (97060)" value={fundStats.dutchLocks} total={fundStats.total} tone="teal" />
+            <FundBar label="SIDA (91763)" value={fundStats.sidaLocks} total={fundStats.total} tone="amber" />
+            {fundStats.noFund > 0 && (
+              <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+                <span className="font-bold">{fundStats.noFund}</span> intervention(s) locked without a fund_code — fix before exporting.
+              </div>
+            )}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function ActionTile({ label, count, tone, hint, companies }: { label: string; count: number; tone: 'red' | 'amber' | 'orange' | 'green'; hint?: string; companies: ReviewableCompany[] }) {
+  const [open, setOpen] = useState(false);
+  const cls =
+    tone === 'red' ? 'bg-red-50 text-red-800 border-red-300 dark:bg-red-950 dark:text-red-200 dark:border-red-800'
+    : tone === 'amber' ? 'bg-amber-50 text-amber-900 border-amber-300 dark:bg-amber-950 dark:text-amber-200 dark:border-amber-800'
+    : tone === 'orange' ? 'bg-orange-50 text-orange-900 border-orange-300 dark:bg-orange-950 dark:text-orange-200 dark:border-orange-800'
+    : 'bg-emerald-50 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-200 dark:border-emerald-800';
+  if (count === 0) {
+    return (
+      <div className={`rounded-md border px-3 py-2 ${cls.replace('border-red-300', 'border-emerald-300').replace('text-red-800', 'text-emerald-800').replace('bg-red-50', 'bg-emerald-50').replace('border-amber-300', 'border-emerald-300').replace('text-amber-900', 'text-emerald-800').replace('bg-amber-50', 'bg-emerald-50')}`}>
+        <div className="text-[9px] font-bold uppercase tracking-wider opacity-70">{label}</div>
+        <div className="text-xl font-bold">0</div>
+        {hint && <div className="text-[10px] opacity-70">{hint}</div>}
+      </div>
+    );
+  }
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className={`w-full rounded-md border px-3 py-2 text-left ${cls}`}
+      >
+        <div className="text-[9px] font-bold uppercase tracking-wider opacity-70">{label}</div>
+        <div className="text-xl font-bold">{count}</div>
+        {hint && <div className="text-[10px] opacity-70">{hint}</div>}
+      </button>
+      {open && companies.length > 0 && (
+        <ul className={`mt-1 max-h-44 overflow-auto rounded-md border px-2 py-1 text-[11px] ${cls}`}>
+          {companies.map(c => (
+            <li key={c.company_id} className="border-b border-current/20 py-0.5 last:border-b-0">
+              {c.company_name}
+              {c.sector && <span className="ml-1 opacity-60">· {c.sector}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function FundBar({ label, value, total, tone }: { label: string; value: number; total: number; tone: 'teal' | 'amber' }) {
+  const pct = total === 0 ? 0 : Math.round((value / total) * 100);
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-bold">{label}</span>
+        <span className="font-mono">{value} ({pct}%)</span>
+      </div>
+      <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
+        <div className={`h-full ${tone === 'teal' ? 'bg-brand-teal' : 'bg-amber-500'}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
   );
 }
