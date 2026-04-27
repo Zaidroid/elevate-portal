@@ -705,6 +705,58 @@ export function CompaniesPage() {
     [joined, interviewedSet]
   );
 
+  // Interviewed companies that exist in Source Data but DON'T yet have a
+  // row in the Companies Master sheet. The Materialize button below
+  // creates those rows in one go so the master reflects the actual
+  // post-interview cohort and direct edits on the sheet have somewhere
+  // to attach. Idempotent — already-materialized companies are skipped.
+  const needsMaterialize = useMemo(() => {
+    return joined.filter(r =>
+      isInterviewed(r.company_name, interviewedSet) &&
+      r.source === 'applicant'        // applicant-only means no master row exists yet
+    );
+  }, [joined, interviewedSet]);
+  const [materializing, setMaterializing] = useState(false);
+  const handleMaterialize = async () => {
+    if (!admin) return;
+    if (needsMaterialize.length === 0) return;
+    setMaterializing(true);
+    let created = 0;
+    let failed = 0;
+    try {
+      for (const r of needsMaterialize) {
+        try {
+          await master.createRow({
+            company_id: r.company_id,
+            company_name: r.company_name,
+            cohort: 'E3',
+            status: r.status || 'Interviewed',
+            stage: r.stage || 'Interviewed',
+            sector: r.sector || '',
+            city: r.city || '',
+            governorate: r.governorate || '',
+            employee_count: r.employee_count || '',
+            fund_code: r.fund_code || '',
+            profile_manager_email: r.profile_manager_email || '',
+          } as Master);
+          created += 1;
+        } catch (e) {
+          failed += 1;
+          console.warn('[materialize] failed for', r.company_name, e);
+        }
+      }
+      if (created > 0) {
+        toast.success(`Materialized ${created} compan${created === 1 ? 'y' : 'ies'} into Master`,
+          failed > 0 ? `${failed} failed (likely permission — see console)` : 'Master sheet now mirrors the interviewed cohort.');
+      } else if (failed > 0) {
+        toast.error('Materialize failed', `${failed} write${failed === 1 ? '' : 's'} rejected. Check Drive sharing.`);
+      }
+      await master.refresh();
+    } finally {
+      setMaterializing(false);
+    }
+  };
+
   // Surface every interview-list name that did NOT find a match against any
   // applicant in Source Data. These are either spelling drift (fix the static
   // list or alias them inline below) or genuinely missing applicants (Phase 4
@@ -968,6 +1020,30 @@ export function CompaniesPage() {
           <p className="text-sm text-red-700 dark:text-red-300">Failed to load: {error.message}</p>
         </Card>
       )}
+
+      {/* Materialize banner — shows when there are interviewed companies in
+          Source Data that don't yet have a row in the Companies Master sheet.
+          Admin-only; the action is idempotent. */}
+      {admin && needsMaterialize.length > 0 && (
+        <Card className="border-2 border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/30">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-extrabold text-amber-900 dark:text-amber-200">
+                {needsMaterialize.length} interviewed compan{needsMaterialize.length === 1 ? 'y has' : 'ies have'} no row in the Companies Master sheet
+              </h3>
+              <p className="mt-0.5 text-xs text-amber-800 dark:text-amber-300">
+                The portal joins Source Data + the interviewed list at runtime, but the master sheet stays empty until rows
+                are written. Materialize creates them with status=Interviewed and the basics from Source Data, so the master
+                mirrors the cohort and direct edits on the sheet attach correctly.
+              </p>
+            </div>
+            <Button onClick={handleMaterialize} disabled={materializing}>
+              {materializing ? 'Materializing…' : `Materialize ${needsMaterialize.length} → Master`}
+            </Button>
+          </div>
+        </Card>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs uppercase tracking-wider text-slate-500">Quick views:</span>
         {([
