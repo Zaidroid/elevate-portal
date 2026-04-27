@@ -107,6 +107,35 @@ export function aliasIdFor(scheduleName: string): string {
     .slice(0, 80) || 'unknown';
 }
 
+// Shared exclusion list. Any name listed here is hidden from the
+// review queue, materialize candidates, and the joined rows across
+// every surface and every team member.
+export type RemovedCompany = {
+  removed_id: string;          // slug of company_name; one row per name
+  company_name: string;
+  removed_by: string;
+  removed_at: string;
+  reason: string;              // optional free-text
+};
+
+export const REMOVED_HEADERS = [
+  'removed_id',
+  'company_name',
+  'removed_by',
+  'removed_at',
+  'reason',
+];
+
+export function removedIdFor(companyName: string): string {
+  // Use a different prefix from aliases so we never collide if the
+  // same name happens to be an alias too.
+  return 'rm-' + ((companyName || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 76) || 'unknown');
+}
+
 // Per-company aggregation of all team reviews — what the kanban card and
 // roster column show: total reviewer count, breakdown by decision, the
 // modal recommendation, and whether there's divergence (>1 distinct vote).

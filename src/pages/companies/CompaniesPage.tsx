@@ -45,12 +45,14 @@ import {
   ACTIVITY_HEADERS,
   ALIAS_HEADERS,
   COMMENTS_HEADERS,
+  REMOVED_HEADERS,
   REVIEWS_HEADERS,
   aliasIdFor,
+  removedIdFor,
   summarizeReviews,
 } from './reviewTypes';
 import { repairDashboard } from './repairDashboard';
-import type { CompanyComment, InterviewAlias, Review, ReviewSummary } from './reviewTypes';
+import type { CompanyComment, InterviewAlias, RemovedCompany, Review, ReviewSummary } from './reviewTypes';
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
 // Company schema so keys are camelCase.
@@ -217,6 +219,7 @@ export function CompaniesPage() {
           ensureSchema(masterSheetId, getTab('companies', 'comments'), COMMENTS_HEADERS),
           ensureSchema(masterSheetId, getTab('companies', 'activity'), ACTIVITY_HEADERS),
           ensureSchema(masterSheetId, getTab('companies', 'interviewAliases'), ALIAS_HEADERS),
+          ensureSchema(masterSheetId, getTab('companies', 'removedCompanies'), REMOVED_HEADERS),
         ]);
         if (!cancelled) setSchemaReady(true);
       } catch (err) {
@@ -248,6 +251,27 @@ export function CompaniesPage() {
     'alias_id',
     { userEmail: user?.email }
   );
+
+  // Shared exclusion list. Any company name listed here is hidden from
+  // every surface — review queue, materialize candidates, joined rows
+  // — across all team members. This is the proper way to delete a
+  // duplicate or irrelevant entry that otherwise keeps reappearing
+  // because it lives in Source Data or the static interviewed list.
+  const removedDoc = useSheetDoc<RemovedCompany>(
+    schemaReady && masterSheetId ? masterSheetId : null,
+    getTab('companies', 'removedCompanies'),
+    'removed_id',
+    { userEmail: user?.email }
+  );
+
+  const removedSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of removedDoc.rows) {
+      const k = norm(r.company_name || '');
+      if (k) s.add(k);
+    }
+    return s;
+  }, [removedDoc.rows]);
 
   // One-time migration: pull any aliases the user previously saved in
   // localStorage (from before the shared-sheet refactor) and write them
@@ -531,8 +555,13 @@ export function CompaniesPage() {
       });
     }
 
-    return out;
-  }, [applicants.rows, masterE3, masterByName, interviewedSet, assignmentsByCompany]);
+    // Apply the shared exclusion list — any name on the Removed
+    // Companies tab is hidden from every downstream surface, including
+    // the materialize queue. This is the canonical way to delete a
+    // duplicate that would otherwise keep reappearing from Source
+    // Data or the static interviewed list.
+    return out.filter(r => !removedSet.has(norm(r.company_name)));
+  }, [applicants.rows, masterE3, masterByName, interviewedSet, assignmentsByCompany, removedSet]);
 
   // The "include pre-interview" toggle is the primary scope knob; the
   // saved-view chips and the legacy Selected-only collapse compose on top.
@@ -1403,26 +1432,64 @@ export function CompaniesPage() {
           }}
           onJumpToCompany={rid => navigate(`/companies/${encodeURIComponent(rid)}`)}
           onRemoveCompany={async (companyId, companyName) => {
-            // Permanent delete: remove the master row + any alias whose
-            // applicant_company_name matches this company. The Source
-            // Data row in the Selection workbook is read-only and stays.
+            // System-wide hide. Three steps:
+            //  1) Add the name to the shared Removed Companies tab so
+            //     every team member's joined / needsMaterialize / etc.
+            //     filters skip it.
+            //  2) Delete the master row (if any) so the sheet stops
+            //     showing it.
+            //  3) Delete any alias whose target was this name so
+            //     auto-materialize never re-creates it.
+            // Source Data in the Selection workbook is read-only and
+            // not touched; the exclusion list is what makes the hide
+            // stick.
             const ok = window.confirm(
               `Remove "${companyName}" from the system?\n\n` +
-              `This deletes the row from the Companies Master sheet and any matching Interview Aliases entry. ` +
-              `Source Data in the Selection workbook is not touched.`
+              `Adds it to the shared Removed Companies tab so it disappears from every team member's view, ` +
+              `deletes the master row + matching alias, and stops it from being re-created on next materialize. ` +
+              `Source Data in the Selection workbook is read-only and not touched.`
             );
             if (!ok) return;
             try {
-              if (master.rows.some(m => m.company_id === companyId)) {
+              const now = new Date().toISOString();
+              const id = removedIdFor(companyName);
+              // Step 1: shared exclusion record (idempotent — upsert).
+              const existing = removedDoc.rows.find(r => r.removed_id === id);
+              if (existing) {
+                await removedDoc.updateRow(id, {
+                  company_name: companyName,
+                  removed_by: user?.email || '',
+                  removed_at: now,
+                });
+              } else {
+                await removedDoc.createRow({
+                  removed_id: id,
+                  company_name: companyName,
+                  removed_by: user?.email || '',
+                  removed_at: now,
+                  reason: '',
+                });
+              }
+              // Step 2: master row.
+              if (companyId && master.rows.some(m => m.company_id === companyId)) {
                 await master.deleteRow(companyId);
               }
+              // Also catch any other master rows that share the name
+              // (handles duplicates with different IDs).
               const targetKey = norm(companyName);
-              for (const a of aliasesDoc.rows) {
-                if (norm(a.applicant_company_name || '') === targetKey) {
-                  await aliasesDoc.deleteRow(a.alias_id);
+              for (const m of master.rows) {
+                if (m.company_id === companyId) continue;
+                if (norm(m.company_name || '') === targetKey && m.company_id) {
+                  try { await master.deleteRow(m.company_id); } catch { /* keep going */ }
                 }
               }
-              toast.success('Removed', `${companyName} deleted from Master + aliases.`);
+              // Step 3: alias rows pointing at this name.
+              for (const a of aliasesDoc.rows) {
+                if (norm(a.applicant_company_name || '') === targetKey) {
+                  try { await aliasesDoc.deleteRow(a.alias_id); } catch { /* keep going */ }
+                }
+              }
+              toast.success('Removed', `${companyName} hidden from the system across the team.`);
               await master.refresh();
             } catch (e) {
               toast.error('Remove failed', (e as Error).message);

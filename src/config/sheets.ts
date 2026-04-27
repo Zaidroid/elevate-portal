@@ -33,6 +33,11 @@ export const SHEETS: Record<string, ModuleConfig> = {
       // (from interviewedSource.ts) to the matching applicant in Source
       // Data so every team member sees the same overrides.
       interviewAliases: 'Interview Aliases',
+      // Shared exclusion list. Any name written here is hidden from
+      // the review queue, materialize candidates, and joined rows
+      // across all team members. Used to permanently kill duplicates
+      // and irrelevant entries.
+      removedCompanies: 'Removed Companies',
     },
   },
   procurement: {
