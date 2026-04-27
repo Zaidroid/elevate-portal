@@ -331,9 +331,10 @@ export function CompaniesPage() {
     const now = new Date().toISOString();
     try {
       if (!t) {
-        // Clear alias.
         if (existing) await aliasesDoc.deleteRow(id);
-      } else if (existing) {
+        return;
+      }
+      if (existing) {
         await aliasesDoc.updateRow(id, {
           applicant_company_name: t,
           updated_at: now,
@@ -349,6 +350,43 @@ export function CompaniesPage() {
           updated_at: now,
           updated_by: user?.email || '',
         });
+      }
+      // Auto-materialize the matched company into Companies Master so the
+      // alias is reflected in the related sheet immediately, not waiting
+      // on someone to click the Materialize banner. Idempotent — if a
+      // master row already exists for that company, we leave it alone.
+      const targetKey = norm(t);
+      if (targetKey) {
+        const alreadyInMaster = master.rows.some(m =>
+          norm(m.company_name || '') === targetKey
+        );
+        if (!alreadyInMaster) {
+          // Find the source-data applicant by name to seed the master row.
+          const applicant = applicants.rows.find(a =>
+            norm(a.name || a.companyName || a.company_name || '') === targetKey
+          );
+          const applicantId = applicant?.id || '';
+          const companyId = applicantId ? padId(applicantId) : `E3-${Date.now()}`;
+          try {
+            await master.createRow({
+              company_id: companyId,
+              company_name: t,
+              cohort: 'E3',
+              status: 'Interviewed',
+              stage: 'Interviewed',
+              sector: applicant?.businessType || '',
+              city: applicant?.city || '',
+              governorate: '',
+              employee_count: applicant?.totalEmployees || '',
+              fund_code: '',
+              profile_manager_email: '',
+            } as Master);
+          } catch (err) {
+            // Non-fatal — alias still saved, master can be filled in later
+            // via the Materialize banner. Surface only as a warning.
+            console.warn('[alias→master] auto-materialize failed', err);
+          }
+        }
       }
     } catch (e) {
       toast.error('Alias save failed', (e as Error).message);
