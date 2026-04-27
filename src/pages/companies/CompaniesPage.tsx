@@ -176,7 +176,7 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
   // Hoisted up front so the Selection-workbook hooks below can lazy-mount
   // when the Review view isn't open. Cuts polling load substantially.
   const [view, setView] = useState<'review' | 'finalize' | 'dashboard' | 'pipeline' | 'roster' | 'imports' | 'activity'>(
-    isSelectionMode ? 'review' : 'review',
+    isSelectionMode ? 'review' : 'pipeline',
   );
   const reviewActive = view === 'review' || view === 'finalize';
   // Read-only context tabs barely change; poll them every 5 minutes
@@ -1256,16 +1256,9 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
         { value: 'activity', label: 'Activity', icon: <RefreshCw className="h-4 w-4" /> },
       ]
     : [
-        { value: 'review', label: `Review · ${reviewedAnyone}/${reviewableCompanies.length}`, icon: <MessageCircle className="h-4 w-4" /> },
-        {
-          value: 'finalize',
-          label: finalReady ? `Final Decision · ready` : `Final Decision · ${reviewableCompanies.length - reviewedAnyone} left`,
-          icon: <BarChart3 className="h-4 w-4" />,
-          disabled: !finalReady,
-        },
-        { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
         { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: counts.total },
         { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: counts.filtered },
+        { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
       ];
 
   // Build the applicants-by-name lookup — needed by the Review view to
@@ -1491,11 +1484,11 @@ export function CompaniesPage({ mode = 'companies' }: { mode?: 'companies' | 'se
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs uppercase tracking-wider text-slate-500">Quick views:</span>
         {([
-          { id: '', label: 'All' },
-          { id: 'mine', label: 'My portfolio' },
+          { id: '', label: `All (${joined.length})` },
+          { id: 'mine', label: 'My companies' },
+          { id: 'active', label: `Active (${joined.filter(r => r.status === 'Active' || r.status === 'Onboarded').length})` },
           { id: 'interviewed', label: `Interviewed (${interviewedCount})` },
-          { id: 'active', label: `Active + Onboarded (${joined.filter(r => r.status === 'Active' || r.status === 'Onboarded').length})` },
-          { id: 'unassigned', label: `Unassigned (${joined.filter(r => !r.profile_manager_email).length})` },
+          { id: 'unassigned', label: `Needs PM (${joined.filter(r => !r.profile_manager_email).length})` },
         ] as const).map(v => (
           <button
             key={v.id}
