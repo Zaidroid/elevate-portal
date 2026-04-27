@@ -17,3 +17,6 @@ export type { Crumb } from './Breadcrumbs';
 export { toCsv, downloadCsv, timestampedFilename } from './export';
 export { FilterBar } from './FilterBar';
 export type { FilterGroup, FilterOption, FilterValues } from './FilterBar';
+export { FilterDrawer, FilterToggleButton } from './FilterDrawer';
+export type { FilterFieldDef, FilterFieldOption } from './FilterDrawer';
+export type { FilterValues as FilterDrawerValues } from './FilterDrawer';

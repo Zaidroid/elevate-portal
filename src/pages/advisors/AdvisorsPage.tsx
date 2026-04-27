@@ -21,7 +21,6 @@ import {
   Search,
   Sparkles,
   Table as TableIcon,
-  Trash2,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { getUserByEmail, isAdmin } from '../../config/team';
@@ -492,15 +491,25 @@ export function AdvisorsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabAdvisors, tabActivity]);
 
-  const [dedupRunning, setDedupRunning] = useState(false);
-  const handleDeduplicate = async () => {
+  const [, setDedupRunning] = useState(false);
+  // Track whether we've already auto-deduped this session, so the effect
+  // doesn't loop on every poll cycle.
+  const [autoDedupRan, setAutoDedupRan] = useState(false);
+  const handleDeduplicate = async (silent = false) => {
     if (!sheetId) return;
-    if (!window.confirm(`Scan ${advHook.rows.length} rows for duplicate emails and remove all but the earliest copy of each? This is permanent.`)) return;
+    if (!silent) {
+      if (!window.confirm(`Scan ${advHook.rows.length} rows for duplicate emails and remove all but the earliest copy of each? This is permanent.`)) return;
+    }
     setDedupRunning(true);
     try {
       const result = await deduplicateAdvisors(sheetId, tabAdvisors, advHook.rows);
       if (result.rowsRemoved > 0) {
-        toast.success(`Removed ${result.rowsRemoved} duplicate row${result.rowsRemoved === 1 ? '' : 's'} across ${result.duplicateGroups} email${result.duplicateGroups === 1 ? '' : 's'}`);
+        if (silent) {
+          toast.success(`Auto-removed ${result.rowsRemoved} duplicate row${result.rowsRemoved === 1 ? '' : 's'}`,
+            `Across ${result.duplicateGroups} email group${result.duplicateGroups === 1 ? '' : 's'}.`);
+        } else {
+          toast.success(`Removed ${result.rowsRemoved} duplicate row${result.rowsRemoved === 1 ? '' : 's'} across ${result.duplicateGroups} email${result.duplicateGroups === 1 ? '' : 's'}`);
+        }
         await advHook.refresh();
         await appendActivity(sheetId, tabActivity, {
           user_email: userEmail,
@@ -508,21 +517,42 @@ export function AdvisorsPage() {
           action: 'dedupe',
           field: 'count',
           new_value: String(result.rowsRemoved),
-          details: `${result.duplicateGroups} duplicate-email groups`,
+          details: `${result.duplicateGroups} duplicate-email groups${silent ? ' · auto' : ''}`,
         });
         await actHook.refresh();
-      } else {
+      } else if (!silent) {
         toast.success(`No duplicates found in ${result.scanned} rows`);
       }
       if (result.errors.length > 0) {
         toast.error(`Some deletes failed: ${result.errors[0]}`);
       }
     } catch (err) {
-      toast.error(`Dedupe failed: ${(err as Error).message}`);
+      if (!silent) toast.error(`Dedupe failed: ${(err as Error).message}`);
+      else console.warn('[advisors] auto-dedupe failed', err);
     } finally {
       setDedupRunning(false);
     }
   };
+
+  // Auto-dedupe — when the page loads and the underlying sheet has
+  // duplicates, run the dedupe action silently. Admin-only so non-admins
+  // never trigger destructive deletes. Runs at most once per page load
+  // (autoDedupRan), and only after rows have actually loaded so we
+  // don't no-op against an empty advHook.
+  useEffect(() => {
+    if (autoDedupRan) return;
+    if (!canEdit) return;
+    if (!sheetId) return;
+    if (advHook.loading) return;
+    if (advHook.rows.length === 0) return;
+    if (dupRowCount === 0) {
+      setAutoDedupRan(true);
+      return;
+    }
+    setAutoDedupRan(true);
+    void handleDeduplicate(true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [advHook.loading, advHook.rows.length, dupRowCount, canEdit, sheetId, autoDedupRan]);
 
   // Bulk actions on selected Roster rows.
   const handleBulkMove = async (target: AdvisorPipelineId | 'Archived') => {
@@ -747,12 +777,8 @@ export function AdvisorsPage() {
               Auto-syncing form
             </span>
           )}
-          {canEdit && (
-            <Button variant="ghost" onClick={handleDeduplicate} disabled={dedupRunning}>
-              <Trash2 className={`h-4 w-4 ${dedupRunning ? 'animate-pulse' : ''}`} />
-              {dedupRunning ? 'Deduping…' : 'Dedupe'}
-            </Button>
-          )}
+          {/* Manual Dedupe button removed — auto-dedupe runs silently on
+              mount when duplicates are detected (see useEffect below). */}
           <Button variant="ghost" onClick={() => setShowArchived(v => !v)}>
             <Archive className="h-4 w-4" /> {showArchived ? 'Hide archived' : 'Show archived'}
           </Button>
@@ -768,30 +794,6 @@ export function AdvisorsPage() {
           </Button>
         </div>
       </header>
-
-      {dupRowCount > 0 && canEdit && (
-        <Card className="border-2 border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/30">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-extrabold text-amber-900 dark:text-amber-200">
-                {dupRowCount} duplicate / orphan row{dupRowCount === 1 ? '' : 's'} detected on the Advisors sheet
-              </h3>
-              <p className="mt-0.5 text-xs text-amber-800 dark:text-amber-300">
-                {duplicates.filter(g => g.reason === 'advisor_id').length} groups share an advisor_id ·{' '}
-                {duplicates.filter(g => g.reason === 'email').length} groups share an email ·{' '}
-                {duplicates.find(g => g.reason === 'no_id')?.rows.length || 0} rows have no advisor_id.
-                The kanban already keeps the latest row per advisor_id at render time so duplicates won't pile up — but the
-                underlying sheet stays inconsistent until you run Dedupe. Status updates and drag/drop on duplicate rows can
-                appear to revert because the API only updates one of them.
-              </p>
-            </div>
-            <Button onClick={handleDeduplicate} disabled={dedupRunning}>
-              <Trash2 className={`h-4 w-4 ${dedupRunning ? 'animate-pulse' : ''}`} />
-              {dedupRunning ? 'Deduping…' : 'Run dedupe'}
-            </Button>
-          </div>
-        </Card>
-      )}
 
       {newEntries.length > 0 && (
         <Card accent="red">

@@ -22,7 +22,8 @@ import {
   DataTable,
   Drawer,
   EmptyState,
-  FilterBar,
+  FilterDrawer,
+  FilterToggleButton,
   Kanban,
   Tabs,
   statusTone,
@@ -30,7 +31,7 @@ import {
   downloadCsv,
   timestampedFilename,
 } from '../../lib/ui';
-import type { Column, FilterGroup, FilterValues, KanbanColumn, KanbanItem, TabItem, Tone } from '../../lib/ui';
+import type { Column, FilterDrawerValues, FilterFieldDef, KanbanColumn, KanbanItem, TabItem, Tone } from '../../lib/ui';
 import { displayName, getProfileManagers, isAdmin } from '../../config/team';
 import { pillarFor } from '../../config/interventions';
 import { INTERVIEWED_NAMES, INTERVIEWED_RAW, isInterviewed } from './interviewedSource';
@@ -402,7 +403,8 @@ export function CompaniesPage() {
   }, [aliases]);
 
   const [query, setQuery] = useState('');
-  const [filters, setFilters] = useState<FilterValues>({ pm: [], stage: [], status: [], fund: [] });
+  const [filters, setFilters] = useState<FilterDrawerValues>({ pm: [], stage: [], status: [], fund: [] });
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [view, setView] = useState<'review' | 'dashboard' | 'pipeline' | 'roster'>('review');
   const [savedView, setSavedView] = useState<'' | 'mine' | 'unassigned' | 'interviewed' | 'active'>('');
@@ -558,10 +560,10 @@ export function CompaniesPage() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const pm = filters.pm || [];
-    const stage = filters.stage || [];
-    const status = filters.status || [];
-    const fund = filters.fund || [];
+    const pm = (filters.pm as string[] | undefined) || [];
+    const stage = (filters.stage as string[] | undefined) || [];
+    const status = (filters.status as string[] | undefined) || [];
+    const fund = typeof filters.fund === 'string' ? filters.fund : '';
     return filteredBySelection.filter(r => {
       if (pm.length > 0) {
         const key = r.profile_manager_email || '__unassigned__';
@@ -569,7 +571,7 @@ export function CompaniesPage() {
       }
       if (stage.length > 0 && !stage.includes(r.stage)) return false;
       if (status.length > 0 && !status.includes(r.status)) return false;
-      if (fund.length > 0 && !fund.includes(r.fund_code)) return false;
+      if (fund && r.fund_code !== fund) return false;
       if (q) {
         return [r.company_name, r.company_id, r.sector, r.governorate, r.city, r.status, r.stage]
           .some(v => (v || '').toLowerCase().includes(q));
@@ -593,9 +595,16 @@ export function CompaniesPage() {
     return { byPm, byStage, byStatus, byFund, total: joined.length, filtered: filtered.length };
   }, [joined, filtered.length]);
 
-  const filterGroups: FilterGroup[] = useMemo(() => [
+  const filterFields: FilterFieldDef[] = useMemo(() => [
+    {
+      key: 'status',
+      type: 'multiselect',
+      label: 'Status',
+      options: STATUSES.map(s => ({ value: s, label: s, count: counts.byStatus.get(s) || 0 })),
+    },
     {
       key: 'pm',
+      type: 'multiselect',
       label: 'Profile Manager',
       options: [
         { value: '__unassigned__', label: 'Unassigned', count: counts.byPm.get('__unassigned__') || 0 },
@@ -603,25 +612,34 @@ export function CompaniesPage() {
       ],
     },
     {
-      key: 'stage',
-      label: 'Stage',
-      options: STAGES.map(s => ({ value: s, label: s, count: counts.byStage.get(s) || 0 })),
-    },
-    {
-      key: 'status',
-      label: 'Status',
-      options: STATUSES.map(s => ({ value: s, label: s, count: counts.byStatus.get(s) || 0 })),
-    },
-    {
       key: 'fund',
+      type: 'chips',
       label: 'Fund',
       options: FUND_CODES.map(f => ({
         value: f,
-        label: f === '97060' ? 'Dutch (97060)' : 'SIDA (91763)',
+        label: f === '97060' ? 'Dutch' : 'SIDA',
         count: counts.byFund.get(f) || 0,
       })),
     },
+    {
+      key: 'stage',
+      type: 'multiselect',
+      label: 'Stage',
+      options: STAGES.map(s => ({ value: s, label: s, count: counts.byStage.get(s) || 0 })),
+    },
   ], [pms, counts]);
+
+  const activeFilterCount = useMemo(() => {
+    let n = 0;
+    for (const f of filterFields) {
+      const v = filters[f.key];
+      if (Array.isArray(v)) n += v.length;
+      else if (typeof v === 'string' && v) n += 1;
+      else if (v === true) n += 1;
+    }
+    if (query) n += 1;
+    return n;
+  }, [filterFields, filters, query]);
 
   const columns: Column<Row>[] = [
     {
@@ -1098,18 +1116,20 @@ export function CompaniesPage() {
             />
             Include pre-interview
           </label>
-          <Button variant="ghost" onClick={() => { applicants.refresh(); master.refresh(); assignments.refresh(); }}>
-            <RefreshCw className="h-4 w-4" /> Refresh
+          <FilterToggleButton count={activeFilterCount} onClick={() => setFiltersOpen(true)} />
+          <Button variant="ghost" onClick={() => { applicants.refresh(); master.refresh(); assignments.refresh(); }} title="Reload">
+            <RefreshCw className="h-4 w-4" />
           </Button>
           <Button
             variant="ghost"
             onClick={() => downloadCsv(timestampedFilename('companies'), filteredBySelection as unknown as Record<string, unknown>[])}
             disabled={filteredBySelection.length === 0}
+            title="Export CSV"
           >
-            <Download className="h-4 w-4" /> Export
+            <Download className="h-4 w-4" />
           </Button>
           <Button onClick={() => setCreating(true)}>
-            <Plus className="h-4 w-4" /> New Company
+            <Plus className="h-4 w-4" /> New
           </Button>
         </div>
       </header>
@@ -1120,27 +1140,18 @@ export function CompaniesPage() {
         </Card>
       )}
 
-      {/* Materialize banner — shows when there are interviewed companies in
-          Source Data that don't yet have a row in the Companies Master sheet.
-          Admin-only; the action is idempotent. */}
+      {/* Materialize chip — folds the old prominent banner into a single
+          line above the saved-view chips. One click writes missing
+          interviewed companies into the Master sheet. */}
       {admin && needsMaterialize.length > 0 && (
-        <Card className="border-2 border-amber-300 bg-amber-50/60 dark:border-amber-800 dark:bg-amber-950/30">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-extrabold text-amber-900 dark:text-amber-200">
-                {needsMaterialize.length} interviewed compan{needsMaterialize.length === 1 ? 'y has' : 'ies have'} no row in the Companies Master sheet
-              </h3>
-              <p className="mt-0.5 text-xs text-amber-800 dark:text-amber-300">
-                The portal joins Source Data + the interviewed list at runtime, but the master sheet stays empty until rows
-                are written. Materialize creates them with status=Interviewed and the basics from Source Data, so the master
-                mirrors the cohort and direct edits on the sheet attach correctly.
-              </p>
-            </div>
-            <Button onClick={handleMaterialize} disabled={materializing}>
-              {materializing ? 'Materializing…' : `Materialize ${needsMaterialize.length} → Master`}
-            </Button>
-          </div>
-        </Card>
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-1.5 text-xs dark:border-amber-900 dark:bg-amber-950/30">
+          <span className="font-bold text-amber-900 dark:text-amber-200">
+            {needsMaterialize.length} interviewed compan{needsMaterialize.length === 1 ? 'y' : 'ies'} not yet in Master
+          </span>
+          <Button size="sm" variant="ghost" onClick={handleMaterialize} disabled={materializing}>
+            {materializing ? 'Writing…' : 'Materialize'}
+          </Button>
+        </div>
       )}
 
       <div className="flex flex-wrap items-center gap-2">
@@ -1285,17 +1296,12 @@ export function CompaniesPage() {
 
       {view === 'roster' && (
         <>
-          <FilterBar
-            searchValue={query}
-            onSearchChange={setQuery}
-            searchPlaceholder="Search by company, sector, city, governorate…"
-            groups={filterGroups}
-            values={filters}
-            onValuesChange={setFilters}
-            total={counts.total}
-            filtered={counts.filtered}
-            resultNoun="companies"
-          />
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+            <span>
+              Showing <span className="font-bold text-navy-500 dark:text-slate-100">{counts.filtered}</span> of {counts.total} companies
+            </span>
+            <FilterToggleButton count={activeFilterCount} onClick={() => setFiltersOpen(true)} />
+          </div>
           {selectedIds.size > 0 && admin && (
             <Card accent="teal">
               <div className="flex flex-wrap items-center gap-3">
@@ -1374,6 +1380,20 @@ export function CompaniesPage() {
             toast.error('Create failed', (e as Error).message);
           }
         }}
+      />
+
+      <FilterDrawer
+        open={filtersOpen}
+        onClose={() => setFiltersOpen(false)}
+        searchValue={query}
+        onSearchChange={setQuery}
+        searchPlaceholder="Search company, sector, city…"
+        fields={filterFields}
+        values={filters}
+        onValuesChange={setFilters}
+        total={counts.total}
+        filtered={counts.filtered}
+        resultNoun="companies"
       />
     </div>
   );
