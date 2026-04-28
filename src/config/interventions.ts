@@ -100,3 +100,77 @@ export function resolveIntervention(code: string): { pillar: string; sub: string
 }
 
 export const CORE_PILLARS: Pillar[] = PILLARS;
+
+// ─── 2026 budget capacity per pillar / sub ───────────────────────────
+//
+// Numbers come straight from the Logframes workbook's "Program Budget"
+// + "Planned Budget Per ActivityDono" tabs (sheet ID
+// 107aYeRTV9o4kf3FeYnJzYjDpYCfR3Mu63Hl_FpaGWzk). Update annually when
+// donors confirm next year's allocation.
+//
+// `slots` = number of company slots the budget covers for that
+// pillar/sub. `usd` = total planned 2026 spend in USD. Sub-level
+// entries roll up into pillar totals; the pillar-level entry is the
+// authoritative budget cap shown in LiveInsightsPanel.
+
+export type BudgetEntry = {
+  /** Number of company slots budgeted for this pillar/sub. */
+  slots: { dutch: number; sida: number };
+  /** Planned 2026 USD allocation per donor. */
+  usd: { dutch: number; sida: number };
+};
+
+export const COHORT3_BUDGET_2026: Record<string, BudgetEntry> = {
+  // ── Capacity Building (rolls up TTH + Upskilling) ──
+  CB: {
+    slots: { dutch: 5, sida: 14 },
+    usd: { dutch: 37200, sida: 92200 },
+  },
+  'Train To Hire': {
+    slots: { dutch: 2, sida: 7 },
+    usd: { dutch: 25200, sida: 67200 },
+  },
+  'Upskilling': {
+    slots: { dutch: 3, sida: 7 },
+    usd: { dutch: 12000, sida: 25000 },
+  },
+
+  // ── Marketing & Branding ──
+  MKG: {
+    slots: { dutch: 2, sida: 5 },
+    usd: { dutch: 10000, sida: 25000 },
+  },
+  'Marketing Agency': {
+    slots: { dutch: 1, sida: 3 },
+    usd: { dutch: 9000, sida: 21000 },
+  },
+  'Marketing Resources': {
+    slots: { dutch: 1, sida: 2 },
+    usd: { dutch: 1000, sida: 4000 },
+  },
+
+  // ── Market Access (rolls up Legal + Conferences + C-Suite + ElevateBridge) ──
+  MA: {
+    slots: { dutch: 6, sida: 10 },
+    usd: { dutch: 33600, sida: 42400 },
+  },
+  'Legal Support': {
+    slots: { dutch: 3, sida: 3 },
+    usd: { dutch: 18000, sida: 18000 }, // 3 registrations + Legal Firm + Local Legal Advisors
+  },
+  'Conferences': {
+    slots: { dutch: 0, sida: 8 },
+    usd: { dutch: 0, sida: 16000 },
+  },
+  'C-Suite': {
+    slots: { dutch: 1, sida: 0 },
+    usd: { dutch: 3000, sida: 0 }, // Marketing-and-Sales workshop only
+  },
+  'ElevateBridge': {
+    slots: { dutch: 3, sida: 2 },
+    usd: { dutch: 12600, sida: 8400 }, // 5 freelancer slots × $4,200/each over 6 months
+  },
+};
+
+export const COHORT3_BUDGET_TOTAL_USD = { dutch: 80800, sida: 165600, combined: 246400 };
+

@@ -169,8 +169,13 @@ export const SHEETS: Record<string, ModuleConfig> = {
     tabs: {
       dutch: 'Dutch Log Frame',
       sida: 'SIDA TechRise Log Frame',
+      // Consolidated 2026 commitments — Dutch indicators rows 1–10,
+      // SIDA indicators rows 12–25. Has the team's "2026 Planned
+      // Target" column which beats the donor 2026 Target as the
+      // realistic capacity signal for live decisions.
+      targets: 'Targets',
       budget: 'Program Budget',
-      monthly: 'Monthly Budget by LIN Code',
+      monthly: 'Monthly Budget Per LinCode',
     },
   },
   advisors: {

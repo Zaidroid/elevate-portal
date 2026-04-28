@@ -51,7 +51,7 @@ import {
 } from '../../lib/ui';
 import type { TabItem, Tone } from '../../lib/ui';
 import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
-import { PILLARS, pillarFor, resolveIntervention } from '../../config/interventions';
+import { COHORT3_BUDGET_2026, COHORT3_BUDGET_TOTAL_USD, PILLARS, pillarFor, resolveIntervention } from '../../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from '../companies/interviewedSource';
 import type { ReviewableCompany, SelectionContext } from './ReviewQueueTab';
 import type { FinalLockArgs } from './FinalCohortTab';
@@ -170,8 +170,11 @@ export function SelectionPage() {
   // on Stage 2; SLOW_POLL since targets barely change mid-session.
   const logframesId = getSheetId('logframes');
   const logSheetId = stage === 'finalize' ? logframesId || null : null;
-  const dutchLog = useSheetDoc<Record<string, string>>(logSheetId, getTab('logframes', 'dutch'), 'ID', selOpts);
-  const sidaLog = useSheetDoc<Record<string, string>>(logSheetId, getTab('logframes', 'sida'), 'ID', selOpts);
+  // Targets tab is the consolidated 2026 commitments — Dutch
+  // indicators rows 1–10, SIDA indicators rows 12–25, with the team's
+  // canonical "2026 Planned Target" column. We pass raw rows to
+  // parseLogframeTargets() since the rows are positional, not keyed.
+  const targetsRaw = useSheetDoc<Record<string, string>>(logSheetId, getTab('logframes', 'targets'), 'Dutch- Indicators', selOpts);
 
   // Auto-create the portal-managed tabs if the workbook is missing them.
   const [schemaReady, setSchemaReady] = useState(false);
@@ -553,8 +556,7 @@ export function SelectionPage() {
             comments={commentsDoc.rows}
             preDecisions={preDecisionsDoc.rows}
             assignments={assignments.rows}
-            dutchLogframe={dutchLog.rows}
-            sidaLogframe={sidaLog.rows}
+            targetsRaw={targetsRaw.rows}
             reviewerEmail={user?.email || ''}
             onLockDecision={onLockDecision}
             onAssignPM={onAssignPM}
@@ -1493,8 +1495,7 @@ function FinalCohortBoard({
   comments,
   preDecisions,
   assignments,
-  dutchLogframe,
-  sidaLogframe,
+  targetsRaw,
   onLockDecision,
   onAssignPM,
 }: {
@@ -1503,8 +1504,7 @@ function FinalCohortBoard({
   comments: CompanyComment[];
   preDecisions: PreDecisionRecommendation[];
   assignments: Assignment[];
-  dutchLogframe: Record<string, string>[];
-  sidaLogframe: Record<string, string>[];
+  targetsRaw: Record<string, string>[];
   reviewerEmail: string;
   onLockDecision: (args: FinalLockArgs) => Promise<void>;
   onAssignPM: (companyId: string, pmEmail: string) => Promise<void>;
@@ -1605,8 +1605,7 @@ function FinalCohortBoard({
   // ── Counts for the live insights panel ──────────────────────────
   const totalSelected = companies.filter(isSelected).length;
   const lockedTotal = Array.from(assignsByCompany.keys()).length;
-  const dutchTargets = parseLogframeTargets(dutchLogframe);
-  const sidaTargets = parseLogframeTargets(sidaLogframe);
+  const targetMap = useMemo(() => parseTargetsTab(targetsRaw), [targetsRaw]);
 
   // Per-pillar locked counts (companies, not assignment rows — counting
   // distinct companies served by each pillar is what targets measure).
@@ -1768,8 +1767,8 @@ function FinalCohortBoard({
           subCompanyCounts={subCompanyCounts}
           dutchAssignsCount={dutchAssignsCount}
           sidaAssignsCount={sidaAssignsCount}
-          dutchTargets={dutchTargets}
-          sidaTargets={sidaTargets}
+          targetMap={targetMap}
+          assignments={assignments}
         />
       </div>
 
@@ -2782,63 +2781,105 @@ function FundBar({ label, value, total, tone }: { label: string; value: number; 
   );
 }
 
-// ─── Logframe target parser ──────────────────────────────────────────
-// The logframe Dutch + SIDA tabs each have one row per indicator with
-// year-target columns. We pull the 2026 target for each row + match
-// the indicator text to a pillar/sub via keyword. Returns a map keyed
-// by '<pillar>' or '<pillar>/<sub>' with { target, indicator } values.
+// ─── Targets tab parser ──────────────────────────────────────────────
+// Reads from the consolidated `Targets` tab in the Logframes workbook.
+// Layout:
+//   Row 1 (header): "Dutch- Indicators" + 2023 .. LoP Dutch Target +
+//                   "Acheived" + "2026 Planned Target"
+//   Rows 2–10: 9 Dutch indicators
+//   Row 11: blank separator
+//   Row 12 (header): "SIDA -Indicators" + 2026 .. LOP Target +
+//                    "Acheived" + "2026 Planned Target"
+//   Rows 13–25: 13 SIDA indicators
+//
+// Each indicator's text is matched to a pillar/sub key via keyword.
+// We prefer "2026 Planned Target" (the team's actual commitment for
+// the year) when it's set, falling back to "2026 Target" if not.
 
-type LogframeTargets = {
-  perKey: Map<string, { target: number; indicator: string }>;
-  cohortTarget: number; // companies-supported target for 2026 if found
+type TargetRow = {
+  indicator: string;
+  donor: 'dutch' | 'sida';
+  target2026: number;        // donor contractual target
+  planned2026: number;       // team's planned commitment for 2026
+  achieved: number;          // achieved-to-date (LoP); SIDA is empty/0 since fresh
+  lop: number;               // life-of-program donor target
 };
 
-function parseLogframeTargets(rows: Record<string, string>[]): LogframeTargets {
-  const perKey = new Map<string, { target: number; indicator: string }>();
-  let cohortTarget = 0;
+type TargetMap = {
+  perKey: Map<string, { dutch: TargetRow | null; sida: TargetRow | null }>;
+};
 
-  // Match an indicator name to a pillar/sub. Keyword precedence matters:
-  // sub-intervention names beat pillar names so the bar lands on the
-  // most-specific bucket.
-  const matchKey = (text: string): string | null => {
-    const t = text.toLowerCase();
-    // Sub matches first
-    if (/train.to.hire|tth\b/.test(t)) return 'CB/Train To Hire';
-    if (/upskill/.test(t)) return 'CB/Upskilling';
-    if (/marketing agency|m&b agency/.test(t)) return 'MKG/Marketing Agency';
-    if (/marketing resource|m&b resource/.test(t)) return 'MKG/Marketing Resources';
-    if (/legal (support|registration|setup)|registration in|legal&compliance/.test(t)) return 'MA/Legal Support';
-    if (/conference|biban|exhibition/.test(t)) return 'MA/Conferences';
-    if (/c-suite|domain coaching|coaching/.test(t)) return 'MA/C-Suite';
-    if (/elevate ?bridge|bridge\b/.test(t)) return 'MA/ElevateBridge';
-    // Pillar fallback
-    if (/capacity building|cap.building/.test(t)) return 'CB';
-    if (/marketing(?: ?& ?branding)?|m&b\b|brand/.test(t)) return 'MKG';
-    if (/market access|ma\b/.test(t)) return 'MA';
-    return null;
-  };
+// Match an indicator name to a pillar/sub key. Sub-intervention names
+// beat pillar names so the bar lands on the most-specific bucket.
+function matchPillarKey(text: string): string | null {
+  const t = (text || '').toLowerCase();
+  if (/train.to.hire|tth\b/.test(t)) return 'CB/Train To Hire';
+  if (/upskill/.test(t)) return 'CB/Upskilling';
+  if (/marketing agency|m&b agency/.test(t)) return 'MKG/Marketing Agency';
+  if (/marketing resource|m&b resource/.test(t)) return 'MKG/Marketing Resources';
+  if (/legal (support|registration|setup)|registered.*locally|registered.*intern|legally registered/.test(t)) return 'MA/Legal Support';
+  if (/conference|biban|exhibition/.test(t)) return 'MA/Conferences';
+  if (/c-?suite|domain coaching|coaching/.test(t)) return 'MA/C-Suite';
+  if (/elevate ?bridge|bridge\b|business advisor.*match/.test(t)) return 'MA/ElevateBridge';
+  if (/digital (presence|branding)|brand redesign|marketing redesign/.test(t)) return 'MKG';
+  if (/marketing.*sales mentorship|international.*marketing/.test(t)) return 'MA/C-Suite';
+  if (/tailored technical guidance|improved access.*international|companies.*market access/.test(t)) return 'MA';
+  if (/capacity building/.test(t)) return 'CB';
+  if (/marketing(?: ?& ?branding)?|m&b\b/.test(t)) return 'MKG';
+  if (/market access/.test(t)) return 'MA';
+  return null;
+}
 
+function toInt(s: string | undefined | null): number {
+  if (!s) return 0;
+  const n = parseInt(String(s).replace(/[^0-9-]/g, ''), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function parseTargetsTab(rows: Record<string, string>[]): TargetMap {
+  // Each row in `rows` is keyed by its first-row column header. The
+  // Dutch table starts at row 1 (header) so its data rows show up
+  // here; the SIDA section starts at row 12 and uses different column
+  // names — but since useSheetDoc parses ONE header row, only Dutch
+  // headers will be the keys. SIDA rows show up with mostly-empty
+  // header keys but their indicator text lands in the first cell.
+  //
+  // We work around that by inspecting the first few keys of each row
+  // and the values, treating any row whose first cell looks like an
+  // indicator (starts with "#") as a target row regardless of donor.
+  const perKey: TargetMap['perKey'] = new Map();
+
+  let donor: 'dutch' | 'sida' = 'dutch';
   for (const r of rows) {
-    const indicator = (r['Output Indicators'] || r['Indicators'] || '').trim();
-    if (!indicator) continue;
-    const target2026Raw = r['2026 Target'] || r['Y1 Target'] || r['2026 Target (June - July)'] || '';
-    const t = parseInt((target2026Raw || '').replace(/[^0-9]/g, ''), 10);
-    if (!Number.isFinite(t) || t <= 0) continue;
+    const firstCellKey = Object.keys(r)[0];
+    const indicator = (r[firstCellKey] || '').trim();
 
-    // Whole-cohort indicator (e.g. "Number of supported companies")
-    if (/total (number of )?(supported )?companies|cohort size|companies in the cohort/i.test(indicator)) {
-      cohortTarget = Math.max(cohortTarget, t);
+    // SIDA section starts with a blank-ish row whose first cell reads
+    // "SIDA -Indicators" or just empty. Detect either signal.
+    if (/^sida[ -]*indicators/i.test(indicator)) {
+      donor = 'sida';
       continue;
     }
+    if (!indicator || !indicator.startsWith('#')) continue;
 
-    const key = matchKey(indicator);
+    const key = matchPillarKey(indicator);
     if (!key) continue;
-    const existing = perKey.get(key);
-    if (!existing || existing.target < t) {
-      perKey.set(key, { target: t, indicator });
-    }
+
+    // Pull values by trying the named columns; fall back to positional
+    // values from Object.values() in case headers don't align (SIDA).
+    const vals = Object.values(r);
+    const target2026 = toInt(r['2026 Target (June - July)'] || r['2026 Target'] || vals[4]);
+    const planned2026 = toInt(r['2026 Planned Target'] || vals[vals.length - 1] || vals[vals.length - 2]);
+    const achieved = toInt(r['Acheived'] || r['Achieved'] || vals[vals.length - 3]);
+    const lop = toInt(r['LoP Dutch Target'] || r['LOP Target'] || vals[7]);
+
+    const row: TargetRow = { indicator, donor, target2026, planned2026, achieved, lop };
+    const cur = perKey.get(key) || { dutch: null, sida: null };
+    if (donor === 'dutch') cur.dutch = row;
+    else cur.sida = row;
+    perKey.set(key, cur);
   }
-  return { perKey, cohortTarget };
+  return { perKey };
 }
 
 // ─── LiveInsightsPanel ───────────────────────────────────────────────
@@ -2851,8 +2892,8 @@ function LiveInsightsPanel({
   subCompanyCounts,
   dutchAssignsCount,
   sidaAssignsCount,
-  dutchTargets,
-  sidaTargets,
+  targetMap,
+  assignments,
 }: {
   totalSelected: number;
   totalCohort: number;
@@ -2861,58 +2902,118 @@ function LiveInsightsPanel({
   subCompanyCounts: Map<string, Set<string>>;
   dutchAssignsCount: number;
   sidaAssignsCount: number;
-  dutchTargets: LogframeTargets;
-  sidaTargets: LogframeTargets;
+  targetMap: TargetMap;
+  assignments: Assignment[];
 }) {
-  // Combined target (Dutch + SIDA) per key — we don't separate the two
-  // for the per-pillar bars since one company can carry both funds.
-  const combinedTargets = new Map<string, { target: number; indicator: string; dutch: number; sida: number }>();
-  for (const [k, v] of dutchTargets.perKey) {
-    combinedTargets.set(k, { target: v.target, indicator: v.indicator, dutch: v.target, sida: 0 });
-  }
-  for (const [k, v] of sidaTargets.perKey) {
-    const cur = combinedTargets.get(k);
-    if (cur) {
-      combinedTargets.set(k, { ...cur, target: cur.target + v.target, sida: v.target });
-    } else {
-      combinedTargets.set(k, { target: v.target, indicator: v.indicator, dutch: 0, sida: v.target });
+  // Pull combined targets per pillar/sub from the Targets tab.
+  const targetFor = (key: string) => {
+    const e = targetMap.perKey.get(key);
+    if (!e) return null;
+    const dutchPlanned = e.dutch?.planned2026 || 0;
+    const sidaPlanned = e.sida?.planned2026 || 0;
+    const dutchDonor = e.dutch?.target2026 || 0;
+    const sidaDonor = e.sida?.target2026 || 0;
+    // Prefer Planned (team commitment) over donor target when set.
+    const dutch = dutchPlanned || dutchDonor;
+    const sida = sidaPlanned || sidaDonor;
+    return { dutch, sida, total: dutch + sida };
+  };
+
+  // Per-pillar locked $ (from assignments × per-sub avg cost — we use
+  // the budget-capacity-derived avg as a per-slot proxy). For each
+  // assignment we credit the slot's avg cost to the pillar's locked $.
+  const lockedByPillar = useMemo(() => {
+    const m = new Map<string, { slots: number; usd: number }>();
+    for (const a of assignments) {
+      const code = pillarFor(a.intervention_type)?.code || a.intervention_type;
+      if (!code) continue;
+      const subBudget = COHORT3_BUDGET_2026[a.sub_intervention || ''];
+      const pillarBudget = COHORT3_BUDGET_2026[code];
+      let usd = 0;
+      if (subBudget) {
+        const slots = subBudget.slots.dutch + subBudget.slots.sida;
+        usd = slots > 0 ? (subBudget.usd.dutch + subBudget.usd.sida) / slots : 0;
+      } else if (pillarBudget) {
+        const slots = pillarBudget.slots.dutch + pillarBudget.slots.sida;
+        usd = slots > 0 ? (pillarBudget.usd.dutch + pillarBudget.usd.sida) / slots : 0;
+      }
+      const cur = m.get(code) || { slots: 0, usd: 0 };
+      cur.slots += 1;
+      cur.usd += usd;
+      m.set(code, cur);
     }
-  }
-  const cohortTarget = Math.max(dutchTargets.cohortTarget, sidaTargets.cohortTarget) || totalCohort;
+    return m;
+  }, [assignments]);
+
+  const totalBudgetUsd = COHORT3_BUDGET_TOTAL_USD.combined;
+  const totalLockedUsd = Array.from(lockedByPillar.values()).reduce((s, v) => s + v.usd, 0);
 
   return (
     <div className="space-y-3 lg:sticky lg:top-3">
       <Card>
         <CardHeader title="Cohort progress" subtitle="Live as locks happen." />
         <div className="space-y-2">
-          <ProgressBar label="Selected" value={totalSelected} total={cohortTarget} hint={`of ${cohortTarget} target`} tone="teal" />
-          <ProgressBar label="Locked" value={lockedTotal} total={totalSelected || cohortTarget} hint={`of ${totalSelected || cohortTarget} selected`} tone="green" />
+          <ProgressBar label="Selected" value={totalSelected} total={totalCohort} hint={`of ${totalCohort} reviewable`} tone="teal" />
+          <ProgressBar label="Locked" value={lockedTotal} total={totalSelected || totalCohort} hint={`of ${totalSelected || totalCohort} selected`} tone="green" />
         </div>
       </Card>
 
       <Card>
-        <CardHeader title="Per donor" subtitle="Intervention-rows allocated to each fund." />
-        <div className="space-y-2">
-          <FundBar label="Dutch (97060)" value={dutchAssignsCount} total={dutchAssignsCount + sidaAssignsCount} tone="teal" />
-          <FundBar label="SIDA (91763)" value={sidaAssignsCount} total={dutchAssignsCount + sidaAssignsCount} tone="amber" />
+        <CardHeader title="Budget commitment" subtitle="Estimated $ committed via locked interventions vs 2026 program budget." />
+        <ProgressBar
+          label="$ committed"
+          value={Math.round(totalLockedUsd)}
+          total={totalBudgetUsd}
+          hint={`$${Math.round(totalLockedUsd).toLocaleString()} of $${totalBudgetUsd.toLocaleString()} 2026 budget`}
+          tone={totalLockedUsd > totalBudgetUsd ? 'amber' : 'green'}
+        />
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <BudgetSplitTile
+            label="Dutch (97060)"
+            assigns={dutchAssignsCount}
+            budget={COHORT3_BUDGET_TOTAL_USD.dutch}
+            tone="teal"
+          />
+          <BudgetSplitTile
+            label="SIDA (91763)"
+            assigns={sidaAssignsCount}
+            budget={COHORT3_BUDGET_TOTAL_USD.sida}
+            tone="amber"
+          />
         </div>
       </Card>
 
       <Card>
-        <CardHeader title="Per pillar" subtitle="Distinct companies per pillar vs logframe target." />
+        <CardHeader title="Per pillar · slots & budget" subtitle="Distinct companies per pillar vs 2026 Planned Target. $ committed = slots × avg cost." />
         <ul className="space-y-2">
           {PILLARS.map(p => {
-            const t = combinedTargets.get(p.code);
+            const t = targetFor(p.code);
             const count = pillarCompanyCounts.get(p.code)?.size || 0;
+            const target = t?.total || 0;
+            const cap = COHORT3_BUDGET_2026[p.code];
+            const capSlots = cap ? cap.slots.dutch + cap.slots.sida : 0;
+            const capUsd = cap ? cap.usd.dutch + cap.usd.sida : 0;
+            const lockedUsd = lockedByPillar.get(p.code)?.usd || 0;
+            const usdOver = capUsd > 0 && lockedUsd > capUsd;
             return (
               <li key={p.code}>
                 <ProgressBar
                   label={p.shortLabel}
                   value={count}
-                  total={t?.target || 0}
-                  hint={t ? `of ${t.target} target (D ${t.dutch} · S ${t.sida})` : 'no target found'}
-                  tone="navy"
+                  total={target || capSlots}
+                  hint={t
+                    ? `${count} / ${target} planned · D ${t.dutch} · S ${t.sida}`
+                    : capSlots > 0 ? `${count} / ${capSlots} budget slots` : 'no target'}
+                  tone={count > (target || capSlots) ? 'amber' : 'navy'}
                 />
+                {capUsd > 0 && (
+                  <div className="mt-0.5 flex items-center justify-between text-[10px] text-slate-500">
+                    <span>${Math.round(lockedUsd).toLocaleString()} / ${capUsd.toLocaleString()}</span>
+                    <span className={usdOver ? 'font-bold text-amber-700' : ''}>
+                      {capUsd > 0 ? `${Math.round((lockedUsd / capUsd) * 100)}%${usdOver ? ' OVER' : ''}` : ''}
+                    </span>
+                  </div>
+                )}
               </li>
             );
           })}
@@ -2920,22 +3021,27 @@ function LiveInsightsPanel({
       </Card>
 
       <Card>
-        <CardHeader title="Per sub-intervention" subtitle="Where each sub-target stands." />
+        <CardHeader title="Per sub-intervention" subtitle="Locked vs planned target / budget slot count." />
         <ul className="space-y-2">
           {PILLARS.flatMap(p => p.subInterventions.map(s => ({ pillar: p.code, sub: s }))).map(({ pillar, sub }) => {
             const key = `${pillar}/${sub}`;
-            const t = combinedTargets.get(key);
+            const t = targetFor(key);
             const count = subCompanyCounts.get(sub)?.size || 0;
-            // Only render rows that have either a count or a target — skip empty noise.
-            if (!t && count === 0) return null;
+            const cap = COHORT3_BUDGET_2026[sub];
+            const capSlots = cap ? cap.slots.dutch + cap.slots.sida : 0;
+            const target = t?.total || capSlots;
+            // Only render rows that have either a count, a target, or a budget — skip empty noise.
+            if (!t && count === 0 && capSlots === 0) return null;
             return (
               <li key={key}>
                 <ProgressBar
                   label={sub}
                   value={count}
-                  total={t?.target || count}
-                  hint={t ? `of ${t.target} target` : 'no target found'}
-                  tone="orange"
+                  total={target || count}
+                  hint={t
+                    ? `${count} / ${target} planned${capSlots ? ` · ${capSlots} budget` : ''}`
+                    : capSlots > 0 ? `${count} / ${capSlots} budget slots` : 'no target'}
+                  tone={count > target && target > 0 ? 'amber' : 'orange'}
                 />
               </li>
             );
@@ -2943,13 +3049,23 @@ function LiveInsightsPanel({
         </ul>
       </Card>
 
-      {(dutchTargets.perKey.size === 0 && sidaTargets.perKey.size === 0) && (
+      {targetMap.perKey.size === 0 && (
         <Card>
           <p className="text-[11px] italic text-slate-500">
-            Logframe targets not loaded yet. Check that the Logframes workbook is shared and that 2026 Target / Y1 Target columns are populated for the indicators you care about.
+            Targets tab not loaded yet. Check that the Logframes workbook is shared and the "Targets" tab exists with Dutch indicators in rows 1–10 + SIDA in rows 12–25.
           </p>
         </Card>
       )}
+    </div>
+  );
+}
+
+function BudgetSplitTile({ label, assigns, budget, tone }: { label: string; assigns: number; budget: number; tone: 'teal' | 'amber' }) {
+  return (
+    <div className={`rounded-md border border-slate-200 px-2 py-1.5 dark:border-navy-700 ${tone === 'teal' ? 'bg-teal-50 dark:bg-teal-950/40' : 'bg-amber-50 dark:bg-amber-950/40'}`}>
+      <div className="text-[9px] font-bold uppercase tracking-wider text-slate-500">{label}</div>
+      <div className="text-sm font-bold">{assigns} assigns</div>
+      <div className="text-[10px] text-slate-500">${budget.toLocaleString()} 2026 budget</div>
     </div>
   );
 }
