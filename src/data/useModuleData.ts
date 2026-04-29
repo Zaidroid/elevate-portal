@@ -25,7 +25,7 @@ import { useState } from 'react';
 import { makeKey } from './registry';
 import { useSheetDataContext } from './SheetDataProvider';
 
-export function useModuleData<T extends Record<string, string>>(
+export function useModuleData<T extends Record<string, string | undefined>>(
   module: string,
   tab: string
 ) {
@@ -71,6 +71,11 @@ export function useModuleData<T extends Record<string, string>>(
     [key, ctx]
   );
 
+  const deleteRow = useCallback(
+    (id: string) => ctx.deleteRow(key, id),
+    [key, ctx]
+  );
+
   const refresh = useCallback(() => ctx.refresh(key), [key, ctx]);
 
   return {
@@ -80,6 +85,7 @@ export function useModuleData<T extends Record<string, string>>(
     error: slot.error,
     updateRow,
     createRow,
+    deleteRow,
     refresh,
   };
 }

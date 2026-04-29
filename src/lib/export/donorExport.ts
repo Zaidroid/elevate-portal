@@ -22,7 +22,7 @@ import type { Company, Assignment, PR, Payment, Conference, ConferenceTrackerRow
 // ──────────────── brand palette ────────────────
 
 const NAVY  = { red: 0.07, green: 0.15, blue: 0.27 };
-const TEAL  = { red: 0.0,  green: 0.66, blue: 0.74 };
+
 const WHITE = { red: 1, green: 1, blue: 1 };
 const HEADER_BG = { red: 0.96, green: 0.97, blue: 0.99 };
 const GREEN_BG  = { red: 0.86, green: 0.96, blue: 0.91 };

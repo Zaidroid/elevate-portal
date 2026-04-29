@@ -135,8 +135,6 @@ export function CompaniesPage() {
 
   const masterSheetId = getSheetId('companies');
   const selectionSheetId = getSheetId('selection');
-  const masterTab = getTab('companies', 'companies');
-  const sourceTab = getTab('selection', 'sourceData');
 
   const [view, setView] = useState<'pipeline' | 'roster' | 'dashboard'>('pipeline');
 
@@ -452,7 +450,7 @@ export function CompaniesPage() {
       const companyId = m?.company_id || padId(a.id || '');
       const aBucket = assignmentsByCompany.get(companyId);
       out.push({
-        route_id: a.id || padId(a.id) || key,
+        route_id: a.id || padId(a.id || '') || key,
         applicant_id: a.id || '',
         company_id: companyId,
         company_name: name,

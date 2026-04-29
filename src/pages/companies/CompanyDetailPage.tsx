@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
-import { getSheetId, getTab } from '../../config/sheets';
+import { getSheetId } from '../../config/sheets';
 import type { Company, Contact, Assignment, PR, Payment, ConferenceTrackerRow as ConferenceRow, Agreement as Doc, SelectionRow } from '../../data/types';
 import { getProfileManagers, displayName } from '../../config/team';
 import { derivePRFields } from '../../lib/procurement/compute';
@@ -84,11 +84,7 @@ export function CompanyDetailPage() {
   const toast = useToast();
 
   const companiesSheet = getSheetId('companies');
-  const procurementSheet = getSheetId('procurement');
-  const paymentsSheet = getSheetId('payments');
-  const conferencesSheet = getSheetId('conferences');
-  const docsSheet = getSheetId('docs');
-  const selectionSheet = getSheetId('selection');
+
 
   const companies     = useModuleData<Company>('companies', 'companies');
   const contacts      = useModuleData<Contact>('companies', 'contacts');
@@ -169,7 +165,7 @@ export function CompanyDetailPage() {
   // the applicant has no Master row yet, and save will create one.
   const masterKey = masterRow?.company_id || '';
 
-  const matches = (row: Record<string, string>) => {
+  const matches = (row: Record<string, string | undefined>) => {
     const rName = row.company_name || row['Company Name'] || row.companyName;
     return rName && norm(rName) === nameKey;
   };
@@ -298,7 +294,7 @@ export function CompanyDetailPage() {
       } else {
         // Applicant has no Master row yet — create one (the sheet auto-assigns company_id).
         const newRow = { ...draft };
-        delete newRow.company_id;
+        delete (newRow as any).company_id;
         await companies.createRow(newRow);
         toast.success('Created', `${company.company_name} added to Master.`);
       }
@@ -635,8 +631,8 @@ function StatRow({
   reviewSummary,
 }: {
   company: Company;
-  score?: Record<string, string>;
-  needs?: Record<string, string>;
+  score?: Record<string, string | undefined>;
+  needs?: Record<string, string | undefined>;
   assignmentsCount: number;
   prsCount: number;
   paymentsTotal: number;

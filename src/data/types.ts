@@ -9,7 +9,7 @@
 // ─────────────────────────────────────────────────────────────────────
 
 /** Generic sheet row — useful when a page only accesses dynamic keys. */
-export type Row = Record<string, string>;
+export type Row = Record<string, string | undefined>;
 
 // ─── Companies Module ────────────────────────────────────────────────
 
@@ -36,6 +36,7 @@ export type Company = {
   notes: string;
   updated_at?: string;
   updated_by?: string;
+  [key: string]: string | undefined;
 };
 
 /** Intervention Assignments tab (Companies workbook). */
@@ -51,6 +52,9 @@ export type Assignment = {
   status: string;
   budget_usd: string;
   notes: string;
+  updated_at?: string;
+  updated_by?: string;
+  [key: string]: string | undefined;
 };
 
 /** Contacts tab (Companies workbook). */
@@ -63,10 +67,13 @@ export type Contact = {
   phone: string;
   role: string;
   notes: string;
+  full_name?: string;
+  is_signatory?: string;
+  [key: string]: string | undefined;
 };
 
 /** Applicant row from the Selection Source Data tab. All-string generic. */
-export type Applicant = Record<string, string>;
+export type Applicant = Record<string, string | undefined>;
 
 // ─── Procurement Module ──────────────────────────────────────────────
 
@@ -97,6 +104,8 @@ export type PR = {
   notes: string;
   updated_at?: string;
   updated_by?: string;
+  assignment_id?: string;
+  [key: string]: string | undefined;
 };
 
 // ─── Payments Module ─────────────────────────────────────────────────
@@ -120,6 +129,7 @@ export type Payment = {
   notes: string;
   updated_at?: string;
   updated_by?: string;
+  [key: string]: string | undefined;
 };
 
 // ─── Conferences Module ──────────────────────────────────────────────
@@ -138,6 +148,7 @@ export type Conference = {
   estimated_cost_per_company_usd: string;
   status: string;
   notes: string;
+  [key: string]: string | undefined;
 };
 
 /** Company × Conference tracker row. */
@@ -156,6 +167,10 @@ export type ConferenceTrackerRow = {
   visa_status: string;
   payment_id: string;
   notes: string;
+  updated_at?: string;
+  travel_start?: string;
+  name?: string;
+  [key: string]: string | undefined;
 };
 
 // ─── Docs Module ─────────────────────────────────────────────────────
@@ -174,6 +189,7 @@ export type Agreement = {
   notes: string;
   updated_at?: string;
   updated_by?: string;
+  [key: string]: string | undefined;
 };
 
 // ─── Team Roster Module ──────────────────────────────────────────────
@@ -188,6 +204,7 @@ export type TeamMember = {
   notes: string;
   updated_at?: string;
   updated_by?: string;
+  [key: string]: string | undefined;
 };
 
 // ─── Selection Module ────────────────────────────────────────────────
@@ -196,4 +213,4 @@ export type TeamMember = {
  * Generic selection-tool row (scoring matrix, doc reviews, needs, votes, etc.).
  * All columns are dynamic; the tab defines the schema.
  */
-export type SelectionRow = Record<string, string>;
+export type SelectionRow = Record<string, string | undefined>;

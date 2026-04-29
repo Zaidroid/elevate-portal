@@ -107,11 +107,7 @@ export function SelectionPage() {
   const [stage, setStage] = useState<Stage>('review');
 
   // Lazy-mount the selection-tool tabs only when stages 1/2 need them
-  // (insights/output/imports/activity don't). Polls every 5min.
-  const reviewActive = stage === 'review' || stage === 'finalize';
-  const SLOW_POLL = 5 * 60_000;
-  const selSheetId = reviewActive ? selectionSheetId || null : null;
-  const selOpts = useMemo(() => ({ userEmail: user?.email, intervalMs: SLOW_POLL }), [user?.email]);
+
 
   // ─── data hooks ───
   const master      = useModuleData<Master>('companies',   'companies');
@@ -134,10 +130,10 @@ export function SelectionPage() {
   const targetsRaw = useModuleData<Record<string, string>>('logframes', 'targets');
 
   // Auto-create the portal-managed tabs if the workbook is missing them.
-  const [schemaReady, setSchemaReady] = useState(false);
+
   useEffect(() => {
     if (!masterSheetId) return;
-    let cancelled = false;
+
     (async () => {
       try {
         await Promise.all([
@@ -151,9 +147,8 @@ export function SelectionPage() {
       } catch (err) {
         console.warn('[selection] ensureSchema failed', err);
       }
-      if (!cancelled) setSchemaReady(true);
+
     })();
-    return () => { cancelled = true; };
   }, [masterSheetId]);
 
   const reviewsDoc    = useModuleData<Review>('companies', 'reviews');

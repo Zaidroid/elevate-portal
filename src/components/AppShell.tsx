@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -152,7 +152,7 @@ export function AppShell({
   // ── Session warning banner state ───────────────────────────────────────
   type SessionWarning = 'ok' | 'expiring' | 'expired';
   const [sessionWarning, setSessionWarning] = useState<SessionWarning>('ok');
-  const watchdogStarted = useRef(false);
+
 
   // React to auth-state flags (set by the watchdog in AuthService)
   useEffect(() => {

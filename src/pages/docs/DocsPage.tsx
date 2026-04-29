@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
 import { Search, Plus, ExternalLink, Download } from 'lucide-react';
-import { useAuth } from '../../services/auth';
+
 import { useModuleData } from '../../data/useModuleData';
 import type { Agreement } from '../../data/types';
-import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
+import { Badge, Button, Card, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 
 
@@ -15,7 +15,7 @@ const inputClass =
   'w-full rounded-lg border border-slate-200 bg-brand-editable/40 px-3 py-2 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-700 dark:text-white';
 
 export function DocsPage() {
-  const { user } = useAuth();
+
 
   const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<Agreement>(
     'docs', 'agreements'

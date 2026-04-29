@@ -20,7 +20,7 @@ const inputClass =
 export function PaymentsPage() {
   const { user } = useAuth();
   const admin = user ? isAdmin(user.email) : false;
-  const sheetId = true; // always configured via SheetDataProvider
+
 
   const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<Payment>(
     'payments', 'payments'

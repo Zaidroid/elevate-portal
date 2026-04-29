@@ -34,13 +34,13 @@ import {
   useState,
 } from 'react';
 import type { ReactNode } from 'react';
-import { batchGet, appendRows, fetchRange } from '../lib/sheets/client';
+import { batchGet, appendRows, fetchRange, deleteSheetRow } from '../lib/sheets/client';
 import { makeKey, groupBySheet, resolveRange } from './registry';
 import { getCached, setCache, invalidate } from './cache';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type Row = Record<string, string>;
+export type Row = Record<string, string | undefined>;
 
 interface SlotState {
   rows: Row[];
@@ -57,6 +57,7 @@ interface ContextValue {
   refreshAll: () => void;
   updateRow: (key: string, id: string, updates: Partial<Row>) => Promise<void>;
   createRow: (key: string, row: Partial<Row>) => Promise<void>;
+  deleteRow: (key: string, id: string) => Promise<void>;
 }
 
 // ─── Context ─────────────────────────────────────────────────────────────────
@@ -88,7 +89,7 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
   // Set of currently-registered DataKeys (pages that are mounted).
   const activeKeys = useRef(new Set<string>());
   // Slot state for every key that has ever been registered this session.
-  const [slots, setSlots] = useState<Record<string, SlotState>>({});
+  const [, setSlots] = useState<Record<string, SlotState>>({});
   const slotsRef = useRef<Record<string, SlotState>>({});
 
   /** Merge partial state for one key without losing others. */
@@ -236,7 +237,7 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
       const existingRow: Row = {};
       headers.forEach((h, i) => { existingRow[h] = data[targetRow - 1][i] ?? ''; });
       const merged = { ...existingRow, ...updates, updated_at: new Date().toISOString() };
-      const rowValues = [headers.map(h => merged[h] ?? '')];
+      const rowValues = [headers.map(h => (merged as any)[h] ?? '')];
 
       await fetch(
         `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(`${tab}!A${targetRow}`)}?valueInputOption=USER_ENTERED`,
@@ -286,8 +287,43 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
     }
   }, [fetchKeys, patchSlot]);
 
+  // ─── Write: deleteRow ─────────────────────────────────────────────────────
+
+  const deleteRow = useCallback(async (key: string, id: string) => {
+    const resolved = resolveRange(key);
+    if (!resolved) throw new Error(`[SheetDataProvider] Unknown key: ${key}`);
+
+    const { sheetId, tab, idColumn } = resolved;
+    const slot = slotsRef.current[key] ?? EMPTY_SLOT;
+
+    // Optimistic delete.
+    const optimisticRows = slot.rows.filter(r => r[idColumn] !== id);
+    patchSlot(key, { rows: optimisticRows });
+
+    try {
+      const data = await fetchRange(sheetId, `${tab}!A:ZZ`);
+      if (data.length === 0) throw new Error('Tab is empty');
+      const headers = data[0].map(h => h?.trim() ?? '');
+      const keyIdx = headers.indexOf(idColumn);
+      if (keyIdx < 0) throw new Error(`ID column '${idColumn}' not found in ${tab}`);
+
+      let targetRow = -1;
+      for (let i = 1; i < data.length; i++) {
+        if ((data[i][keyIdx] ?? '') === id) { targetRow = i + 1; break; }
+      }
+      if (targetRow < 0) throw new Error(`Row with ${idColumn}=${id} not found`);
+
+      await deleteSheetRow(sheetId, tab, targetRow);
+      invalidate(key);
+      await fetchKeys([key]);
+    } catch (err) {
+      patchSlot(key, { rows: slot.rows, error: err as Error });
+      throw err;
+    }
+  }, [fetchKeys, patchSlot]);
+
   return (
-    <SheetDataContext.Provider value={{ register, unregister, getSlot, refresh, refreshAll, updateRow, createRow }}>
+    <SheetDataContext.Provider value={{ register, unregister, getSlot, refresh, refreshAll, updateRow, createRow, deleteRow }}>
       {children}
     </SheetDataContext.Provider>
   );

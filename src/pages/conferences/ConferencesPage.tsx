@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Search, Plus, ExternalLink, Download } from 'lucide-react';
-import { useAuth } from '../../services/auth';
+
 import { useModuleData } from '../../data/useModuleData';
 import type { Conference, ConferenceTrackerRow as TrackerRow } from '../../data/types';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
@@ -67,7 +67,7 @@ export function ConferencesPage() {
 }
 
 function Catalogue() {
-  const { user } = useAuth();
+
   const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<Conference>(
     'conferences', 'catalogue'
   );
@@ -129,7 +129,7 @@ function Catalogue() {
 }
 
 function Tracker() {
-  const { user } = useAuth();
+
   const { rows, loading, error, refresh, updateRow } = useModuleData<TrackerRow>(
     'conferences', 'tracker'
   );

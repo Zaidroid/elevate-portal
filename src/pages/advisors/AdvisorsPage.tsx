@@ -106,9 +106,7 @@ export function AdvisorsPage() {
   // direct writes that bypass the provider.
   const sheetId = getSheetId('advisors');
   const tabAdvisors = getTab('advisors', 'advisors');
-  const tabFollowups = getTab('advisors', 'followups');
   const tabActivity = getTab('advisors', 'activity');
-  const tabComments = getTab('advisors', 'comments');
 
   const advHook = useModuleData<Advisor>('advisors', 'advisors');
   const fuHook  = useModuleData<FollowUp>('advisors', 'followups');
