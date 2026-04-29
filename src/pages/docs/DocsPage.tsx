@@ -1,26 +1,12 @@
 import { useMemo, useState } from 'react';
 import { Search, Plus, ExternalLink, Download } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { useSheetDoc } from '../../lib/two-way-sync';
-import { getSheetId, getTab } from '../../config/sheets';
+import { useModuleData } from '../../data/useModuleData';
+import type { Agreement } from '../../data/types';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 
-type Agreement = {
-  agreement_id: string;
-  company_id: string;
-  agreement_type: string;
-  signed_date: string;
-  signatory_name: string;
-  signatory_title: string;
-  gsg_signatory: string;
-  drive_url: string;
-  status: string;
-  related_intervention: string;
-  notes: string;
-  updated_at?: string;
-  updated_by?: string;
-};
+
 
 const AGREEMENT_TYPES = ['MJPSA', 'Addendum', 'NDA', 'Commitment Letter'];
 const STATUSES = ['Drafted', 'Sent', 'Signed', 'Countersigned', 'Executed'];
@@ -30,14 +16,9 @@ const inputClass =
 
 export function DocsPage() {
   const { user } = useAuth();
-  const sheetId = getSheetId('docs');
-  const tab = getTab('docs', 'agreements');
 
-  const { rows, loading, error, refresh, updateRow, createRow } = useSheetDoc<Agreement>(
-    sheetId || null,
-    tab,
-    'agreement_id',
-    { userEmail: user?.email }
+  const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<Agreement>(
+    'docs', 'agreements'
   );
 
   const [query, setQuery] = useState('');
@@ -81,16 +62,7 @@ export function DocsPage() {
     },
   ];
 
-  if (!sheetId) {
-    return (
-      <Card>
-        <CardHeader title="Docs and Agreements" />
-        <p className="text-sm text-slate-500">
-          Set <code className="rounded bg-slate-100 px-1">VITE_SHEET_DOCS</code> in your environment.
-        </p>
-      </Card>
-    );
-  }
+  // sheet always configured via SheetDataProvider
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">

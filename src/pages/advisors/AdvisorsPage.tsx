@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { getUserByEmail, isAdmin } from '../../config/team';
-import { useSheetDoc } from '../../lib/two-way-sync';
+import { useModuleData } from '../../data/useModuleData';
 import { getSheetId, getTab } from '../../config/sheets';
 import {
   Badge,
@@ -102,25 +102,21 @@ export function AdvisorsPage() {
   const canEdit = isAdmin(userEmail) || /@gazaskygeeks\.com$/i.test(userEmail);
   const toast = useToast();
 
+  // sheetId + tab names are still needed for appendActivity / dedup / form-import
+  // direct writes that bypass the provider.
   const sheetId = getSheetId('advisors');
   const tabAdvisors = getTab('advisors', 'advisors');
   const tabFollowups = getTab('advisors', 'followups');
   const tabActivity = getTab('advisors', 'activity');
   const tabComments = getTab('advisors', 'comments');
 
-  const advHook = useSheetDoc<Advisor>(sheetId || null, tabAdvisors, 'advisor_id', { userEmail });
-  const fuHook = useSheetDoc<FollowUp>(sheetId || null, tabFollowups, 'followup_id', { userEmail });
-  const actHook = useSheetDoc<ActivityRow>(sheetId || null, tabActivity, 'activity_id', { userEmail });
-  const cmtHook = useSheetDoc<AdvisorComment>(sheetId || null, tabComments, 'comment_id', { userEmail });
+  const advHook = useModuleData<Advisor>('advisors', 'advisors');
+  const fuHook  = useModuleData<FollowUp>('advisors', 'followups');
+  const actHook = useModuleData<ActivityRow>('advisors', 'activity');
+  const cmtHook = useModuleData<AdvisorComment>('advisors', 'comments');
 
-  // Companies — needed for conflict-of-interest detection and smart-match
-  // suggestions in the detail drawer.
-  const companiesId = getSheetId('companies');
-  const { rows: companyRows } = useSheetDoc<Record<string, string>>(
-    companiesId || null,
-    getTab('companies', 'companies'),
-    'company_id'
-  );
+  // Companies — needed for conflict-of-interest detection.
+  const { rows: companyRows } = useModuleData<Record<string, string>>('companies', 'companies');
   const companies = useMemo<CompanyLite[]>(
     () => companyRows.map(c => ({
       company_id: c.company_id,

@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { Search, Plus, Download, RefreshCw } from 'lucide-react';
 import { derivePRFields } from '../../lib/procurement/compute';
 import { useAuth } from '../../services/auth';
-import { useSheetDoc } from '../../lib/two-way-sync';
-import { getSheetId, getTab } from '../../config/sheets';
+import { useModuleData } from '../../data/useModuleData';
+import type { PR } from '../../data/types';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { SourceComparisonView } from './SourceComparisonView';
@@ -11,33 +11,7 @@ import { SourceAnalysisView } from './SourceAnalysisView';
 
 type Quarter = 'q1' | 'q2' | 'q3' | 'q4';
 
-type PR = {
-  pr_id: string;
-  activity: string;
-  intervention_type: string;
-  company_id: string;
-  office_code: string;
-  gl_account: string;
-  fund_code: string;
-  lin_code: string;
-  item_description: string;
-  unit: string;
-  qty: string;
-  unit_cost_usd: string;
-  total_cost_usd: string;
-  threshold_class: string;
-  sla_working_days: string;
-  target_award_date: string;
-  pr_submit_date: string;
-  pr_deadline: string;
-  local_international: string;
-  requester_email: string;
-  status: string;
-  procurement_contact: string;
-  notes: string;
-  updated_at?: string;
-  updated_by?: string;
-};
+
 
 const QUARTER_LABELS: Record<Quarter, string> = {
   q1: 'Q1 2026',
@@ -70,33 +44,22 @@ type ViewMode = Quarter | 'source' | 'analysis';
 
 export function ProcurementPage() {
   const { user } = useAuth();
-  const sheetId = getSheetId('procurement');
   const [view, setView] = useState<ViewMode>('q1');
   const isQuarter = view !== 'source' && view !== 'analysis';
-  const tab = getTab('procurement', isQuarter ? view : 'q1');
 
-  const { rows, loading, error, refresh, updateRow, createRow } = useSheetDoc<PR>(
-    sheetId || null,
-    tab,
-    'pr_id',
-    { userEmail: user?.email }
-  );
+  // All four quarters are always loaded by the provider (registered once).
+  const q1Hook = useModuleData<PR>('procurement', 'q1');
+  const q2Hook = useModuleData<PR>('procurement', 'q2');
+  const q3Hook = useModuleData<PR>('procurement', 'q3');
+  const q4Hook = useModuleData<PR>('procurement', 'q4');
 
-  // For the source comparison view we need ALL E3 quarters merged so we can
-  // match source rows against any of them. Pull the other three quarters
-  // alongside the active one.
-  const otherQuarters: Quarter[] = (['q1', 'q2', 'q3', 'q4'] as Quarter[]).filter(q => q !== (isQuarter ? view : 'q1'));
-  const q1Hook = useSheetDoc<PR>(sheetId || null, getTab('procurement', 'q1'), 'pr_id', { userEmail: user?.email });
-  const q2Hook = useSheetDoc<PR>(sheetId || null, getTab('procurement', 'q2'), 'pr_id', { userEmail: user?.email });
-  const q3Hook = useSheetDoc<PR>(sheetId || null, getTab('procurement', 'q3'), 'pr_id', { userEmail: user?.email });
-  const q4Hook = useSheetDoc<PR>(sheetId || null, getTab('procurement', 'q4'), 'pr_id', { userEmail: user?.email });
+  // Active quarter data — just pick from the already-loaded hooks.
+  const activeHook = view === 'q1' ? q1Hook : view === 'q2' ? q2Hook : view === 'q3' ? q3Hook : q4Hook;
+  const { rows, loading, error, refresh, updateRow, createRow } = isQuarter ? activeHook : q1Hook;
+
   const allE3Rows = useMemo(() => [
     ...q1Hook.rows, ...q2Hook.rows, ...q3Hook.rows, ...q4Hook.rows,
   ], [q1Hook.rows, q2Hook.rows, q3Hook.rows, q4Hook.rows]);
-  // Suppress lint for the unused otherQuarters guard (kept for potential
-  // future use when we want to be explicit about which hooks fire on
-  // which view).
-  void otherQuarters;
 
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<PR | null>(null);
@@ -131,7 +94,7 @@ export function ProcurementPage() {
     },
   ];
 
-  if (!sheetId) {
+  if (!import.meta.env.VITE_SHEET_PROCUREMENT) {
     return (
       <Card>
         <CardHeader title="Procurement" />

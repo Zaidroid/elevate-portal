@@ -53,7 +53,7 @@ export class SheetConflictError extends Error {
   }
 }
 
-const DEFAULT_INTERVAL = 30_000;
+const DEFAULT_INTERVAL = 120_000; // 2 min — reduced from 30 s to stay well under 300-reads/min quota
 
 function colLetter(index: number): string {
   // 0-based to A1 column letter

@@ -18,8 +18,8 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { isAdmin } from '../../config/team';
-import { useSheetDoc } from '../../lib/two-way-sync';
-import { getSheetId, getTab } from '../../config/sheets';
+import { useModuleData } from '../../data/useModuleData';
+
 import { Badge, Card, CardHeader, EmptyState } from '../../lib/ui';
 import { alertCounts, computeAlerts, type Alert, type AlertKind } from '../../lib/alerts';
 
@@ -40,23 +40,17 @@ export function AlertsPage() {
   const { user } = useAuth();
   const admin = isAdmin(user?.email || '');
 
-  const procurementId = getSheetId('procurement');
-  const paymentsId = getSheetId('payments');
-  const docsId = getSheetId('docs');
-  const advisorsId = getSheetId('advisors');
-  const conferencesId = getSheetId('conferences');
-
-  const { rows: q1 } = useSheetDoc<Row>(procurementId || null, getTab('procurement', 'q1'), 'pr_id');
-  const { rows: q2 } = useSheetDoc<Row>(procurementId || null, getTab('procurement', 'q2'), 'pr_id');
-  const { rows: q3 } = useSheetDoc<Row>(procurementId || null, getTab('procurement', 'q3'), 'pr_id');
-  const { rows: q4 } = useSheetDoc<Row>(procurementId || null, getTab('procurement', 'q4'), 'pr_id');
-  const { rows: payments } = useSheetDoc<Row>(paymentsId || null, getTab('payments', 'payments'), 'payment_id');
-  const { rows: agreements } = useSheetDoc<Row>(docsId || null, getTab('docs', 'agreements'), 'agreement_id');
-  const { rows: followups } = useSheetDoc<Row>(advisorsId || null, getTab('advisors', 'followups'), 'followup_id');
-  const { rows: advisorRows } = useSheetDoc<Row>(advisorsId || null, getTab('advisors', 'advisors'), 'advisor_id');
-  const { rows: advisorComments } = useSheetDoc<Row>(advisorsId || null, getTab('advisors', 'comments'), 'comment_id');
-  const { rows: advisorActivity } = useSheetDoc<Row>(advisorsId || null, getTab('advisors', 'activity'), 'activity_id');
-  const { rows: confTracker } = useSheetDoc<Row>(conferencesId || null, getTab('conferences', 'tracker'), 'tracker_id');
+  const { rows: q1 }             = useModuleData<Row>('procurement', 'q1');
+  const { rows: q2 }             = useModuleData<Row>('procurement', 'q2');
+  const { rows: q3 }             = useModuleData<Row>('procurement', 'q3');
+  const { rows: q4 }             = useModuleData<Row>('procurement', 'q4');
+  const { rows: payments }        = useModuleData<Row>('payments',    'payments');
+  const { rows: agreements }      = useModuleData<Row>('docs',        'agreements');
+  const { rows: followups }       = useModuleData<Row>('advisors',    'followups');
+  const { rows: advisorRows }     = useModuleData<Row>('advisors',    'advisors');
+  const { rows: advisorComments } = useModuleData<Row>('advisors',    'comments');
+  const { rows: advisorActivity } = useModuleData<Row>('advisors',    'activity');
+  const { rows: confTracker }     = useModuleData<Row>('conferences', 'tracker');
 
   const alerts = useMemo(
     () => computeAlerts({

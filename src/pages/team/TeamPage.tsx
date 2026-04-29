@@ -1,8 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Plus, Search, Download } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { useSheetDoc } from '../../lib/two-way-sync';
-import { getSheetId, getTab } from '../../config/sheets';
+import { useModuleData } from '../../data/useModuleData';
 import { AUTHORIZED_USERS, isAdmin } from '../../config/team';
 import { Badge, Button, Card, DataTable, Drawer, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
@@ -43,11 +42,9 @@ const inputClass =
 export function TeamPage() {
   const { user } = useAuth();
   const admin = user ? isAdmin(user.email) : false;
-  const sheetId = getSheetId('teamRoster');
-  const tab = getTab('teamRoster', 'roster');
 
-  const { rows, loading, error, refresh, updateRow, createRow } = useSheetDoc<TeamRow>(
-    sheetId || null, tab, 'email', { userEmail: user?.email }
+  const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<TeamRow>(
+    'teamRoster', 'roster'
   );
 
   const [query, setQuery] = useState('');
@@ -55,7 +52,7 @@ export function TeamPage() {
   const [creating, setCreating] = useState(false);
 
   // Fall back to the hardcoded roster when the sheet isn't configured or is empty.
-  const usingFallback = !sheetId || (!loading && rows.length === 0);
+  const usingFallback = !loading && rows.length === 0;
   const displayRows = usingFallback ? FALLBACK_ROWS : rows;
 
   const filtered = useMemo(() => {
@@ -99,7 +96,7 @@ export function TeamPage() {
           </p>
         </div>
         <div className="flex gap-3">
-          {sheetId && <Button variant="ghost" onClick={refresh}>Refresh</Button>}
+          {true && <Button variant="ghost" onClick={refresh}>Refresh</Button>}
           <Button
             variant="ghost"
             onClick={() => downloadCsv(timestampedFilename('team_roster'), filtered)}
@@ -107,7 +104,7 @@ export function TeamPage() {
           >
             <Download className="h-4 w-4" /> Export
           </Button>
-          {admin && sheetId && !usingFallback && (
+          {admin && true && !usingFallback && (
             <Button onClick={() => setCreating(true)}>
               <Plus className="h-4 w-4" /> New Member
             </Button>

@@ -85,11 +85,5 @@ export function isInterviewed(companyName: string, names: Set<string> = INTERVIE
   if (!companyName || names.size === 0) return false;
   const k = normName(companyName);
   if (!k) return false;
-  if (names.has(k)) return true;
-  // Loose substring fall-back to tolerate "Inc.", "Ltd", trailing notes etc.
-  for (const n of names) {
-    if (n.length < 4) continue;
-    if (k.includes(n) || n.includes(k)) return true;
-  }
-  return false;
+  return names.has(k);
 }

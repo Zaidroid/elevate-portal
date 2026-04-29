@@ -80,6 +80,7 @@ export function pillarFor(type: string): Pillar | undefined {
   for (const p of PILLARS) if (p.subInterventions.includes(type)) return p;
   const legacy = LEGACY[type];
   if (legacy) return PILLAR_BY_CODE[legacy.pillar];
+  console.warn(`[interventions] Unknown intervention type: "${type}"`);
   return undefined;
 }
 

@@ -1,44 +1,14 @@
 import { useMemo, useState } from 'react';
 import { Search, Plus, ExternalLink, Download } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { useSheetDoc } from '../../lib/two-way-sync';
-import { getSheetId, getTab } from '../../config/sheets';
+import { useModuleData } from '../../data/useModuleData';
+import type { Conference, ConferenceTrackerRow as TrackerRow } from '../../data/types';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 
 type View = 'catalogue' | 'tracker';
 
-type Conference = {
-  conference_id: string;
-  name: string;
-  city: string;
-  country: string;
-  start_date: string;
-  end_date: string;
-  website: string;
-  tier: string;
-  fund_eligible: string;
-  estimated_cost_per_company_usd: string;
-  status: string;
-  notes: string;
-};
 
-type TrackerRow = {
-  tracker_id: string;
-  company_id: string;
-  company_name: string;
-  conference_id: string;
-  conference_name: string;
-  fit_score: string;
-  decision: string;
-  signatory_name: string;
-  commitment_letter_url: string;
-  travel_dates: string;
-  flight_booked: string;
-  visa_status: string;
-  payment_id: string;
-  notes: string;
-};
 
 const TIERS = ['T1', 'T2', 'T3'];
 const FUND_ELIGIBLE = ['Dutch', 'SIDA', 'Both'];
@@ -48,10 +18,9 @@ const inputClass =
   'w-full rounded-lg border border-slate-200 bg-brand-editable/40 px-3 py-2 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-700 dark:text-white';
 
 export function ConferencesPage() {
-  const sheetId = getSheetId('conferences');
   const [view, setView] = useState<View>('catalogue');
 
-  if (!sheetId) {
+  if (!import.meta.env.VITE_SHEET_CONFERENCES) {
     return (
       <Card>
         <CardHeader title="Conferences and Travel" />
@@ -92,16 +61,15 @@ export function ConferencesPage() {
         ))}
       </div>
 
-      {view === 'catalogue' ? <Catalogue sheetId={sheetId} /> : <Tracker sheetId={sheetId} />}
+      {view === 'catalogue' ? <Catalogue /> : <Tracker />}
     </div>
   );
 }
 
-function Catalogue({ sheetId }: { sheetId: string }) {
+function Catalogue() {
   const { user } = useAuth();
-  const tab = getTab('conferences', 'catalogue');
-  const { rows, loading, error, refresh, updateRow, createRow } = useSheetDoc<Conference>(
-    sheetId, tab, 'conference_id', { userEmail: user?.email }
+  const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<Conference>(
+    'conferences', 'catalogue'
   );
 
   const [query, setQuery] = useState('');
@@ -160,11 +128,10 @@ function Catalogue({ sheetId }: { sheetId: string }) {
   );
 }
 
-function Tracker({ sheetId }: { sheetId: string }) {
+function Tracker() {
   const { user } = useAuth();
-  const tab = getTab('conferences', 'tracker');
-  const { rows, loading, error, refresh, updateRow } = useSheetDoc<TrackerRow>(
-    sheetId, tab, 'tracker_id', { userEmail: user?.email }
+  const { rows, loading, error, refresh, updateRow } = useModuleData<TrackerRow>(
+    'conferences', 'tracker'
   );
 
   const [query, setQuery] = useState('');

@@ -19,55 +19,13 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../services/auth';
 import { Badge, Card, CardHeader, EmptyState, statusTone } from '../lib/ui';
-import { useSheetDoc } from '../lib/two-way-sync';
-import { getSheetId, getTab } from '../config/sheets';
+import { useModuleData } from '../data/useModuleData';
+import type { Row, Company as Master, Assignment, PR, Payment } from '../data/types';
 import { displayName, getTier } from '../config/team';
 import { INTERVIEWED_RAW, isInterviewed, INTERVIEWED_NAMES } from './companies/interviewedSource';
 import type { Review } from './companies/reviewTypes';
 
-type Row = Record<string, string>;
 
-type Master = Row & {
-  company_id?: string;
-  company_name?: string;
-  status?: string;
-  fund_code?: string;
-  sector?: string;
-};
-
-type Assignment = Row & {
-  assignment_id?: string;
-  company_id?: string;
-  intervention_type?: string;
-  sub_intervention?: string;
-  owner_email?: string;
-  status?: string;
-  start_date?: string;
-  end_date?: string;
-  budget_usd?: string;
-};
-
-type PR = Row & {
-  pr_id?: string;
-  company_id?: string;
-  activity?: string;
-  requester_email?: string;
-  status?: string;
-  threshold_class?: string;
-  total_cost_usd?: string;
-  target_award_date?: string;
-  pr_deadline?: string;
-};
-
-type Payment = Row & {
-  payment_id?: string;
-  company_id?: string;
-  payee_name?: string;
-  amount_usd?: string;
-  status?: string;
-  fund_code?: string;
-  payment_date?: string;
-};
 
 type ConfRow = Row & {
   conference_id?: string;
@@ -134,53 +92,29 @@ function cohortWeek(): number {
 
 export function HomePage() {
   const { user } = useAuth();
-  const firstName = user?.name?.split(' ')[0] || 'Team';
+  const nicknames: Record<string, string> = {
+    'zaid@gazaskygeeks.com': 'ابو حسام',
+    'ayesh@gazaskygeeks.com': 'ابو بلال',
+    'doaa@gazaskygeeks.com': 'دعدع',
+    'raouf@gazaskygeeks.com': 'ابو جون',
+    'israa@gazaskygeeks.com': 'ام ليلى',
+    'muna@gazaskygeeks.com': 'منمن',
+  };
+  const firstName = (user?.email && nicknames[user.email.toLowerCase()]) || user?.name?.split(' ')[0] || 'Team';
   const tier = user?.email ? getTier(user.email) : 'member';
   const greeting = greetingForHour();
   const week = cohortWeek();
 
-  const companies = useSheetDoc<Master>(
-    getSheetId('companies') || null,
-    getTab('companies', 'companies'),
-    'company_id',
-    { userEmail: user?.email }
-  );
-  const assignments = useSheetDoc<Assignment>(
-    getSheetId('companies') || null,
-    getTab('companies', 'assignments'),
-    'assignment_id',
-    { userEmail: user?.email }
-  );
-  const payments = useSheetDoc<Payment>(
-    getSheetId('payments') || null,
-    getTab('payments', 'payments'),
-    'payment_id',
-    { userEmail: user?.email }
-  );
-  const q1 = useSheetDoc<PR>(getSheetId('procurement') || null, getTab('procurement', 'q1'), 'pr_id');
-  const q2 = useSheetDoc<PR>(getSheetId('procurement') || null, getTab('procurement', 'q2'), 'pr_id');
-  const q3 = useSheetDoc<PR>(getSheetId('procurement') || null, getTab('procurement', 'q3'), 'pr_id');
-  const q4 = useSheetDoc<PR>(getSheetId('procurement') || null, getTab('procurement', 'q4'), 'pr_id');
-  const confs = useSheetDoc<ConfRow>(
-    getSheetId('conferences') || null,
-    getTab('conferences', 'tracker'),
-    'conference_id',
-    { userEmail: user?.email }
-  );
-  const docs = useSheetDoc<DocRow>(
-    getSheetId('docs') || null,
-    getTab('docs', 'agreements'),
-    'agreement_id',
-    { userEmail: user?.email }
-  );
-  // Review queue — peek at the post-interview review workflow so the home
-  // page surfaces "X of 52 companies reviewed" + a CTA into the Review tab.
-  const reviewsDoc = useSheetDoc<Review>(
-    getSheetId('companies') || null,
-    getTab('companies', 'reviews'),
-    'review_id',
-    { userEmail: user?.email }
-  );
+  const companies  = useModuleData<Master>('companies', 'companies');
+  const assignments = useModuleData<Assignment>('companies', 'assignments');
+  const payments   = useModuleData<Payment>('payments', 'payments');
+  const q1 = useModuleData<PR>('procurement', 'q1');
+  const q2 = useModuleData<PR>('procurement', 'q2');
+  const q3 = useModuleData<PR>('procurement', 'q3');
+  const q4 = useModuleData<PR>('procurement', 'q4');
+  const confs = useModuleData<ConfRow>('conferences', 'tracker');
+  const docs  = useModuleData<DocRow>('docs', 'agreements');
+  const reviewsDoc = useModuleData<Review>('companies', 'reviews');
 
   const allPRs: PR[] = useMemo(
     () => [...q1.rows, ...q2.rows, ...q3.rows, ...q4.rows],

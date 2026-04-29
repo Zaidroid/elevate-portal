@@ -17,8 +17,7 @@ import {
   Activity, BarChart3, ChevronDown, ChevronRight, Globe2,
   Search, Target,
 } from 'lucide-react';
-import { useSheetDoc } from '../../lib/two-way-sync';
-import { getSheetId, getTab } from '../../config/sheets';
+import { useModuleData } from '../../data/useModuleData';
 import {
   Badge, Card, CardHeader, EmptyState, FilterDrawer, FilterToggleButton, PageHeader, Tabs,
 } from '../../lib/ui';
@@ -79,28 +78,17 @@ export function LogframesPage() {
   });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  const logframesId = getSheetId('logframes');
-  const { rows: dutch, loading: dutchLoading, error: dutchError } = useSheetDoc<Row>(
-    logframesId || null,
-    getTab('logframes', 'dutch'),
-    'ID'
-  );
-  const { rows: sida, loading: sidaLoading } = useSheetDoc<Row>(
-    logframesId || null,
-    getTab('logframes', 'sida'),
-    'ID'
-  );
+  const { rows: dutch, loading: dutchLoading, error: dutchError } = useModuleData<Row>('logframes', 'dutch');
+  const { rows: sida,  loading: sidaLoading }                     = useModuleData<Row>('logframes', 'sida');
 
-  // Live data we join against for auto-computed actuals.
-  const companiesId = getSheetId('companies');
-  const paymentsId = getSheetId('payments');
-  const { rows: companies } = useSheetDoc<Row>(companiesId || null, getTab('companies', 'companies'), 'company_id');
-  const { rows: assignments } = useSheetDoc<Row>(companiesId || null, getTab('companies', 'assignments'), 'assignment_id');
-  const { rows: payments } = useSheetDoc<Row>(paymentsId || null, getTab('payments', 'payments'), 'payment_id');
+  // Live data joined for auto-computed actuals.
+  const { rows: companies }   = useModuleData<Row>('companies', 'companies');
+  const { rows: assignments } = useModuleData<Row>('companies', 'assignments');
+  const { rows: payments }    = useModuleData<Row>('payments',  'payments');
 
   const inputs = useMemo(() => ({ companies, assignments, payments }), [companies, assignments, payments]);
 
-  if (!logframesId) {
+  if (dutchError && dutch.length === 0) {
     return (
       <Card>
         <CardHeader title="Logframes" />

@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { getUserByEmail, isAdmin } from '../../config/team';
-import { useSheetDoc } from '../../lib/two-way-sync';
+import { useModuleData } from '../../data/useModuleData';
 import { getSheetId, getTab } from '../../config/sheets';
 import {
   Badge,
@@ -68,31 +68,20 @@ export function FreelancersPage() {
   const canEdit = isAdmin(userEmail) || /@gazaskygeeks\.com$/i.test(userEmail);
   const toast = useToast();
 
+  // sheetId still needed for appendFreelancerActivity direct writes.
   const sheetId = getSheetId('freelancers');
-  const tabFreelancers = getTab('freelancers', 'freelancers');
-  const tabFollowups = 'FollowUps';
   const tabActivity = 'ActivityLog';
-  const tabComments = 'Comments';
-  const tabIncome = getTab('freelancers', 'income');
+  const tabFreelancers = getTab('freelancers', 'freelancers');
 
-  const flHook = useSheetDoc<Freelancer>(sheetId || null, tabFreelancers, 'freelancer_id', { userEmail });
-  const fuHook = useSheetDoc<FreelancerFollowUp>(sheetId || null, tabFollowups, 'followup_id', { userEmail });
-  const actHook = useSheetDoc<FreelancerActivity>(sheetId || null, tabActivity, 'activity_id', { userEmail });
-  const cmtHook = useSheetDoc<FreelancerComment>(sheetId || null, tabComments, 'comment_id', { userEmail });
-  const { rows: incomeRows } = useSheetDoc<Record<string, string>>(sheetId || null, tabIncome, 'record_id');
+  const flHook  = useModuleData<Freelancer>('freelancers', 'freelancers');
+  const fuHook  = useModuleData<FreelancerFollowUp>('freelancers', 'followups');
+  const actHook = useModuleData<FreelancerActivity>('freelancers', 'activity');
+  const cmtHook = useModuleData<FreelancerComment>('freelancers', 'comments');
+  const { rows: incomeRows } = useModuleData<Record<string, string>>('freelancers', 'income');
 
   // Companies (for smart match + drawer dropdown).
-  const companiesId = getSheetId('companies');
-  const { rows: companyRows } = useSheetDoc<Record<string, string>>(
-    companiesId || null,
-    getTab('companies', 'companies'),
-    'company_id'
-  );
-  const { rows: assignmentRows } = useSheetDoc<Record<string, string>>(
-    companiesId || null,
-    getTab('companies', 'assignments'),
-    'assignment_id'
-  );
+  const { rows: companyRows }    = useModuleData<Record<string, string>>('companies', 'companies');
+  const { rows: assignmentRows } = useModuleData<Record<string, string>>('companies', 'assignments');
   const companies = useMemo<CompanyLite[]>(
     () => companyRows.map(c => ({
       company_id: c.company_id,

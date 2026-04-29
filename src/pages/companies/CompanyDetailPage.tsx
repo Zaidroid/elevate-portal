@@ -20,8 +20,9 @@ import {
   MessageCircle,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { useSheetDoc } from '../../lib/two-way-sync';
+import { useModuleData } from '../../data/useModuleData';
 import { getSheetId, getTab } from '../../config/sheets';
+import type { Company, Contact, Assignment, PR, Payment, ConferenceTrackerRow as ConferenceRow, Agreement as Doc, SelectionRow } from '../../data/types';
 import { getProfileManagers, displayName } from '../../config/team';
 import { derivePRFields } from '../../lib/procurement/compute';
 import { INTERVENTION_TYPES, CORE_PILLARS, pillarFor } from '../../config/interventions';
@@ -44,14 +45,7 @@ import type { ActivityRow, CompanyComment, PreDecisionRecommendation, Review } f
 import { summarizeReviews } from './reviewTypes';
 import { ActivityTimeline as AuditLogTimeline } from './ActivityTimeline';
 
-type Company = Record<string, string>;
-type Contact = Record<string, string>;
-type Assignment = Record<string, string>;
-type PR = Record<string, string>;
-type Payment = Record<string, string>;
-type ConferenceRow = Record<string, string>;
-type Doc = Record<string, string>;
-type SelectionRow = Record<string, string>;
+
 
 const STATUSES = ['Applicant', 'Shortlisted', 'Interviewed', 'Selected', 'Onboarded', 'Active', 'Graduated', 'Withdrawn'];
 const STAGES = ['Applied', '1st Filtration', 'Doc Review', 'Needs Assessed', 'Scored', 'Interviewed', 'Final Assessment', 'Selected', 'Onboarded', 'Active', 'Graduated', 'Rejected', 'Withdrew'];
@@ -96,36 +90,31 @@ export function CompanyDetailPage() {
   const docsSheet = getSheetId('docs');
   const selectionSheet = getSheetId('selection');
 
-  const companies = useSheetDoc<Company>(companiesSheet || null, getTab('companies', 'companies'), 'company_id', { userEmail: user?.email });
-  const contacts = useSheetDoc<Contact>(companiesSheet || null, getTab('companies', 'contacts'), 'contact_id', { userEmail: user?.email });
-  const assignments = useSheetDoc<Assignment>(companiesSheet || null, getTab('companies', 'assignments'), 'assignment_id', { userEmail: user?.email });
-  const reviewsDoc = useSheetDoc<Review>(companiesSheet || null, getTab('companies', 'reviews'), 'review_id', { userEmail: user?.email });
-  const activityDoc = useSheetDoc<ActivityRow>(companiesSheet || null, getTab('companies', 'activity'), 'activity_id', { userEmail: user?.email });
-  const commentsDoc = useSheetDoc<CompanyComment>(companiesSheet || null, getTab('companies', 'comments'), 'comment_id', { userEmail: user?.email });
-  const preDecisionsDoc = useSheetDoc<PreDecisionRecommendation>(companiesSheet || null, getTab('companies', 'preDecisions'), 'recommendation_id', { userEmail: user?.email });
+  const companies     = useModuleData<Company>('companies', 'companies');
+  const contacts      = useModuleData<Contact>('companies', 'contacts');
+  const assignments   = useModuleData<Assignment>('companies', 'assignments');
+  const reviewsDoc    = useModuleData<Review>('companies', 'reviews');
+  const activityDoc   = useModuleData<ActivityRow>('companies', 'activity');
+  const commentsDoc   = useModuleData<CompanyComment>('companies', 'comments');
+  const preDecisionsDoc = useModuleData<PreDecisionRecommendation>('companies', 'preDecisions');
 
-  // Source Data from Selection workbook is the authoritative applicant list.
-  const sourceData = useSheetDoc<Record<string, string>>(
-    selectionSheet || null,
-    getTab('selection', 'sourceData'),
-    'id',
-    { userEmail: user?.email }
-  );
+  // Source Data from Selection workbook.
+  const sourceData = useModuleData<Record<string, string>>('selection', 'sourceData');
 
-  const q1 = useSheetDoc<PR>(procurementSheet || null, getTab('procurement', 'q1'), 'pr_id', { userEmail: user?.email });
-  const q2 = useSheetDoc<PR>(procurementSheet || null, getTab('procurement', 'q2'), 'pr_id', { userEmail: user?.email });
-  const q3 = useSheetDoc<PR>(procurementSheet || null, getTab('procurement', 'q3'), 'pr_id', { userEmail: user?.email });
-  const q4 = useSheetDoc<PR>(procurementSheet || null, getTab('procurement', 'q4'), 'pr_id', { userEmail: user?.email });
+  const q1 = useModuleData<PR>('procurement', 'q1');
+  const q2 = useModuleData<PR>('procurement', 'q2');
+  const q3 = useModuleData<PR>('procurement', 'q3');
+  const q4 = useModuleData<PR>('procurement', 'q4');
 
-  const payments = useSheetDoc<Payment>(paymentsSheet || null, getTab('payments', 'payments'), 'payment_id', { userEmail: user?.email });
-  const confs = useSheetDoc<ConferenceRow>(conferencesSheet || null, getTab('conferences', 'tracker'), 'tracker_id', { userEmail: user?.email });
-  const docs = useSheetDoc<Doc>(docsSheet || null, getTab('docs', 'agreements'), 'agreement_id', { userEmail: user?.email });
+  const payments = useModuleData<Payment>('payments', 'payments');
+  const confs    = useModuleData<ConferenceRow>('conferences', 'tracker');
+  const docs     = useModuleData<Doc>('docs', 'agreements');
 
-  const needs = useSheetDoc<SelectionRow>(selectionSheet || null, getTab('selection', 'companyNeeds'), 'Company ID', { userEmail: user?.email });
-  const score = useSheetDoc<SelectionRow>(selectionSheet || null, getTab('selection', 'scoringMatrix'), 'Company ID', { userEmail: user?.email });
-  const interviews = useSheetDoc<SelectionRow>(selectionSheet || null, getTab('selection', 'interviewAssessments'), 'id', { userEmail: user?.email });
-  const discussion = useSheetDoc<SelectionRow>(selectionSheet || null, getTab('selection', 'interviewDiscussion'), 'id', { userEmail: user?.email });
-  const ebAssess = useSheetDoc<SelectionRow>(selectionSheet || null, getTab('selection', 'ebAssessments'), 'companyId', { userEmail: user?.email });
+  const needs      = useModuleData<SelectionRow>('selection', 'companyNeeds');
+  const score      = useModuleData<SelectionRow>('selection', 'scoringMatrix');
+  const interviews = useModuleData<SelectionRow>('selection', 'interviewAssessments');
+  const discussion = useModuleData<SelectionRow>('selection', 'interviewDiscussion');
+  const ebAssess   = useModuleData<SelectionRow>('selection', 'ebAssessments');
 
   // Find applicant from Source Data by numeric id (the route param for applicants).
   const applicant = useMemo(

@@ -33,7 +33,8 @@ import {
   Users,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { useSheetDoc } from '../../lib/two-way-sync';
+import { useModuleData } from '../../data/useModuleData';
+import type { Company as Master, Assignment, Applicant } from '../../data/types';
 import { getSheetId, getTab } from '../../config/sheets';
 import { ensureSchema } from '../../lib/sheets/client';
 import {
@@ -85,43 +86,7 @@ import { startPresenceHeartbeat } from './presence';
 
 // ─── shared types (matches CompaniesPage shapes) ─────────────────────
 
-type Master = {
-  company_id: string;
-  company_name: string;
-  legal_name: string;
-  city: string;
-  governorate: string;
-  sector: string;
-  employee_count: string;
-  revenue_bracket: string;
-  fund_code: string;
-  cohort: string;
-  status: string;
-  stage: string;
-  profile_manager_email: string;
-  selection_date: string;
-  onboarding_date: string;
-  drive_folder_url: string;
-  notes: string;
-  updated_at?: string;
-  updated_by?: string;
-};
 
-type Applicant = Record<string, string>;
-
-type Assignment = {
-  assignment_id: string;
-  company_id: string;
-  intervention_type: string;
-  sub_intervention: string;
-  fund_code: string;
-  start_date: string;
-  end_date: string;
-  owner_email: string;
-  status: string;
-  budget_usd: string;
-  notes: string;
-};
 
 const norm = (s?: string) => (s || '').trim().toLowerCase();
 function padId(n: string): string {
@@ -149,32 +114,24 @@ export function SelectionPage() {
   const selOpts = useMemo(() => ({ userEmail: user?.email, intervalMs: SLOW_POLL }), [user?.email]);
 
   // ─── data hooks ───
-  const master = useSheetDoc<Master>(masterSheetId || null, getTab('companies', 'companies'), 'company_id', { userEmail: user?.email });
-  const applicants = useSheetDoc<Applicant>(selectionSheetId || null, getTab('selection', 'sourceData'), 'id', { userEmail: user?.email });
-  const assignments = useSheetDoc<Assignment>(masterSheetId || null, getTab('companies', 'assignments'), 'assignment_id', { userEmail: user?.email });
+  const master      = useModuleData<Master>('companies',   'companies');
+  const applicants  = useModuleData<Applicant>('selection', 'sourceData');
+  const assignments = useModuleData<Assignment>('companies', 'assignments');
 
-  const scoring = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'scoringMatrix'), 'id', selOpts);
-  const docReviews = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'docReviews'), 'id', selOpts);
-  const companyNeeds = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'companyNeeds'), 'id', selOpts);
-  const interviewAssessments = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'interviewAssessments'), 'id', selOpts);
-  const interviewDiscussion = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'interviewDiscussion'), 'id', selOpts);
-  const committeeVotes = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'committeeVotes'), 'id', selOpts);
-  const selectionVotes = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'selectionVotes'), 'id', selOpts);
-  const firstFiltration = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'firstFiltration'), 'id', selOpts);
-  const additionalFiltration = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'additionalFiltration'), 'id', selOpts);
-  const shortlists = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'shortlists'), 'id', selOpts);
-  const finalCohortRows = useSheetDoc<Record<string, string>>(selSheetId, getTab('selection', 'finalCohort'), 'id', selOpts);
+  const scoring              = useModuleData<Record<string, string>>('selection', 'scoringMatrix');
+  const docReviews           = useModuleData<Record<string, string>>('selection', 'docReviews');
+  const companyNeeds         = useModuleData<Record<string, string>>('selection', 'companyNeeds');
+  const interviewAssessments = useModuleData<Record<string, string>>('selection', 'interviewAssessments');
+  const interviewDiscussion  = useModuleData<Record<string, string>>('selection', 'interviewDiscussion');
+  const committeeVotes       = useModuleData<Record<string, string>>('selection', 'committeeVotes');
+  const selectionVotes       = useModuleData<Record<string, string>>('selection', 'selectionVotes');
+  const firstFiltration      = useModuleData<Record<string, string>>('selection', 'firstFiltration');
+  const additionalFiltration = useModuleData<Record<string, string>>('selection', 'additionalFiltration');
+  const shortlists           = useModuleData<Record<string, string>>('selection', 'shortlists');
+  const finalCohortRows      = useModuleData<Record<string, string>>('selection', 'finalCohort');
 
-  // Logframe targets — used by the Stage 2 live insights panel to
-  // surface "X of Y target" bars per pillar / per donor. Lazy-mounted
-  // on Stage 2; SLOW_POLL since targets barely change mid-session.
-  const logframesId = getSheetId('logframes');
-  const logSheetId = stage === 'finalize' ? logframesId || null : null;
-  // Targets tab is the consolidated 2026 commitments — Dutch
-  // indicators rows 1–10, SIDA indicators rows 12–25, with the team's
-  // canonical "2026 Planned Target" column. We pass raw rows to
-  // parseLogframeTargets() since the rows are positional, not keyed.
-  const targetsRaw = useSheetDoc<Record<string, string>>(logSheetId, getTab('logframes', 'targets'), 'Dutch- Indicators', selOpts);
+  // Logframe targets — used by Stage 2 live insights panel.
+  const targetsRaw = useModuleData<Record<string, string>>('logframes', 'targets');
 
   // Auto-create the portal-managed tabs if the workbook is missing them.
   const [schemaReady, setSchemaReady] = useState(false);
@@ -199,12 +156,12 @@ export function SelectionPage() {
     return () => { cancelled = true; };
   }, [masterSheetId]);
 
-  const reviewsDoc = useSheetDoc<Review>(schemaReady && masterSheetId ? masterSheetId : null, getTab('companies', 'reviews'), 'review_id', { userEmail: user?.email });
-  const commentsDoc = useSheetDoc<CompanyComment>(schemaReady && masterSheetId ? masterSheetId : null, getTab('companies', 'comments'), 'comment_id', { userEmail: user?.email });
-  const activityDoc = useSheetDoc<ActivityRow>(schemaReady && masterSheetId ? masterSheetId : null, getTab('companies', 'activity'), 'activity_id', { userEmail: user?.email });
-  const aliasesDoc = useSheetDoc<InterviewAlias>(schemaReady && masterSheetId ? masterSheetId : null, getTab('companies', 'interviewAliases'), 'alias_id', { userEmail: user?.email });
-  const removedDoc = useSheetDoc<RemovedCompany>(schemaReady && masterSheetId ? masterSheetId : null, getTab('companies', 'removedCompanies'), 'removed_id', { userEmail: user?.email });
-  const preDecisionsDoc = useSheetDoc<PreDecisionRecommendation>(schemaReady && masterSheetId ? masterSheetId : null, getTab('companies', 'preDecisions'), 'recommendation_id', { userEmail: user?.email });
+  const reviewsDoc    = useModuleData<Review>('companies', 'reviews');
+  const commentsDoc   = useModuleData<CompanyComment>('companies', 'comments');
+  const activityDoc   = useModuleData<ActivityRow>('companies', 'activity');
+  const aliasesDoc    = useModuleData<InterviewAlias>('companies', 'interviewAliases');
+  const removedDoc    = useModuleData<RemovedCompany>('companies', 'removedCompanies');
+  const preDecisionsDoc = useModuleData<PreDecisionRecommendation>('companies', 'preDecisions');
 
   // Per-user heartbeat so the room knows who is currently active.
   useEffect(() => {

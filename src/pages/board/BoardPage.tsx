@@ -16,65 +16,11 @@ import {
 import { useAuth } from '../../services/auth';
 import { Badge, Card, EmptyState, Kanban, PageHeader, Tabs, statusTone } from '../../lib/ui';
 import type { KanbanColumn, TabItem, Tone } from '../../lib/ui';
-import { useSheetDoc } from '../../lib/two-way-sync';
-import { getSheetId, getTab } from '../../config/sheets';
+import { useModuleData } from '../../data/useModuleData';
+import type { Row, Company as Master, Assignment, PR, Payment, Agreement } from '../../data/types';
 import { displayName, getProfileManagers, getTier } from '../../config/team';
 
-type Row = Record<string, string>;
 
-type Master = Row & {
-  company_id?: string;
-  company_name?: string;
-  status?: string;
-  sector?: string;
-};
-
-type Assignment = Row & {
-  assignment_id?: string;
-  company_id?: string;
-  intervention_type?: string;
-  sub_intervention?: string;
-  owner_email?: string;
-  status?: string;
-  start_date?: string;
-  end_date?: string;
-  budget_usd?: string;
-  fund_code?: string;
-};
-
-type PR = Row & {
-  pr_id?: string;
-  company_id?: string;
-  activity?: string;
-  requester_email?: string;
-  status?: string;
-  threshold_class?: string;
-  total_cost_usd?: string;
-  target_award_date?: string;
-  pr_deadline?: string;
-  fund_code?: string;
-};
-
-type Payment = Row & {
-  payment_id?: string;
-  company_id?: string;
-  payee_name?: string;
-  payee_type?: string;
-  amount_usd?: string;
-  status?: string;
-  fund_code?: string;
-  payment_date?: string;
-  intervention_type?: string;
-};
-
-type Agreement = Row & {
-  agreement_id?: string;
-  company_id?: string;
-  agreement_type?: string;
-  status?: string;
-  signed_date?: string;
-  signatory_name?: string;
-};
 
 type ConfTracker = Row & {
   conference_id?: string;
@@ -148,41 +94,16 @@ export function BoardPage() {
   const [ownerFilter, setOwnerFilter] = useState<string>(''); // leadership scope only
   const [fundFilter, setFundFilter] = useState<string>('');
 
-  const companies = useSheetDoc<Master>(
-    getSheetId('companies') || null,
-    getTab('companies', 'companies'),
-    'company_id',
-    { userEmail: user?.email }
-  );
-  const assignments = useSheetDoc<Assignment>(
-    getSheetId('companies') || null,
-    getTab('companies', 'assignments'),
-    'assignment_id',
-    { userEmail: user?.email }
-  );
-  const payments = useSheetDoc<Payment>(
-    getSheetId('payments') || null,
-    getTab('payments', 'payments'),
-    'payment_id',
-    { userEmail: user?.email }
-  );
-  const agreements = useSheetDoc<Agreement>(
-    getSheetId('docs') || null,
-    getTab('docs', 'agreements'),
-    'agreement_id',
-    { userEmail: user?.email }
-  );
-  const confs = useSheetDoc<ConfTracker>(
-    getSheetId('conferences') || null,
-    getTab('conferences', 'tracker'),
-    'conference_id',
-    { userEmail: user?.email }
-  );
+  const companies  = useModuleData<Master>('companies', 'companies');
+  const assignments = useModuleData<Assignment>('companies', 'assignments');
+  const payments   = useModuleData<Payment>('payments', 'payments');
+  const agreements = useModuleData<Agreement>('docs', 'agreements');
+  const confs      = useModuleData<ConfTracker>('conferences', 'tracker');
 
-  const q1 = useSheetDoc<PR>(getSheetId('procurement') || null, getTab('procurement', 'q1'), 'pr_id', { userEmail: user?.email });
-  const q2 = useSheetDoc<PR>(getSheetId('procurement') || null, getTab('procurement', 'q2'), 'pr_id', { userEmail: user?.email });
-  const q3 = useSheetDoc<PR>(getSheetId('procurement') || null, getTab('procurement', 'q3'), 'pr_id', { userEmail: user?.email });
-  const q4 = useSheetDoc<PR>(getSheetId('procurement') || null, getTab('procurement', 'q4'), 'pr_id', { userEmail: user?.email });
+  const q1 = useModuleData<PR>('procurement', 'q1');
+  const q2 = useModuleData<PR>('procurement', 'q2');
+  const q3 = useModuleData<PR>('procurement', 'q3');
+  const q4 = useModuleData<PR>('procurement', 'q4');
 
   const companyById = useMemo(() => {
     const m: Record<string, Master> = {};

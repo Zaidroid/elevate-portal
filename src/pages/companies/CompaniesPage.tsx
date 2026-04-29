@@ -10,8 +10,9 @@ import {
   Users,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { useSheetDoc } from '../../lib/two-way-sync';
+import { useModuleData } from '../../data/useModuleData';
 import { getSheetId, getTab } from '../../config/sheets';
+import type { Company as Master, Assignment, Applicant } from '../../data/types';
 import { ensureSchema } from '../../lib/sheets/client';
 import {
   Badge,
@@ -54,44 +55,7 @@ import type { InterviewAlias, RemovedCompany, Review, ReviewSummary } from './re
 
 // Source Data row from the Selection workbook. Headers come from selection-tool's
 // Company schema so keys are camelCase.
-type Applicant = Record<string, string>;
 
-// Companies Master row (operational enrichment).
-type Master = {
-  company_id: string;
-  company_name: string;
-  legal_name: string;
-  city: string;
-  governorate: string;
-  sector: string;
-  employee_count: string;
-  revenue_bracket: string;
-  fund_code: string;
-  cohort: string;
-  status: string;
-  stage: string;
-  profile_manager_email: string;
-  selection_date: string;
-  onboarding_date: string;
-  drive_folder_url: string;
-  notes: string;
-  updated_at?: string;
-  updated_by?: string;
-};
-
-type Assignment = {
-  assignment_id: string;
-  company_id: string;
-  intervention_type: string;
-  sub_intervention: string;
-  fund_code: string;
-  start_date: string;
-  end_date: string;
-  owner_email: string;
-  status: string;
-  budget_usd: string;
-  notes: string;
-};
 
 // Joined row shown in the table.
 type Row = {
@@ -129,11 +93,9 @@ function padId(n: string): string {
   return Number.isFinite(num) && num > 0 ? `A-${num.toString().padStart(4, '0')}` : '';
 }
 
-// Order in which statuses live within the pipeline. Used to compute "the
-// higher of (master.status, override)" so we never demote a company by
-// applying the Interviewed override on top of an Onboarded record. Reviewing
-// and Recommended sit between Interviewed and Selected — that's where the
-// committee debate happens before the final cohort is locked.
+// Pipeline status ordering — used by resolveStatus to decide whether
+// the master sheet's status is "beyond Applicant" and whether promoting
+// to Interviewed is safe.
 const STATUS_ORDER: Record<string, number> = {
   Applicant: 0,
   Shortlisted: 1,
@@ -146,10 +108,23 @@ const STATUS_ORDER: Record<string, number> = {
   Graduated: 8,
   Withdrawn: -1,
 };
-function maxStatus(a: string, b: string): string {
-  const ra = STATUS_ORDER[a] ?? 0;
-  const rb = STATUS_ORDER[b] ?? 0;
-  return ra >= rb ? a : b;
+
+// Resolve the effective pipeline status for a company. Rules:
+// 1. If the master sheet has an explicit status beyond 'Applied', trust it.
+// 2. Only promote to 'Interviewed' from the interviewed-list if no higher
+//    status already exists — never demote an Onboarded/Active company.
+// 3. Withdrawn is always respected (STATUS_ORDER = -1).
+function resolveStatus(masterStatus: string, isInInterviewedList: boolean): string {
+  const ms = masterStatus?.trim() || '';
+  const rank = STATUS_ORDER[ms] ?? 0;
+
+  // Master has an explicit status beyond bare 'Applicant' → trust it.
+  if (ms && rank > STATUS_ORDER['Applicant']) return ms;
+
+  // Promote to 'Interviewed' only if the company hasn't progressed past it.
+  if (isInInterviewedList && rank < STATUS_ORDER['Interviewed']) return 'Interviewed';
+
+  return ms || 'Applicant';
 }
 
 export function CompaniesPage() {
@@ -165,32 +140,14 @@ export function CompaniesPage() {
 
   const [view, setView] = useState<'pipeline' | 'roster' | 'dashboard'>('pipeline');
 
-  const master = useSheetDoc<Master>(
-    masterSheetId || null,
-    masterTab,
-    'company_id',
-    { userEmail: user?.email }
-  );
-
-  const applicants = useSheetDoc<Applicant>(
-    selectionSheetId || null,
-    sourceTab,
-    'id',
-    { userEmail: user?.email }
-  );
+  const master      = useModuleData<Master>('companies', 'companies');
+  const applicants  = useModuleData<Applicant>('selection', 'sourceData');
 
   // Selection-tool tabs are not read here anymore; they live in the
   // /selection module. Companies is purely operational.
 
-  // Intervention Assignments tab — drives the per-card pillar dots and the
-  // "(N interventions)" badges on the kanban + roster. The detail page owns
-  // the full CRUD; here we only need to read counts and pillar coverage.
-  const assignments = useSheetDoc<Assignment>(
-    masterSheetId || null,
-    getTab('companies', 'assignments'),
-    'assignment_id',
-    { userEmail: user?.email }
-  );
+  // Intervention Assignments tab — drives per-card pillar dots and badges.
+  const assignments = useModuleData<Assignment>('companies', 'assignments');
 
   // Auto-create the team-shared tabs (Reviews / Company Comments / Activity
   // Log / Interview Aliases) on first mount if the workbook doesn't have
@@ -222,31 +179,11 @@ export function CompaniesPage() {
     return () => { cancelled = true; };
   }, [masterSheetId]);
 
-  const reviews = useSheetDoc<Review>(
-    schemaReady && masterSheetId ? masterSheetId : null,
-    getTab('companies', 'reviews'),
-    'review_id',
-    { userEmail: user?.email }
-  );
+  const reviews    = useModuleData<Review>('companies', 'reviews');
+  const aliasesDoc = useModuleData<InterviewAlias>('companies', 'interviewAliases');
 
-  const aliasesDoc = useSheetDoc<InterviewAlias>(
-    schemaReady && masterSheetId ? masterSheetId : null,
-    getTab('companies', 'interviewAliases'),
-    'alias_id',
-    { userEmail: user?.email }
-  );
-
-  // Shared exclusion list. Any company name listed here is hidden from
-  // every surface — review queue, materialize candidates, joined rows
-  // — across all team members. This is the proper way to delete a
-  // duplicate or irrelevant entry that otherwise keeps reappearing
-  // because it lives in Source Data or the static interviewed list.
-  const removedDoc = useSheetDoc<RemovedCompany>(
-    schemaReady && masterSheetId ? masterSheetId : null,
-    getTab('companies', 'removedCompanies'),
-    'removed_id',
-    { userEmail: user?.email }
-  );
+  // Shared exclusion list.
+  const removedDoc = useModuleData<RemovedCompany>('companies', 'removedCompanies');
 
   // Lightweight wrapper so write paths can log without re-stating the
   // workbook context every call.
@@ -510,7 +447,7 @@ export function CompaniesPage() {
       //    or Active that the master already has)
       const baseStatus = m?.status?.trim() || 'Applicant';
       const interviewed = isInterviewed(name, interviewedSet);
-      const effectiveStatus = interviewed ? maxStatus(baseStatus, 'Interviewed') : baseStatus;
+      const effectiveStatus = resolveStatus(baseStatus, interviewed);
 
       const companyId = m?.company_id || padId(a.id || '');
       const aBucket = assignmentsByCompany.get(companyId);
@@ -540,7 +477,7 @@ export function CompaniesPage() {
       if (!m.company_id || seenMasterIds.has(m.company_id)) continue;
       const baseStatus = m.status?.trim() || '';
       const interviewed = isInterviewed(m.company_name || '', interviewedSet);
-      const effectiveStatus = interviewed ? maxStatus(baseStatus || 'Applicant', 'Interviewed') : baseStatus;
+      const effectiveStatus = resolveStatus(baseStatus || 'Applicant', interviewed);
       const aBucket = assignmentsByCompany.get(m.company_id);
       out.push({
         route_id: m.company_id,

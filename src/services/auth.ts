@@ -21,6 +21,10 @@ interface AuthState {
   isLoading: boolean;
   error: string | null;
   hasAccessToken: boolean;
+  /** True when the token will expire in < 5 minutes */
+  sessionExpiringSoon: boolean;
+  /** True when the token has already expired and refresh failed */
+  sessionExpired: boolean;
 }
 
 class AuthService {
@@ -30,6 +34,8 @@ class AuthService {
     isLoading: true,
     error: null,
     hasAccessToken: false,
+    sessionExpiringSoon: false,
+    sessionExpired: false,
   };
 
   private listeners: Set<(state: AuthState) => void> = new Set();
@@ -75,12 +81,52 @@ class AuthService {
 
       this.state.isLoading = false;
       this.notifyListeners();
+      // Start watchdog only when a session was restored.
+      if (this.state.isAuthenticated) this.startTokenWatchdog();
     } catch (error) {
       console.error('Auth init error:', error);
       this.state.isLoading = false;
       this.state.error = 'Failed to initialize authentication';
       this.notifyListeners();
     }
+  }
+
+  /**
+   * Background watchdog that checks token expiry every 30 s.
+   * - Warns the user 5 minutes before the token expires.
+   * - Attempts a silent refresh when the token has expired.
+   * - If silent refresh fails, marks `sessionExpired = true` so
+   *   the UI can show a re-login prompt.
+   */
+  private startTokenWatchdog() {
+    const CHECK_MS = 30_000;   // check every 30 s
+    const WARN_MS  = 5 * 60_000; // warn 5 min before expiry
+
+    const tick = () => {
+      const expiry = parseInt(localStorage.getItem('token_expiry') || '0');
+      const remaining = expiry - Date.now();
+
+      if (remaining <= 0) {
+        // Token already expired — try silent refresh
+        if (!this.state.sessionExpired) {
+          console.warn('[auth] Token expired, attempting silent refresh…');
+          try {
+            this.tokenClient?.requestAccessToken({ prompt: '' });
+          } catch {
+            // Silent refresh failed — force re-login
+            this.state.sessionExpired = true;
+            this.state.sessionExpiringSoon = true;
+            this.notifyListeners();
+          }
+        }
+      } else if (remaining <= WARN_MS && !this.state.sessionExpiringSoon) {
+        console.info(`[auth] Session expires in ${Math.round(remaining / 60_000)} min`);
+        this.state.sessionExpiringSoon = true;
+        this.notifyListeners();
+      }
+    };
+
+    setInterval(tick, CHECK_MS);
   }
 
   private loadGoogleScript(): Promise<void> {
@@ -180,10 +226,16 @@ class AuthService {
       localStorage.setItem('user_role', role!);
       localStorage.setItem('user_picture', userInfo.picture || '');
 
+      // Reset watchdog flags on fresh token
+      this.state.sessionExpiringSoon = false;
+      this.state.sessionExpired = false;
+
       console.log('✅ Login successful:', email, 'role:', role);
       console.log('✅ Access token expires in:', Math.floor(expiresIn / 60), 'minutes');
 
       this.notifyListeners();
+      // Restart the watchdog now that we have a fresh token.
+      this.startTokenWatchdog();
     } catch (err) {
       console.error('Failed to fetch user info:', err);
       this.state.error = 'Failed to verify your identity. Please try again.';
@@ -214,7 +266,7 @@ class AuthService {
       });
     }
     this.clearTokens();
-    this.state = { isAuthenticated: false, user: null, isLoading: false, error: null, hasAccessToken: false };
+    this.state = { isAuthenticated: false, user: null, isLoading: false, error: null, hasAccessToken: false, sessionExpiringSoon: false, sessionExpired: false };
     this.notifyListeners();
     console.log('Signed out');
   }

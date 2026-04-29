@@ -199,6 +199,17 @@ export const SHEETS: Record<string, ModuleConfig> = {
     sheetId: env('VITE_SHEET_ADVISORS_FORM_RESPONSES'),
     tabs: { responses: 'Form Responses 1' },
   },
+  donorReports: {
+    label: 'E3 - Donor Reports (auto-generated)',
+    sheetId: env('VITE_SHEET_DONOR_REPORTS'),
+    tabs: {
+      portfolio: 'Company Portfolio',
+      interventions: 'Intervention Delivery',
+      financial: 'Financial Summary',
+      conferences: 'Conference & Travel',
+      agreements: 'Agreements',
+    },
+  },
 };
 
 export type ModuleKey = keyof typeof SHEETS;

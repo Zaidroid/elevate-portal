@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
+  AlertTriangle,
   BarChart3,
   Bell,
   Briefcase,
@@ -28,6 +29,7 @@ import {
 import type { ReactNode } from 'react';
 import { useAuth } from '../services/auth';
 import { getTier, isAdmin } from '../config/team';
+import { sessionEvents } from '../lib/sheets/client';
 
 type NavItem = {
   to: string;
@@ -91,12 +93,38 @@ const EXTERNAL_LINKS = [
   { key: 'leaves', label: 'Leaves tracker', url: 'https://elevate-leaves.zaidlab.xyz' },
 ];
 
-function buildSsoUrl(baseUrl: string): string {
+// Open a linked tool and forward auth credentials via postMessage
+// instead of URL fragments. The child window must signal readiness by
+// posting { type: 'AUTH_READY' } to this origin.
+function openLinkedTool(baseUrl: string): void {
   const token = localStorage.getItem('google_access_token');
-  const expiry = localStorage.getItem('token_expiry');
   const email = localStorage.getItem('user_email');
-  if (!token || !email) return baseUrl;
-  return `${baseUrl}#access_token=${token}&user_email=${encodeURIComponent(email)}&token_expiry=${expiry || ''}`;
+  const expiry = localStorage.getItem('token_expiry');
+  if (!token || !email) {
+    window.open(baseUrl, '_blank');
+    return;
+  }
+
+  const win = window.open(baseUrl, '_blank');
+  if (!win) return; // popup blocked
+
+  const targetOrigin = new URL(baseUrl).origin;
+  const handler = (e: MessageEvent) => {
+    if (e.origin !== targetOrigin) return;
+    if (e.data?.type === 'AUTH_READY') {
+      win.postMessage({
+        type: 'AUTH_TOKEN',
+        token,
+        email,
+        expiry: expiry || '',
+      }, targetOrigin);
+      window.removeEventListener('message', handler);
+    }
+  };
+  window.addEventListener('message', handler);
+
+  // Clean up after 30s in case child never signals readiness.
+  setTimeout(() => window.removeEventListener('message', handler), 30_000);
 }
 
 const COHORT_TOTAL_WEEKS = 24;
@@ -116,10 +144,30 @@ export function AppShell({
   isDarkMode: boolean;
   toggleTheme: () => void;
 }) {
-  const { user, signOut } = useAuth();
+  const { user, signOut, sessionExpiringSoon, sessionExpired } = useAuth();
   const navigate = useNavigate();
   const admin = user ? isAdmin(user.email) : false;
   const tier = user?.email ? getTier(user.email) : 'member';
+
+  // ── Session warning banner state ───────────────────────────────────────
+  type SessionWarning = 'ok' | 'expiring' | 'expired';
+  const [sessionWarning, setSessionWarning] = useState<SessionWarning>('ok');
+  const watchdogStarted = useRef(false);
+
+  // React to auth-state flags (set by the watchdog in AuthService)
+  useEffect(() => {
+    if (sessionExpired) setSessionWarning('expired');
+    else if (sessionExpiringSoon) setSessionWarning('expiring');
+    else setSessionWarning('ok');
+  }, [sessionExpiringSoon, sessionExpired]);
+
+  // Also listen to the event bus emitted by sheets/client.ts on 401/no-token
+  useEffect(() => {
+    const onExpired = () => setSessionWarning('expired');
+    sessionEvents.addEventListener('session-expired', onExpired);
+    return () => sessionEvents.removeEventListener('session-expired', onExpired);
+  }, []);
+  // ────────────────────────────────────────────────────────────────────────
 
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -245,7 +293,7 @@ export function AppShell({
                   href="#"
                   onClick={e => {
                     e.preventDefault();
-                    window.open(buildSsoUrl(link.url), '_blank', 'noopener,noreferrer');
+                    openLinkedTool(link.url);
                   }}
                   className="group flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13.5px] font-semibold text-slate-600 hover:bg-slate-100 hover:text-navy-500 dark:text-slate-300 dark:hover:bg-white/5 dark:hover:text-white"
                 >
@@ -417,6 +465,27 @@ export function AppShell({
         </div>
 
         <div className="flex-1 px-4 py-6 md:px-8 md:py-8">
+          {/* Session warning banner */}
+          {sessionWarning === 'expiring' && (
+            <div className="mb-4 flex items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-200">
+              <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+              <span>Your session expires in a few minutes. Save any open changes — the page will prompt you to sign in again shortly.</span>
+            </div>
+          )}
+          {sessionWarning === 'expired' && (
+            <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200">
+              <div className="flex items-center gap-3">
+                <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                <span>Session expired. Please re-sign in to continue working.</span>
+              </div>
+              <button
+                onClick={() => { signOut(); navigate('/'); }}
+                className="flex-shrink-0 rounded-md bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700 dark:bg-red-700 dark:hover:bg-red-600"
+              >
+                Re-sign in
+              </button>
+            </div>
+          )}
           <Outlet />
         </div>
       </main>

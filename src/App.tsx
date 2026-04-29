@@ -24,6 +24,7 @@ import { BridgePage } from './pages/link/BridgePage';
 // Lazy: ImportPage pulls in xlsx (~350 KB), keep it out of the main bundle.
 const ImportPage = lazy(() => import('./pages/import/ImportPage').then(m => ({ default: m.ImportPage })));
 import { ToastProvider } from './lib/ui';
+import { SheetDataProvider } from './data/SheetDataProvider';
 
 function LoginScreen({ isDarkMode, toggleTheme }: { isDarkMode: boolean; toggleTheme: () => void }) {
   const { error, signIn } = useAuth();
@@ -167,39 +168,41 @@ function AuthGate({
   }
 
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route element={<AppShell isDarkMode={isDarkMode} toggleTheme={toggleTheme} />}>
-          <Route index element={<HomePage />} />
-          <Route path="/board" element={<BoardPage />} />
-          <Route path="/companies" element={<CompaniesPage />} />
-          <Route path="/companies/:id" element={<CompanyDetailPage />} />
-          <Route path="/selection" element={<SelectionPage />} />
-          <Route path="/procurement" element={<ProcurementPage />} />
-          <Route path="/payments" element={<PaymentsPage />} />
-          <Route path="/conferences" element={<ConferencesPage />} />
-          <Route path="/docs" element={<DocsPage />} />
-          <Route path="/elevatebridge" element={<FreelancersPage />} />
-          <Route path="/freelancers" element={<Navigate to="/elevatebridge" replace />} />
-          <Route path="/advisors" element={<AdvisorsPage />} />
-          <Route path="/reports" element={<ReportsPage />} />
-          <Route path="/team" element={<TeamPage />} />
-          <Route path="/alerts" element={<AlertsPage />} />
-          <Route path="/admin/lookups" element={<LookupsPage />} />
-          <Route path="/logframes" element={<LogframesPage />} />
-          <Route path="/link/:app" element={<BridgePage />} />
-          <Route
-            path="/import"
-            element={
-              <Suspense fallback={<div className="p-8 text-sm text-slate-500">Loading import tools…</div>}>
-                <ImportPage />
-              </Suspense>
-            }
-          />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <SheetDataProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route element={<AppShell isDarkMode={isDarkMode} toggleTheme={toggleTheme} />}>
+            <Route index element={<HomePage />} />
+            <Route path="/board" element={<BoardPage />} />
+            <Route path="/companies" element={<CompaniesPage />} />
+            <Route path="/companies/:id" element={<CompanyDetailPage />} />
+            <Route path="/selection" element={<SelectionPage />} />
+            <Route path="/procurement" element={<ProcurementPage />} />
+            <Route path="/payments" element={<PaymentsPage />} />
+            <Route path="/conferences" element={<ConferencesPage />} />
+            <Route path="/docs" element={<DocsPage />} />
+            <Route path="/elevatebridge" element={<FreelancersPage />} />
+            <Route path="/freelancers" element={<Navigate to="/elevatebridge" replace />} />
+            <Route path="/advisors" element={<AdvisorsPage />} />
+            <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/team" element={<TeamPage />} />
+            <Route path="/alerts" element={<AlertsPage />} />
+            <Route path="/admin/lookups" element={<LookupsPage />} />
+            <Route path="/logframes" element={<LogframesPage />} />
+            <Route path="/link/:app" element={<BridgePage />} />
+            <Route
+              path="/import"
+              element={
+                <Suspense fallback={<div className="p-8 text-sm text-slate-500">Loading import tools…</div>}>
+                  <ImportPage />
+                </Suspense>
+              }
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </SheetDataProvider>
   );
 }
 

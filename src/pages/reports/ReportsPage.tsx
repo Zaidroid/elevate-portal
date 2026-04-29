@@ -1,32 +1,71 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { AlertTriangle, Award, Download, TrendingUp, Users, ClipboardList, Wallet, Plane, GraduationCap } from 'lucide-react';
-import { useSheetDoc } from '../../lib/two-way-sync';
-import { getSheetId, getTab } from '../../config/sheets';
+import { useModuleData } from '../../data/useModuleData';
 import { Card, CardHeader, Button, Badge, downloadCsv, timestampedFilename } from '../../lib/ui';
 import { INTERVENTION_TYPES, CORE_PILLARS, pillarFor } from '../../config/interventions';
 import type { Advisor, FollowUp } from '../../types/advisor';
 import { computeStage1, computeStage2 } from '../../lib/advisor-scoring';
 import type { Tone } from '../../lib/ui';
+import { useAuth } from '../../services/auth';
+import { getSheetId } from '../../config/sheets';
+import { exportAllDonorReports } from '../../lib/export/donorExport';
+import type { Company, Assignment, PR, Payment, Conference, ConferenceTrackerRow, Agreement } from '../../data/types';
 
 type Row = Record<string, string>;
 
 export function ReportsPage() {
-  const companiesId = getSheetId('companies');
-  const paymentsId = getSheetId('payments');
-  const procurementId = getSheetId('procurement');
-  const conferencesId = getSheetId('conferences');
+  const { rows: companies }   = useModuleData<Row>('companies',   'companies');
+  const { rows: assignments } = useModuleData<Row>('companies',   'assignments');
+  const { rows: payments }    = useModuleData<Row>('payments',    'payments');
+  const { rows: q1 }          = useModuleData<Row>('procurement', 'q1');
+  const { rows: q2 }          = useModuleData<Row>('procurement', 'q2');
+  const { rows: q3 }          = useModuleData<Row>('procurement', 'q3');
+  const { rows: q4 }          = useModuleData<Row>('procurement', 'q4');
+  const { rows: confTracker } = useModuleData<ConferenceTrackerRow>('conferences', 'tracker');
+  const { rows: conferences }  = useModuleData<Conference>('conferences', 'catalogue');
+  const { rows: agreements }   = useModuleData<Agreement>('docs', 'agreements');
+  const { rows: advisors }    = useModuleData<Advisor>('advisors',  'advisors');
+  const { rows: followups }   = useModuleData<FollowUp>('advisors', 'followups');
+  const { user } = useAuth();
 
-  const { rows: companies } = useSheetDoc<Row>(companiesId || null, getTab('companies', 'companies'), 'company_id');
-  const { rows: assignments } = useSheetDoc<Row>(companiesId || null, getTab('companies', 'assignments'), 'assignment_id');
-  const { rows: payments } = useSheetDoc<Row>(paymentsId || null, getTab('payments', 'payments'), 'payment_id');
-  const { rows: q1 } = useSheetDoc<Row>(procurementId || null, getTab('procurement', 'q1'), 'pr_id');
-  const { rows: q2 } = useSheetDoc<Row>(procurementId || null, getTab('procurement', 'q2'), 'pr_id');
-  const { rows: q3 } = useSheetDoc<Row>(procurementId || null, getTab('procurement', 'q3'), 'pr_id');
-  const { rows: q4 } = useSheetDoc<Row>(procurementId || null, getTab('procurement', 'q4'), 'pr_id');
-  const { rows: confTracker } = useSheetDoc<Row>(conferencesId || null, getTab('conferences', 'tracker'), 'tracker_id');
-  const advisorsId = getSheetId('advisors');
-  const { rows: advisors } = useSheetDoc<Advisor>(advisorsId || null, getTab('advisors', 'advisors'), 'advisor_id');
-  const { rows: followups } = useSheetDoc<FollowUp>(advisorsId || null, getTab('advisors', 'followups'), 'followup_id');
+  const [donorExporting, setDonorExporting] = useState(false);
+  const [donorProgress, setDonorProgress] = useState('');
+
+  const handleDonorExport = async () => {
+    const donorSheetId = getSheetId('donorReports');
+    if (!donorSheetId) {
+      alert('Set VITE_SHEET_DONOR_REPORTS in your environment to enable donor exports.');
+      return;
+    }
+    setDonorExporting(true);
+    setDonorProgress('Starting...');
+    try {
+      const result = await exportAllDonorReports(
+        donorSheetId,
+        {
+          companies: companies as Company[],
+          assignments: assignments as Assignment[],
+          payments: payments as Payment[],
+          prs: [...q1, ...q2, ...q3, ...q4] as PR[],
+          conferences,
+          confTracker,
+          agreements,
+        },
+        user?.email || 'unknown',
+        (p) => setDonorProgress(`${p.step}/${p.total}: ${p.current}...`),
+      );
+      if (result.errors.length) {
+        alert(`Done with warnings:\n${result.errors.join('\n')}`);
+      } else {
+        alert(`✅ Exported ${result.reports.length} donor reports.\n\n${result.reports.join('\n')}`);
+      }
+    } catch (err) {
+      alert(`Export failed: ${(err as Error).message}`);
+    } finally {
+      setDonorExporting(false);
+      setDonorProgress('');
+    }
+  };
 
   const stats = useMemo(() => {
     const allPRs = [...q1, ...q2, ...q3, ...q4];
@@ -209,9 +248,14 @@ export function ReportsPage() {
             Cross-module roll-ups. Read-only view powered directly by the sheets.
           </p>
         </div>
-        <Button variant="ghost" onClick={exportAll}>
-          <Download className="h-4 w-4" /> Export Coverage
-        </Button>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" onClick={exportAll}>
+            <Download className="h-4 w-4" /> Export Coverage
+          </Button>
+          <Button onClick={handleDonorExport} disabled={donorExporting}>
+            <Download className="h-4 w-4" /> {donorExporting ? donorProgress : 'Export for Donors'}
+          </Button>
+        </div>
       </header>
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">

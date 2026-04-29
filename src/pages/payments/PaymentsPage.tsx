@@ -2,32 +2,13 @@ import { useMemo, useState } from 'react';
 import { Search, Plus, CheckCircle2, XCircle, Download, RefreshCw } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { isAdmin } from '../../config/team';
-import { useSheetDoc } from '../../lib/two-way-sync';
-import { getSheetId, getTab } from '../../config/sheets';
+import { useModuleData } from '../../data/useModuleData';
+import type { Payment } from '../../data/types';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { PaymentsSourceComparisonView } from './SourceComparisonView';
 
-type Payment = {
-  payment_id: string;
-  pr_id: string;
-  company_id: string;
-  assignment_id: string;
-  payee_type: string;
-  payee_name: string;
-  intervention_type: string;
-  fund_code: string;
-  amount_usd: string;
-  currency: string;
-  payment_date: string;
-  status: string;
-  finance_contact: string;
-  invoice_url: string;
-  receipt_url: string;
-  notes: string;
-  updated_at?: string;
-  updated_by?: string;
-};
+
 
 const PAYEE_TYPES = ['Vendor', 'Advisor', 'Participant', 'Conference'];
 const PAYMENT_STATUSES = ['Pending Approval', 'Approved', 'Sent to Finance', 'Paid', 'Rejected'];
@@ -39,14 +20,10 @@ const inputClass =
 export function PaymentsPage() {
   const { user } = useAuth();
   const admin = user ? isAdmin(user.email) : false;
-  const sheetId = getSheetId('payments');
-  const tab = getTab('payments', 'payments');
+  const sheetId = true; // always configured via SheetDataProvider
 
-  const { rows, loading, error, refresh, updateRow, createRow } = useSheetDoc<Payment>(
-    sheetId || null,
-    tab,
-    'payment_id',
-    { userEmail: user?.email }
+  const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<Payment>(
+    'payments', 'payments'
   );
 
   const [query, setQuery] = useState('');
@@ -76,7 +53,7 @@ export function PaymentsPage() {
     },
   ];
 
-  if (!sheetId) {
+  if (!true) { // sheet always configured
     return (
       <Card>
         <CardHeader title="Payments" />
