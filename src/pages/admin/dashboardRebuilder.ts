@@ -17,12 +17,12 @@
 // interviewed override applied), not from sheet formulas — that's what
 // fixes the "interviewed=29 vs portal-says-52" mismatch.
 
-import type { Company, Assignment } from '../../data/types';
+import type { Company, Assignment, PR, Payment } from '../../data/types';
 import type { Review } from '../companies/reviewTypes';
 import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
-import { pillarFor } from '../../config/interventions';
+import { pillarFor, COHORT3_BUDGET_TOTAL_USD } from '../../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from '../companies/interviewedSource';
-import { COHORT3_ALIASES, canonicalCohortName } from '../../config/cohort3Aliases';
+import { COHORT3_ALIASES, canonicalCohortName, cohortEntryFor } from '../../config/cohort3Aliases';
 
 // ─── Brand palette (mirrors gsg_sheets/brand.py) ────────────────────
 
@@ -522,6 +522,333 @@ export function buildCompaniesDashboard(input: {
     requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
       horizontalAlignment: 'LEFT',
       verticalAlignment: 'MIDDLE',
+      padding: { left: 12, right: 8, top: 4, bottom: 4 },
+      textFormat: { fontFamily: FONT, fontSize: 10, foregroundColorStyle: { rgbColor: COLOR.navy } },
+    }));
+    r += 1;
+  }
+
+  return { values: grid, requests, lastRow: grid.length };
+}
+
+// ─── Procurement dashboard ──────────────────────────────────────────
+//
+// Mirrors the Companies dashboard layout: navy banner + 4 KPI tiles +
+// a series of bar sections + an AM table. Same primitives, different
+// inputs. Cohort filtering uses cohortEntryFor() against the company
+// master so non-cohort PRs don't leak into the spend bars.
+
+function fmtUsd0(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return '$0';
+  return `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+}
+
+const PR_STATUSES = ['Draft', 'Submitted', 'Under Review', 'Awarded', 'Delivered', 'Cancelled'];
+const PR_OPEN_STATUSES = new Set(['draft', 'submitted', 'under review']);
+
+export function buildProcurementDashboard(input: {
+  prsByQuarter: { q1: PR[]; q2: PR[]; q3: PR[]; q4: PR[] };
+  companies: Company[];                         // master rows for AM/cohort lookup
+  payments: Payment[];                          // for paid totals
+  generatedBy: string;
+  generatedAt?: Date;
+  tabId: number;
+}): FormattedDashboard {
+  const at = input.generatedAt ?? new Date();
+  const tabId = input.tabId;
+
+  // Index master rows by company_id so we can attach AM + cohort flag
+  // without re-parsing the company name on every PR.
+  const masterById = new Map<string, Company>();
+  for (const c of input.companies) {
+    if (c.company_id) masterById.set(c.company_id, c);
+  }
+  const isCohortCompany = (companyId: string): boolean => {
+    const c = masterById.get(companyId);
+    if (!c) return false;
+    return canonicalCohortName(c.company_name || '') !== null;
+  };
+  const amOf = (companyId: string): string => {
+    const c = masterById.get(companyId);
+    const lower = (c?.profile_manager_email || cohortEntryFor(c?.company_name || '')?.am || '').toLowerCase();
+    if (!lower) return '(unassigned)';
+    const am = ACCOUNT_MANAGERS.find(a => a.email.toLowerCase() === lower);
+    return am ? displayName(am.email) : displayName(lower);
+  };
+
+  // Flat cohort PR list with quarter tag.
+  type TaggedPR = PR & { __quarter: 'Q1 2026' | 'Q2 2026' | 'Q3 2026' | 'Q4 2026' };
+  const allPrs: TaggedPR[] = [
+    ...input.prsByQuarter.q1.map(p => ({ ...p, __quarter: 'Q1 2026' as const })),
+    ...input.prsByQuarter.q2.map(p => ({ ...p, __quarter: 'Q2 2026' as const })),
+    ...input.prsByQuarter.q3.map(p => ({ ...p, __quarter: 'Q3 2026' as const })),
+    ...input.prsByQuarter.q4.map(p => ({ ...p, __quarter: 'Q4 2026' as const })),
+  ].filter(p => isCohortCompany(p.company_id || ''));
+
+  // ── compute ────────────────────────────────────────────────
+  let totalPlanned = 0;
+  let totalPaid = 0;
+  for (const p of allPrs) {
+    const v = parseFloat(String(p.total_cost_usd || '').replace(/[^0-9.\-]/g, ''));
+    if (Number.isFinite(v)) totalPlanned += v;
+  }
+  for (const pay of input.payments) {
+    if ((pay.status || '').toLowerCase() !== 'paid') continue;
+    if (!isCohortCompany(pay.company_id || '')) continue;
+    const v = parseFloat(String(pay.amount_usd || '').replace(/[^0-9.\-]/g, ''));
+    if (Number.isFinite(v)) totalPaid += v;
+  }
+
+  const openCount    = allPrs.filter(p => PR_OPEN_STATUSES.has((p.status || '').toLowerCase().trim())).length;
+  const awardedCount = allPrs.filter(p => (p.status || '').toLowerCase().trim() === 'awarded').length;
+  const deliveredCount = allPrs.filter(p => (p.status || '').toLowerCase().trim() === 'delivered').length;
+
+  // Per-quarter
+  const byQuarter = {
+    'Q1 2026': allPrs.filter(p => p.__quarter === 'Q1 2026'),
+    'Q2 2026': allPrs.filter(p => p.__quarter === 'Q2 2026'),
+    'Q3 2026': allPrs.filter(p => p.__quarter === 'Q3 2026'),
+    'Q4 2026': allPrs.filter(p => p.__quarter === 'Q4 2026'),
+  };
+  const maxQuarter = Math.max(1, ...Object.values(byQuarter).map(arr => arr.length));
+
+  // Per-status
+  const statusCount: Record<string, number> = {};
+  for (const s of PR_STATUSES) statusCount[s] = 0;
+  for (const p of allPrs) {
+    const s = (p.status || '').trim();
+    if (s in statusCount) statusCount[s] += 1;
+  }
+  const maxStatus = Math.max(1, ...Object.values(statusCount));
+
+  // Per-AM (companies, total PRs, planned, paid)
+  type AmAgg = { companies: Set<string>; prs: number; planned: number; paid: number };
+  const amBuckets = new Map<string, AmAgg>();
+  const seedAm = (k: string) => {
+    if (!amBuckets.has(k)) amBuckets.set(k, { companies: new Set(), prs: 0, planned: 0, paid: 0 });
+    return amBuckets.get(k)!;
+  };
+  for (const am of ACCOUNT_MANAGERS) seedAm(displayName(am.email));
+  seedAm('(unassigned)');
+  for (const p of allPrs) {
+    const k = amOf(p.company_id || '');
+    const b = seedAm(k);
+    if (p.company_id) b.companies.add(p.company_id);
+    b.prs += 1;
+    const v = parseFloat(String(p.total_cost_usd || '').replace(/[^0-9.\-]/g, ''));
+    if (Number.isFinite(v)) b.planned += v;
+  }
+  for (const pay of input.payments) {
+    if ((pay.status || '').toLowerCase() !== 'paid') continue;
+    if (!isCohortCompany(pay.company_id || '')) continue;
+    const k = amOf(pay.company_id || '');
+    const v = parseFloat(String(pay.amount_usd || '').replace(/[^0-9.\-]/g, ''));
+    if (Number.isFinite(v)) seedAm(k).paid += v;
+  }
+
+  // Per-pillar
+  const pillarCount: Record<string, { count: number; planned: number; paid: number }> = {
+    'Market Access': { count: 0, planned: 0, paid: 0 },
+    'Capacity Building': { count: 0, planned: 0, paid: 0 },
+    'Marketing & Branding': { count: 0, planned: 0, paid: 0 },
+  };
+  for (const p of allPrs) {
+    const pl = pillarFor(p.intervention_type)?.label;
+    if (!pl) continue;
+    const v = parseFloat(String(p.total_cost_usd || '').replace(/[^0-9.\-]/g, ''));
+    pillarCount[pl].count += 1;
+    if (Number.isFinite(v)) pillarCount[pl].planned += v;
+  }
+  for (const pay of input.payments) {
+    if ((pay.status || '').toLowerCase() !== 'paid') continue;
+    if (!isCohortCompany(pay.company_id || '')) continue;
+    const pl = pillarFor(pay.intervention_type)?.label;
+    if (!pl) continue;
+    const v = parseFloat(String(pay.amount_usd || '').replace(/[^0-9.\-]/g, ''));
+    if (Number.isFinite(v)) pillarCount[pl].paid += v;
+  }
+  const maxPillarPlanned = Math.max(1, ...Object.values(pillarCount).map(p => p.planned));
+
+  // Top 10 PRs by total cost
+  const topPrs = [...allPrs]
+    .map(p => ({ p, v: parseFloat(String(p.total_cost_usd || '').replace(/[^0-9.\-]/g, '')) || 0 }))
+    .sort((a, b) => b.v - a.v)
+    .slice(0, 10);
+
+  // ── grid + format ──────────────────────────────────────────
+  const grid: DashboardGrid = [];
+  const requests: unknown[] = [];
+
+  requests.push(setTabProps(tabId));
+  for (let c = 0; c < 12; c++) requests.push(setColumnWidth(tabId, c, 96));
+
+  const blank12 = (): DashboardCell[] => Array.from({ length: 12 }, () => '');
+
+  // Reuse the same primitives as Companies dashboard.
+  const pushTitle = (text: string, sub: string): number => {
+    grid.push([text, ...new Array(11).fill('')]);
+    requests.push(mergeRow(tabId, 0, 0, 12));
+    requests.push(repeatCellFormat(tabId, 0, 1, 0, 12, {
+      backgroundColorStyle: { rgbColor: COLOR.navy },
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { top: 8, bottom: 8, left: 14, right: 8 },
+      textFormat: { fontFamily: FONT, fontSize: 18, bold: true, foregroundColorStyle: { rgbColor: COLOR.white } },
+    }));
+    requests.push(setRowHeight(tabId, 0, 36));
+
+    grid.push([sub, ...new Array(11).fill('')]);
+    requests.push(mergeRow(tabId, 1, 0, 12));
+    requests.push(repeatCellFormat(tabId, 1, 2, 0, 12, {
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { top: 4, bottom: 6, left: 14, right: 8 },
+      textFormat: { fontFamily: FONT, fontSize: 10, italic: true, foregroundColorStyle: { rgbColor: COLOR.muted } },
+    }));
+    requests.push(setRowHeight(tabId, 1, 22));
+
+    grid.push(blank12());
+    requests.push(setRowHeight(tabId, 2, 8));
+    return 3;
+  };
+  const pushSection = (rowZeroBased: number, label: string): number => {
+    const row = blank12(); row[0] = label;
+    grid.push(row);
+    requests.push(...sectionHeaderFormat(tabId, rowZeroBased));
+    return rowZeroBased + 1;
+  };
+  const pushKpiRow = (rowZeroBased: number, tiles: KpiTile[]): number => {
+    while (tiles.length < 4) tiles.push({ label: '', value: '', tone: 'navy' });
+    const labelRow: DashboardCell[] = blank12();
+    const valueRow: DashboardCell[] = blank12();
+    [0, 3, 6, 9].forEach((c0, i) => {
+      labelRow[c0] = tiles[i].label.toUpperCase();
+      valueRow[c0] = tiles[i].value;
+      requests.push(...kpiTileFormat(tabId, rowZeroBased, c0, tiles[i].tone));
+    });
+    grid.push(labelRow);
+    grid.push(valueRow);
+    requests.push(setRowHeight(tabId, rowZeroBased, 18));
+    requests.push(setRowHeight(tabId, rowZeroBased + 1, 38));
+    grid.push(blank12());
+    requests.push(setRowHeight(tabId, rowZeroBased + 2, 8));
+    return rowZeroBased + 3;
+  };
+  const pushBarRow = (rowZeroBased: number, label: string, count: number | string, max: number, tone: Tone): number => {
+    const row: DashboardCell[] = blank12();
+    row[0] = label;
+    row[1] = count;
+    if (typeof count === 'number') row[2] = bar(count, max);
+    grid.push(row);
+    requests.push(...barRowFormat(tabId, rowZeroBased, tone));
+    requests.push(setRowHeight(tabId, rowZeroBased, 22));
+    return rowZeroBased + 1;
+  };
+  const pushSpacer = (rowZeroBased: number): number => {
+    grid.push(blank12());
+    requests.push(setRowHeight(tabId, rowZeroBased, 12));
+    return rowZeroBased + 1;
+  };
+
+  // ── compose ────────────────────────────────────────────────
+  let r = 0;
+  r = pushTitle(
+    'Procurement Dashboard',
+    `Live mirror of the Procurement module · ${allPrs.length} cohort PRs across 4 quarters · generated ${at.toLocaleString()} by ${displayName(input.generatedBy) || input.generatedBy}.`,
+  );
+
+  r = pushSection(r, 'Top metrics');
+  r = pushKpiRow(r, [
+    { label: 'Total PRs', value: allPrs.length, tone: 'navy' },
+    { label: 'Open',      value: openCount,    tone: 'amber' },
+    { label: 'Awarded',   value: awardedCount, tone: 'teal' },
+    { label: 'Delivered', value: deliveredCount, tone: 'green' },
+  ]);
+
+  r = pushSection(r, `Spend (cohort 3 · ${fmtUsd0(totalPaid)} paid of ${fmtUsd0(totalPlanned)} planned · cap ${fmtUsd0(COHORT3_BUDGET_TOTAL_USD.combined)})`);
+  r = pushBarRow(r, 'Planned', totalPlanned, Math.max(totalPlanned, totalPaid, COHORT3_BUDGET_TOTAL_USD.combined), 'orange');
+  r = pushBarRow(r, 'Paid', totalPaid, Math.max(totalPlanned, totalPaid, COHORT3_BUDGET_TOTAL_USD.combined), 'teal');
+  r = pushBarRow(r, '2026 cap', COHORT3_BUDGET_TOTAL_USD.combined, Math.max(totalPlanned, totalPaid, COHORT3_BUDGET_TOTAL_USD.combined), 'navy');
+  r = pushSpacer(r);
+
+  r = pushSection(r, 'By quarter');
+  for (const [label, arr] of Object.entries(byQuarter)) {
+    r = pushBarRow(r, label, arr.length, maxQuarter, 'red');
+  }
+  r = pushSpacer(r);
+
+  r = pushSection(r, 'By status');
+  for (const s of PR_STATUSES) {
+    r = pushBarRow(r, s, statusCount[s] ?? 0, maxStatus, 'amber');
+  }
+  r = pushSpacer(r);
+
+  r = pushSection(r, 'By Account Manager (cohort 3)');
+  // table header
+  const amHeader = blank12();
+  amHeader[0] = 'Account Manager';
+  amHeader[1] = 'Companies';
+  amHeader[2] = 'PRs';
+  amHeader[3] = 'Planned';
+  amHeader[4] = 'Paid';
+  grid.push(amHeader);
+  requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+    horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+    padding: { left: 12, right: 8, top: 4, bottom: 4 },
+    textFormat: { fontFamily: FONT, fontSize: 9, bold: true, foregroundColorStyle: { rgbColor: COLOR.muted } },
+  }));
+  r += 1;
+  const amOrder = [
+    ...ACCOUNT_MANAGERS.map(a => displayName(a.email)),
+    '(unassigned)',
+  ].filter(k => (amBuckets.get(k)?.prs ?? 0) > 0);
+  for (const k of amOrder) {
+    const b = amBuckets.get(k)!;
+    const row = blank12();
+    row[0] = k;
+    row[1] = b.companies.size;
+    row[2] = b.prs;
+    row[3] = fmtUsd0(b.planned);
+    row[4] = fmtUsd0(b.paid);
+    grid.push(row);
+    requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { left: 12, right: 8, top: 4, bottom: 4 },
+      textFormat: { fontFamily: FONT, fontSize: 10, foregroundColorStyle: { rgbColor: COLOR.navy } },
+    }));
+    r += 1;
+  }
+  r = pushSpacer(r);
+
+  r = pushSection(r, 'By pillar — planned spend');
+  for (const [label, agg] of Object.entries(pillarCount)) {
+    r = pushBarRow(r, `${label} · ${fmtUsd0(agg.paid)} paid`, agg.planned, maxPillarPlanned, 'teal');
+  }
+  r = pushSpacer(r);
+
+  r = pushSection(r, 'Top 10 highest-value PRs');
+  const topHeader = blank12();
+  topHeader[0] = 'PR';
+  topHeader[1] = 'Quarter';
+  topHeader[2] = 'Company';
+  topHeader[5] = 'Activity';
+  topHeader[10] = 'USD';
+  grid.push(topHeader);
+  requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+    horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+    padding: { left: 12, right: 8, top: 4, bottom: 4 },
+    textFormat: { fontFamily: FONT, fontSize: 9, bold: true, foregroundColorStyle: { rgbColor: COLOR.muted } },
+  }));
+  r += 1;
+  for (const { p, v } of topPrs) {
+    const row = blank12();
+    row[0] = p.pr_id || '';
+    row[1] = p.__quarter;
+    const c = masterById.get(p.company_id || '');
+    row[2] = c?.company_name || p.company_id || '';
+    row[5] = p.activity || '';
+    row[10] = fmtUsd0(v);
+    grid.push(row);
+    requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
       padding: { left: 12, right: 8, top: 4, bottom: 4 },
       textFormat: { fontFamily: FONT, fontSize: 10, foregroundColorStyle: { rgbColor: COLOR.navy } },
     }));

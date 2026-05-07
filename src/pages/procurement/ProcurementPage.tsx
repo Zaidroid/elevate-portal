@@ -3,12 +3,15 @@ import { Search, Plus, Download, RefreshCw } from 'lucide-react';
 import { derivePRFields } from '../../lib/procurement/compute';
 import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
-import type { PR } from '../../data/types';
+import type { PR, Company, Payment } from '../../data/types';
 import { keepCompaniesSection } from '../../lib/sheets/sections';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { SourceComparisonView } from './SourceComparisonView';
 import { SourceAnalysisView } from './SourceAnalysisView';
+import { canonicalCohortName, cohortEntryFor } from '../../config/cohort3Aliases';
+import { COHORT3_BUDGET_TOTAL_USD } from '../../config/interventions';
+import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
 
 type Quarter = 'q1' | 'q2' | 'q3' | 'q4';
 
@@ -41,6 +44,11 @@ function thresholdTone(cls: string): 'neutral' | 'teal' | 'amber' | 'red' | 'gre
   }
 }
 
+function fmtUsd0(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return '$0';
+  return `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+}
+
 type ViewMode = Quarter | 'source' | 'analysis';
 
 export function ProcurementPage() {
@@ -53,6 +61,13 @@ export function ProcurementPage() {
   const q2Hook = useModuleData<PR>('procurement', 'q2');
   const q3Hook = useModuleData<PR>('procurement', 'q3');
   const q4Hook = useModuleData<PR>('procurement', 'q4');
+
+  // Cross-module lookups so each PR row can show the company name, AM
+  // and donor (instead of an opaque 6-digit company_id) and so the
+  // top-of-page summary can compare planned PR spend vs paid Payments
+  // vs the 2026 cap.
+  const masterHook  = useModuleData<Company>('companies', 'companies');
+  const paymentHook = useModuleData<Payment>('payments', 'payments');
 
   // Filter each quarter to the "Companies" section only — the team's
   // procurement sheets group rows by team (Companies / Individuals /
@@ -71,15 +86,92 @@ export function ProcurementPage() {
     : view === 'q4' ? q4Companies as PR[]
     : q1Companies as PR[];
   // Active quarter data — picks rows from the section-filtered view but
-  // still uses the underlying hook for refresh/updateRow/createRow so
-  // mutations land in the right place.
+  // still uses the underlying hook for refresh/updateRow so mutations
+  // land in the right place. createRow is dispatched per-quarter from
+  // the CreatePRDrawer below.
   const activeHook = view === 'q1' ? q1Hook : view === 'q2' ? q2Hook : view === 'q3' ? q3Hook : q4Hook;
-  const { loading, error, refresh, updateRow, createRow } = isQuarter ? activeHook : q1Hook;
+  const { loading, error, refresh, updateRow } = isQuarter ? activeHook : q1Hook;
   const rows = activeRows;
 
   const allE3Rows = useMemo(() => [
     ...q1Companies, ...q2Companies, ...q3Companies, ...q4Companies,
   ] as PR[], [q1Companies, q2Companies, q3Companies, q4Companies]);
+
+  // company_id → derived view (canonical name, AM, donor, budget cap).
+  // The cap from cohort3Aliases.ts is authoritative — PRs whose company
+  // matches are budgeted; rows for non-cohort companies show plain text.
+  type CompanyLookup = {
+    companyId: string;
+    name: string;
+    amName: string;
+    donor: string;
+    budgetCap: number;
+  };
+  const companyLookup = useMemo(() => {
+    const m = new Map<string, CompanyLookup>();
+    for (const c of masterHook.rows) {
+      if (!c.company_id) continue;
+      const entry = cohortEntryFor(c.company_name || '');
+      const am = (c.profile_manager_email || entry?.am || '').toLowerCase();
+      const amName = ACCOUNT_MANAGERS.find(a => a.email.toLowerCase() === am)?.name
+        || (am ? displayName(am) : '');
+      m.set(c.company_id, {
+        companyId: c.company_id,
+        name: entry?.canonical || c.company_name || c.company_id,
+        amName,
+        donor: entry?.donor || c.fund_code || '',
+        budgetCap: entry?.budgetUsd || 0,
+      });
+    }
+    return m;
+  }, [masterHook.rows]);
+
+  // company_id → planned (sum of PR.total_cost_usd across all 4 quarters)
+  // and paid (sum of Payment.amount_usd where status === Paid). Used both
+  // for per-row bar and the top-of-page summary card.
+  type SpendByCompany = { planned: number; paid: number };
+  const spendByCompany = useMemo(() => {
+    const m = new Map<string, SpendByCompany>();
+    const seed = (id: string) => {
+      if (!m.has(id)) m.set(id, { planned: 0, paid: 0 });
+      return m.get(id)!;
+    };
+    for (const pr of allE3Rows) {
+      if (!pr.company_id) continue;
+      const v = parseFloat(String(pr.total_cost_usd || '').replace(/[^0-9.\-]/g, ''));
+      if (Number.isFinite(v)) seed(pr.company_id).planned += v;
+    }
+    for (const pay of paymentHook.rows) {
+      if (!pay.company_id) continue;
+      if ((pay.status || '').toLowerCase() !== 'paid') continue;
+      const v = parseFloat(String(pay.amount_usd || '').replace(/[^0-9.\-]/g, ''));
+      if (Number.isFinite(v)) seed(pay.company_id).paid += v;
+    }
+    return m;
+  }, [allE3Rows, paymentHook.rows]);
+
+  // Cohort-wide planned vs paid vs cap, for the summary card.
+  const cohortTotals = useMemo(() => {
+    let planned = 0, paid = 0;
+    for (const pr of allE3Rows) {
+      const cn = canonicalCohortName(companyLookup.get(pr.company_id || '')?.name || '');
+      if (!cn) continue;
+      const v = parseFloat(String(pr.total_cost_usd || '').replace(/[^0-9.\-]/g, ''));
+      if (Number.isFinite(v)) planned += v;
+    }
+    for (const pay of paymentHook.rows) {
+      if ((pay.status || '').toLowerCase() !== 'paid') continue;
+      const cn = canonicalCohortName(companyLookup.get(pay.company_id || '')?.name || '');
+      if (!cn) continue;
+      const v = parseFloat(String(pay.amount_usd || '').replace(/[^0-9.\-]/g, ''));
+      if (Number.isFinite(v)) paid += v;
+    }
+    return {
+      planned,
+      paid,
+      cap: COHORT3_BUDGET_TOTAL_USD.combined,
+    };
+  }, [allE3Rows, paymentHook.rows, companyLookup]);
 
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<PR | null>(null);
@@ -95,11 +187,61 @@ export function ProcurementPage() {
   }, [rows, query]);
 
   const columns: Column<PR>[] = [
-    { key: 'pr_id', header: 'PR ID', width: '120px' },
+    { key: 'pr_id', header: 'PR ID', width: '110px' },
     { key: 'activity', header: 'Activity' },
+    {
+      key: 'company',
+      header: 'Company / AM',
+      width: '210px',
+      render: r => {
+        const lk = companyLookup.get(r.company_id);
+        if (!lk) return <span className="text-2xs text-slate-400">{r.company_id || '—'}</span>;
+        return (
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-navy-500 dark:text-white">{lk.name}</div>
+            <div className="text-2xs text-slate-500">
+              {lk.amName || '—'}{lk.donor ? ` · ${lk.donor}` : ''}
+            </div>
+          </div>
+        );
+      },
+    },
     { key: 'intervention_type', header: 'Intervention', width: '130px' },
-    { key: 'company_id', header: 'Company', width: '90px' },
-    { key: 'total_cost_usd', header: 'Total USD', width: '110px' },
+    {
+      key: 'budget',
+      header: 'Spend / cap',
+      width: '180px',
+      render: r => {
+        const lk = companyLookup.get(r.company_id);
+        const sp = spendByCompany.get(r.company_id) ?? { planned: 0, paid: 0 };
+        if (!lk || lk.budgetCap === 0) {
+          // No allocation in cohort3Aliases — just show planned vs paid.
+          return (
+            <span className="text-2xs text-slate-500">
+              {fmtUsd0(sp.planned)} planned · {fmtUsd0(sp.paid)} paid
+            </span>
+          );
+        }
+        const planPct = Math.min(150, Math.round((sp.planned / lk.budgetCap) * 100));
+        const paidPct = Math.min(100, Math.round((sp.paid / lk.budgetCap) * 100));
+        const overBudget = sp.planned > lk.budgetCap;
+        const barFill = overBudget ? 'bg-brand-red' : 'bg-brand-teal';
+        return (
+          <div className="min-w-0">
+            <div className="text-2xs text-slate-500">
+              {fmtUsd0(sp.paid)} / {fmtUsd0(sp.planned)} <span className="opacity-60">/ {fmtUsd0(lk.budgetCap)}</span>
+            </div>
+            <div className="mt-0.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
+              <div className="relative h-full">
+                <div className={`absolute left-0 top-0 h-full ${barFill} opacity-50`} style={{ width: `${Math.min(100, planPct)}%` }} />
+                <div className={`absolute left-0 top-0 h-full ${barFill}`} style={{ width: `${paidPct}%` }} />
+              </div>
+            </div>
+          </div>
+        );
+      },
+    },
+    { key: 'total_cost_usd', header: 'PR USD', width: '90px' },
     {
       key: 'threshold_class',
       header: 'Threshold',
@@ -149,6 +291,12 @@ export function ProcurementPage() {
           </>
         }
       />
+
+      {/* Cohort 3 budget burn summary — same numbers Home shows. */}
+      <Card>
+        <CardHeader title="Cohort 3 procurement spend" subtitle="Planned PR total vs paid Payments vs the 2026 cap, across all 4 quarters." />
+        <BudgetSummary planned={cohortTotals.planned} paid={cohortTotals.paid} cap={cohortTotals.cap} />
+      </Card>
 
       <div className="flex gap-2 rounded-xl border border-slate-200 bg-white p-1 dark:border-navy-700 dark:bg-navy-600">
         {(Object.keys(QUARTER_LABELS) as Quarter[]).map(q => (
@@ -227,8 +375,16 @@ export function ProcurementPage() {
         open={creating}
         onClose={() => setCreating(false)}
         requester={user?.email || ''}
-        onCreate={async row => {
-          await createRow(row);
+        defaultQuarter={isQuarter ? (view as Quarter) : 'q1'}
+        onCreate={async (targetQuarter, row) => {
+          // Dispatch to the chosen quarter's hook so PRs always land in
+          // the right tab regardless of which quarter the user is
+          // currently viewing. Resolves the "view-switch on New" bug.
+          const targetHook = targetQuarter === 'q1' ? q1Hook
+            : targetQuarter === 'q2' ? q2Hook
+            : targetQuarter === 'q3' ? q3Hook
+            : q4Hook;
+          await targetHook.createRow(row);
           setCreating(false);
         }}
       />
@@ -353,17 +509,28 @@ function PRDrawer({
 }
 
 function CreatePRDrawer({
-  open, onClose, onCreate, requester,
+  open, onClose, onCreate, requester, defaultQuarter,
 }: {
   open: boolean;
   onClose: () => void;
-  onCreate: (row: Partial<PR>) => Promise<void>;
+  onCreate: (targetQuarter: Quarter, row: Partial<PR>) => Promise<void>;
   requester: string;
+  /** Which quarter the user is currently viewing — used as the default
+   *  destination so the form behaves intuitively while still letting the
+   *  user override it. */
+  defaultQuarter: Quarter;
 }) {
   const [draft, setDraft] = useState<Partial<PR>>({
     status: 'Draft', procurement_contact: 'Donia Shadeed', requester_email: requester,
   });
+  const [targetQuarter, setTargetQuarter] = useState<Quarter>(defaultQuarter);
   const [saving, setSaving] = useState(false);
+
+  // Reset target quarter to whatever the user is currently viewing each
+  // time the drawer is reopened.
+  useEffect(() => {
+    if (open) setTargetQuarter(defaultQuarter);
+  }, [open, defaultQuarter]);
 
   const derived = useMemo(() => derivePRFields({
     qty: draft.qty,
@@ -386,16 +553,27 @@ function CreatePRDrawer({
             setSaving(true);
             try {
               const merged = { ...draft, ...derived };
-              await onCreate(merged);
+              await onCreate(targetQuarter, merged);
               setDraft({ status: 'Draft', procurement_contact: 'Donia Shadeed', requester_email: requester });
             } finally { setSaving(false); }
           }} disabled={saving || !canCreate}>
-            {saving ? 'Creating…' : 'Create'}
+            {saving ? 'Creating…' : `Create in ${QUARTER_LABELS[targetQuarter]}`}
           </Button>
         </>
       }
     >
       <div className="space-y-4">
+        <Field label="Quarter (which tab to write to)" required>
+          <select
+            className={inputClass}
+            value={targetQuarter}
+            onChange={e => setTargetQuarter(e.target.value as Quarter)}
+          >
+            {(Object.keys(QUARTER_LABELS) as Quarter[]).map(q => (
+              <option key={q} value={q}>{QUARTER_LABELS[q]}</option>
+            ))}
+          </select>
+        </Field>
         <Field label="PR ID" required>
           <input className={inputClass} value={draft.pr_id || ''}
             onChange={e => setDraft({ ...draft, pr_id: e.target.value })} placeholder="PR-E3-001" />
@@ -448,6 +626,35 @@ function CreatePRDrawer({
         </div>
       </div>
     </Drawer>
+  );
+}
+
+function BudgetSummary({ planned, paid, cap }: { planned: number; paid: number; cap: number }) {
+  const planPct = cap > 0 ? Math.min(150, Math.round((planned / cap) * 100)) : 0;
+  const paidPct = cap > 0 ? Math.min(100, Math.round((paid / cap) * 100)) : 0;
+  const overBudget = planned > cap;
+  return (
+    <div>
+      <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+        <span>
+          <b className="text-navy-500 dark:text-white">{fmtUsd0(paid)}</b> paid · <b className="text-navy-500 dark:text-white">{fmtUsd0(planned)}</b> planned
+        </span>
+        <span className="text-xs text-slate-500">
+          of <span className="font-mono">{fmtUsd0(cap)}</span> cap · <span className="font-mono">{paidPct}%</span> burned
+        </span>
+      </div>
+      <div className="mt-2 h-3 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
+        <div className="relative h-full">
+          <div className={`absolute left-0 top-0 h-full ${overBudget ? 'bg-brand-red' : 'bg-brand-teal'} opacity-50`} style={{ width: `${Math.min(100, planPct)}%` }} />
+          <div className={`absolute left-0 top-0 h-full ${overBudget ? 'bg-brand-red' : 'bg-brand-teal'}`} style={{ width: `${paidPct}%` }} />
+        </div>
+      </div>
+      {overBudget && (
+        <p className="mt-1 text-2xs font-semibold text-brand-red">
+          Planned spend exceeds the 2026 cap by {fmtUsd0(planned - cap)}.
+        </p>
+      )}
+    </div>
   );
 }
 

@@ -1,8 +1,8 @@
 // One-click rebuilder for the master Dashboard tabs.
 //
-// Phase 1: Companies Master only — proves the pattern.
-// Future:  same approach for Procurement / Payments / Conferences /
-//          Docs / Freelancers / Advisors / Team Roster.
+// Phase 1: Companies Master.
+// Phase 2: Procurement (this commit).
+// Future:  Payments / Conferences / Docs / ElevateBridge / Advisors.
 //
 // The button computes metrics in code (using the portal's filtering +
 // override logic) and writes static values to the Dashboard tab, so
@@ -13,13 +13,14 @@ import { Sparkles, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { Button, Card, CardHeader, useToast } from '../../lib/ui';
 import { useModuleData } from '../../data/useModuleData';
 import { useAuth } from '../../services/auth';
-import type { Company, Assignment } from '../../data/types';
+import type { Company, Assignment, PR, Payment } from '../../data/types';
 import type { Review } from '../companies/reviewTypes';
-import { buildCompaniesDashboard } from './dashboardRebuilder';
+import { buildCompaniesDashboard, buildProcurementDashboard } from './dashboardRebuilder';
 import { getSheetId, SHEETS } from '../../config/sheets';
 import { updateRange, batchUpdate, getSpreadsheetMeta } from '../../lib/sheets/client';
+import { keepCompaniesSection } from '../../lib/sheets/sections';
 
-const COMPANIES_DASHBOARD_TAB = 'Dashboard';
+const DASHBOARD_TAB = 'Dashboard';
 // Width of the grid we write. Matches `dashboardRebuilder` (12 cols).
 const COL_LETTER = 'L';
 // Cap how many trailing rows we wipe so a smaller new dashboard doesn't
@@ -33,140 +34,184 @@ export function RebuildDashboardsCard() {
   const companies   = useModuleData<Company>('companies', 'companies');
   const assignments = useModuleData<Assignment>('companies', 'assignments');
   const reviews     = useModuleData<Review>('companies', 'reviews');
+  // Procurement inputs — all 4 quarters + cross-module Payments.
+  const q1 = useModuleData<PR>('procurement', 'q1');
+  const q2 = useModuleData<PR>('procurement', 'q2');
+  const q3 = useModuleData<PR>('procurement', 'q3');
+  const q4 = useModuleData<PR>('procurement', 'q4');
+  const payments = useModuleData<Payment>('payments', 'payments');
 
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; rowsWritten: number; error?: string } | null>(null);
+  type Target = 'companies' | 'procurement';
+  const [busy, setBusy] = useState<Target | null>(null);
+  const [result, setResult] = useState<{ target: Target; ok: boolean; rowsWritten: number; error?: string } | null>(null);
 
   const tabExists = !!SHEETS.companies && !!SHEETS.companies.tabs;
 
+  // Common write path: clear → values → formatting → wipe trailing.
+  // Used by every dashboard target; differences are confined to the
+  // `built` object the caller supplies.
+  const writeBuilt = async (
+    sheetId: string,
+    tabName: string,
+    tabId: number,
+    built: { values: (string | number)[][]; requests: unknown[]; lastRow: number },
+  ) => {
+    const clearRange = {
+      sheetId: tabId,
+      startRowIndex: 0,
+      endRowIndex: built.lastRow + WIPE_TRAILING_ROWS,
+      startColumnIndex: 0,
+      endColumnIndex: 12,
+    };
+    try {
+      await batchUpdate(sheetId, [
+        { unmergeCells: { range: clearRange } },
+        { repeatCell: { range: clearRange, cell: { userEnteredFormat: {} }, fields: 'userEnteredFormat' } },
+      ]);
+    } catch (err) {
+      console.warn('[dashboard] clear step warning', err);
+    }
+    await updateRange(sheetId, `'${tabName}'!A1:${COL_LETTER}${built.lastRow}`, built.values);
+    for (let i = 0; i < built.requests.length; i += 100) {
+      const chunk = built.requests.slice(i, i + 100);
+      try {
+        await batchUpdate(sheetId, chunk);
+      } catch (err) {
+        console.warn(`[dashboard] format chunk ${i} warning`, err);
+      }
+    }
+    const blank = Array.from({ length: WIPE_TRAILING_ROWS }, () => new Array(12).fill('') as string[]);
+    const wipeRange = `'${tabName}'!A${built.lastRow + 1}:${COL_LETTER}${built.lastRow + WIPE_TRAILING_ROWS}`;
+    try {
+      await updateRange(sheetId, wipeRange, blank, { valueInput: 'RAW' });
+    } catch { /* non-fatal */ }
+  };
+
   const runCompanies = async () => {
-    setBusy(true);
+    setBusy('companies');
     setResult(null);
     try {
       const sheetId = getSheetId('companies');
       if (!sheetId) throw new Error('VITE_SHEET_COMPANIES is not set.');
 
-      // Resolve the Dashboard tab's gid for batchUpdate formatting.
       const meta = await getSpreadsheetMeta(sheetId);
-      const tab = meta.sheets.find(s => s.title === COMPANIES_DASHBOARD_TAB);
-      if (!tab) throw new Error(`'${COMPANIES_DASHBOARD_TAB}' tab not found in the Companies workbook.`);
-      const tabId = tab.sheetId;
+      const tab = meta.sheets.find(s => s.title === DASHBOARD_TAB);
+      if (!tab) throw new Error(`'${DASHBOARD_TAB}' tab not found in the Companies workbook.`);
 
       const built = buildCompaniesDashboard({
         companies: companies.rows,
         assignments: assignments.rows,
         reviews: reviews.rows,
         generatedBy: user?.email || '',
-        tabId,
+        tabId: tab.sheetId,
       });
-
-      // 1. CLEAR existing formatting on rows we'll touch + below — so
-      //    any prior manual edits don't fight with the new layout.
-      //    (We rebuild the format completely; values come next.)
-      const clearRange = {
-        sheetId: tabId,
-        startRowIndex: 0,
-        endRowIndex: built.lastRow + WIPE_TRAILING_ROWS,
-        startColumnIndex: 0,
-        endColumnIndex: 12,
-      };
-      const clearRequests: unknown[] = [
-        // Drop all merges in the range first, otherwise repeatCell on a
-        // merged area errors out.
-        { unmergeCells: { range: clearRange } },
-        // Wipe formatting (background, borders, text format) so we
-        // start from a clean slate.
-        {
-          repeatCell: {
-            range: clearRange,
-            cell: { userEnteredFormat: {} },
-            fields: 'userEnteredFormat',
-          },
-        },
-      ];
-      try {
-        await batchUpdate(sheetId, clearRequests);
-      } catch (err) {
-        // Non-fatal — the format steps below will still run.
-        console.warn('[dashboard] clear step warning', err);
-      }
-
-      // 2. WRITE values.
-      const valuesRange = `'${COMPANIES_DASHBOARD_TAB}'!A1:${COL_LETTER}${built.lastRow}`;
-      await updateRange(sheetId, valuesRange, built.values);
-
-      // 3. APPLY formatting requests (chunked to stay under Sheets API
-      //    request count limits).
-      for (let i = 0; i < built.requests.length; i += 100) {
-        const chunk = built.requests.slice(i, i + 100);
-        try {
-          await batchUpdate(sheetId, chunk);
-        } catch (err) {
-          console.warn(`[dashboard] format chunk ${i} warning`, err);
-        }
-      }
-
-      // 4. Wipe trailing rows so a smaller dashboard doesn't leak old data.
-      const blank = Array.from({ length: WIPE_TRAILING_ROWS }, () =>
-        new Array(12).fill('') as string[],
-      );
-      const wipeRange = `'${COMPANIES_DASHBOARD_TAB}'!A${built.lastRow + 1}:${COL_LETTER}${built.lastRow + WIPE_TRAILING_ROWS}`;
-      try {
-        await updateRange(sheetId, wipeRange, blank, { valueInput: 'RAW' });
-      } catch { /* non-fatal */ }
-
-      setResult({ ok: true, rowsWritten: built.lastRow });
+      await writeBuilt(sheetId, DASHBOARD_TAB, tab.sheetId, built);
+      setResult({ target: 'companies', ok: true, rowsWritten: built.lastRow });
       toast.success(`Companies Dashboard rebuilt — ${built.lastRow} rows + ${built.requests.length} format ops`);
     } catch (err) {
       const msg = (err as Error).message || String(err);
-      setResult({ ok: false, rowsWritten: 0, error: msg });
+      setResult({ target: 'companies', ok: false, rowsWritten: 0, error: msg });
       toast.error(`Rebuild failed: ${msg}`);
     } finally {
-      setBusy(false);
+      setBusy(null);
+    }
+  };
+
+  const runProcurement = async () => {
+    setBusy('procurement');
+    setResult(null);
+    try {
+      const sheetId = getSheetId('procurement');
+      if (!sheetId) throw new Error('VITE_SHEET_PROCUREMENT is not set.');
+
+      const meta = await getSpreadsheetMeta(sheetId);
+      let tab = meta.sheets.find(s => s.title === DASHBOARD_TAB);
+      if (!tab) {
+        // Create the Dashboard tab on first run so the team doesn't have
+        // to add it manually.
+        await batchUpdate(sheetId, [{ addSheet: { properties: { title: DASHBOARD_TAB } } }]);
+        const meta2 = await getSpreadsheetMeta(sheetId);
+        tab = meta2.sheets.find(s => s.title === DASHBOARD_TAB);
+        if (!tab) throw new Error('Dashboard tab could not be created in Procurement workbook.');
+      }
+
+      // Section-aware reads: only Companies-section PRs feed the dashboard.
+      const built = buildProcurementDashboard({
+        prsByQuarter: {
+          q1: keepCompaniesSection(q1.rows, q1.headers) as PR[],
+          q2: keepCompaniesSection(q2.rows, q2.headers) as PR[],
+          q3: keepCompaniesSection(q3.rows, q3.headers) as PR[],
+          q4: keepCompaniesSection(q4.rows, q4.headers) as PR[],
+        },
+        companies: companies.rows,
+        payments: payments.rows,
+        generatedBy: user?.email || '',
+        tabId: tab.sheetId,
+      });
+      await writeBuilt(sheetId, DASHBOARD_TAB, tab.sheetId, built);
+      setResult({ target: 'procurement', ok: true, rowsWritten: built.lastRow });
+      toast.success(`Procurement Dashboard rebuilt — ${built.lastRow} rows + ${built.requests.length} format ops`);
+    } catch (err) {
+      const msg = (err as Error).message || String(err);
+      setResult({ target: 'procurement', ok: false, rowsWritten: 0, error: msg });
+      toast.error(`Rebuild failed: ${msg}`);
+    } finally {
+      setBusy(null);
     }
   };
 
   if (!tabExists) return null;
 
-  const sheetUrl = (() => {
-    const id = getSheetId('companies');
+  const sheetUrlFor = (mod: 'companies' | 'procurement') => {
+    const id = getSheetId(mod);
     if (!id) return null;
     return `https://docs.google.com/spreadsheets/d/${id}/edit#gid=0`;
-  })();
+  };
 
   return (
     <Card accent="teal">
       <CardHeader
         title="Rebuild master dashboards"
-        subtitle="Overwrites the Dashboard tab with values computed by the portal — same numbers you see in /companies, scoped to cohort 3, with the interviewed-list override applied. Replaces the brittle Sheets formulas that broke when fund codes / intervention taxonomy changed."
-        action={
-          <Button onClick={runCompanies} disabled={busy || companies.rows.length === 0}>
-            <Sparkles className="h-4 w-4" /> {busy ? 'Rebuilding…' : 'Rebuild Companies Dashboard'}
-          </Button>
-        }
+        subtitle="Overwrites each workbook's Dashboard tab with values computed by the portal — same numbers you see in the UI, scoped to cohort 3, with overrides applied. Replaces brittle Sheets formulas that broke whenever fund codes or intervention taxonomy changed."
       />
 
-      <div className="grid grid-cols-1 gap-2 text-xs text-slate-600 dark:text-slate-300 sm:grid-cols-3">
-        <div>
-          <div className="text-2xs uppercase tracking-wider text-slate-400">Companies in master</div>
-          <div className="font-mono text-base font-bold text-navy-500 dark:text-white">{companies.rows.length}</div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {/* Companies */}
+        <div className="rounded-lg border border-slate-200 p-3 dark:border-navy-700">
+          <div className="mb-2 flex items-baseline justify-between">
+            <span className="text-sm font-bold text-navy-500 dark:text-white">Companies Master</span>
+            <span className="text-2xs text-slate-500">
+              {companies.rows.length} co · {assignments.rows.length} int · {reviews.rows.length} reviews
+            </span>
+          </div>
+          <Button onClick={runCompanies} disabled={busy === 'companies' || companies.rows.length === 0}>
+            <Sparkles className="h-4 w-4" /> {busy === 'companies' ? 'Rebuilding…' : 'Rebuild'}
+          </Button>
         </div>
-        <div>
-          <div className="text-2xs uppercase tracking-wider text-slate-400">Intervention assignments</div>
-          <div className="font-mono text-base font-bold text-navy-500 dark:text-white">{assignments.rows.length}</div>
-        </div>
-        <div>
-          <div className="text-2xs uppercase tracking-wider text-slate-400">Selection reviews</div>
-          <div className="font-mono text-base font-bold text-navy-500 dark:text-white">{reviews.rows.length}</div>
+
+        {/* Procurement */}
+        <div className="rounded-lg border border-slate-200 p-3 dark:border-navy-700">
+          <div className="mb-2 flex items-baseline justify-between">
+            <span className="text-sm font-bold text-navy-500 dark:text-white">Procurement</span>
+            <span className="text-2xs text-slate-500">
+              Q1+{q1.rows.length} Q2+{q2.rows.length} Q3+{q3.rows.length} Q4+{q4.rows.length} · {payments.rows.length} payments
+            </span>
+          </div>
+          <Button
+            onClick={runProcurement}
+            disabled={busy === 'procurement' || (q1.rows.length + q2.rows.length + q3.rows.length + q4.rows.length) === 0}
+          >
+            <Sparkles className="h-4 w-4" /> {busy === 'procurement' ? 'Rebuilding…' : 'Rebuild'}
+          </Button>
         </div>
       </div>
 
       {result && result.ok && (
         <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">
           <CheckCircle2 className="mr-1 inline h-3.5 w-3.5" />
-          Dashboard rewritten ({result.rowsWritten} rows).{' '}
-          {sheetUrl && (
-            <a href={sheetUrl} target="_blank" rel="noreferrer" className="font-semibold text-brand-teal hover:underline">
+          {result.target === 'companies' ? 'Companies' : 'Procurement'} Dashboard rewritten ({result.rowsWritten} rows).{' '}
+          {sheetUrlFor(result.target) && (
+            <a href={sheetUrlFor(result.target)!} target="_blank" rel="noreferrer" className="font-semibold text-brand-teal hover:underline">
               Open in Sheets ↗
             </a>
           )}
@@ -180,7 +225,7 @@ export function RebuildDashboardsCard() {
       )}
 
       <p className="mt-2 text-2xs text-slate-500">
-        Other masters (Procurement, Payments, Conferences, Docs, ElevateBridge, Advisors, Team) will be added once Companies is verified.
+        Payments / Conferences / Docs / ElevateBridge / Advisors come in subsequent phases.
       </p>
     </Card>
   );
