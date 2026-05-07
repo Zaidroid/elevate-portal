@@ -531,6 +531,320 @@ export function buildCompaniesDashboard(input: {
   return { values: grid, requests, lastRow: grid.length };
 }
 
+// ─── Payments dashboard ─────────────────────────────────────────────
+//
+// Same primitives as Companies / Procurement. KPIs by status, donor
+// burn vs the 2026 cap, per-AM table, top-10 spend, by month strip.
+
+export function buildPaymentsDashboard(input: {
+  payments: Payment[];
+  prs: PR[];                                    // for planned (committed) totals
+  companies: Company[];                         // for AM + canonical name lookup
+  generatedBy: string;
+  generatedAt?: Date;
+  tabId: number;
+}): FormattedDashboard {
+  const at = input.generatedAt ?? new Date();
+  const tabId = input.tabId;
+
+  const masterById = new Map<string, Company>();
+  for (const c of input.companies) if (c.company_id) masterById.set(c.company_id, c);
+  const isCohort = (companyId: string): boolean => {
+    const c = masterById.get(companyId);
+    if (!c) return false;
+    return canonicalCohortName(c.company_name || '') !== null;
+  };
+  const amOf = (companyId: string): string => {
+    const c = masterById.get(companyId);
+    const lower = (c?.profile_manager_email || cohortEntryFor(c?.company_name || '')?.am || '').toLowerCase();
+    if (!lower) return '(unassigned)';
+    const am = ACCOUNT_MANAGERS.find(a => a.email.toLowerCase() === lower);
+    return am ? displayName(am.email) : displayName(lower);
+  };
+  const fundDonor = (fund: string | undefined): 'Dutch' | 'SIDA' | null => {
+    const f = (fund || '').trim();
+    if (!f) return null;
+    if (/dutch/i.test(f) || f === '97060') return 'Dutch';
+    if (/sida/i.test(f) || f === '91763') return 'SIDA';
+    return null;
+  };
+  const num = (s: string | undefined) => {
+    const v = parseFloat(String(s || '').replace(/[^0-9.\-]/g, ''));
+    return Number.isFinite(v) ? v : 0;
+  };
+
+  // Cohort-only payments + planned PR sum.
+  const cohortPayments = input.payments.filter(p => isCohort(p.company_id || ''));
+  const cohortPRs = input.prs.filter(p => isCohort(p.company_id || ''));
+
+  // KPIs by status
+  const PAY_STATUSES = ['Pending Approval', 'Approved', 'Sent to Finance', 'Paid', 'Rejected'];
+  const statusCount: Record<string, number> = {};
+  const statusUsd: Record<string, number> = {};
+  for (const s of PAY_STATUSES) { statusCount[s] = 0; statusUsd[s] = 0; }
+  for (const p of cohortPayments) {
+    const s = (p.status || '').trim();
+    if (s in statusCount) {
+      statusCount[s] += 1;
+      statusUsd[s]   += num(p.amount_usd);
+    }
+  }
+
+  const totalPaid = statusUsd['Paid'] ?? 0;
+  const totalPlanned = cohortPRs.reduce((s, pr) => s + num(pr.total_cost_usd), 0);
+
+  // Donor burn (Dutch / SIDA)
+  type DonorAgg = { paid: number; planned: number; cap: number };
+  const donor: { Dutch: DonorAgg; SIDA: DonorAgg } = {
+    Dutch: { paid: 0, planned: 0, cap: COHORT3_BUDGET_TOTAL_USD.dutch },
+    SIDA:  { paid: 0, planned: 0, cap: COHORT3_BUDGET_TOTAL_USD.sida },
+  };
+  for (const p of cohortPayments) {
+    if ((p.status || '').toLowerCase() !== 'paid') continue;
+    const d = fundDonor(p.fund_code);
+    if (d) donor[d].paid += num(p.amount_usd);
+  }
+  for (const pr of cohortPRs) {
+    const d = fundDonor(pr.fund_code);
+    if (d) donor[d].planned += num(pr.total_cost_usd);
+  }
+
+  // Per-AM (companies, paid count, paid USD, planned USD)
+  type AmAgg = { companies: Set<string>; paidCount: number; paidUsd: number; plannedUsd: number };
+  const amBuckets = new Map<string, AmAgg>();
+  const seedAm = (k: string) => {
+    if (!amBuckets.has(k)) amBuckets.set(k, { companies: new Set(), paidCount: 0, paidUsd: 0, plannedUsd: 0 });
+    return amBuckets.get(k)!;
+  };
+  for (const am of ACCOUNT_MANAGERS) seedAm(displayName(am.email));
+  seedAm('(unassigned)');
+  for (const p of cohortPayments) {
+    const k = amOf(p.company_id || '');
+    const b = seedAm(k);
+    if (p.company_id) b.companies.add(p.company_id);
+    if ((p.status || '').toLowerCase() === 'paid') {
+      b.paidCount += 1;
+      b.paidUsd += num(p.amount_usd);
+    }
+  }
+  for (const pr of cohortPRs) {
+    seedAm(amOf(pr.company_id || '')).plannedUsd += num(pr.total_cost_usd);
+  }
+
+  // By month — payment_date YYYY-MM bucket. Sorted asc.
+  const byMonth = new Map<string, { count: number; paid: number }>();
+  for (const p of cohortPayments) {
+    const ym = (p.payment_date || '').slice(0, 7); // YYYY-MM
+    if (!ym) continue;
+    if (!byMonth.has(ym)) byMonth.set(ym, { count: 0, paid: 0 });
+    const b = byMonth.get(ym)!;
+    b.count += 1;
+    if ((p.status || '').toLowerCase() === 'paid') b.paid += num(p.amount_usd);
+  }
+  const monthRows = Array.from(byMonth.entries()).sort(([a], [b]) => a.localeCompare(b));
+  const maxMonth = Math.max(1, ...monthRows.map(([, b]) => b.paid));
+
+  // Top 10 paid
+  const topPaid = cohortPayments
+    .filter(p => (p.status || '').toLowerCase() === 'paid')
+    .map(p => ({ p, v: num(p.amount_usd) }))
+    .sort((a, b) => b.v - a.v)
+    .slice(0, 10);
+
+  // ── grid + format ──────────────────────────────────────────
+  const grid: DashboardGrid = [];
+  const requests: unknown[] = [];
+
+  requests.push(setTabProps(tabId));
+  for (let c = 0; c < 12; c++) requests.push(setColumnWidth(tabId, c, 96));
+
+  const blank12 = (): DashboardCell[] => Array.from({ length: 12 }, () => '');
+
+  const pushTitle = (text: string, sub: string): number => {
+    grid.push([text, ...new Array(11).fill('')]);
+    requests.push(mergeRow(tabId, 0, 0, 12));
+    requests.push(repeatCellFormat(tabId, 0, 1, 0, 12, {
+      backgroundColorStyle: { rgbColor: COLOR.navy },
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { top: 8, bottom: 8, left: 14, right: 8 },
+      textFormat: { fontFamily: FONT, fontSize: 18, bold: true, foregroundColorStyle: { rgbColor: COLOR.white } },
+    }));
+    requests.push(setRowHeight(tabId, 0, 36));
+    grid.push([sub, ...new Array(11).fill('')]);
+    requests.push(mergeRow(tabId, 1, 0, 12));
+    requests.push(repeatCellFormat(tabId, 1, 2, 0, 12, {
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { top: 4, bottom: 6, left: 14, right: 8 },
+      textFormat: { fontFamily: FONT, fontSize: 10, italic: true, foregroundColorStyle: { rgbColor: COLOR.muted } },
+    }));
+    requests.push(setRowHeight(tabId, 1, 22));
+    grid.push(blank12());
+    requests.push(setRowHeight(tabId, 2, 8));
+    return 3;
+  };
+  const pushSection = (rowZeroBased: number, label: string): number => {
+    const row = blank12(); row[0] = label;
+    grid.push(row);
+    requests.push(...sectionHeaderFormat(tabId, rowZeroBased));
+    return rowZeroBased + 1;
+  };
+  const pushKpiRow = (rowZeroBased: number, tiles: KpiTile[]): number => {
+    while (tiles.length < 4) tiles.push({ label: '', value: '', tone: 'navy' });
+    const labelRow: DashboardCell[] = blank12();
+    const valueRow: DashboardCell[] = blank12();
+    [0, 3, 6, 9].forEach((c0, i) => {
+      labelRow[c0] = tiles[i].label.toUpperCase();
+      valueRow[c0] = tiles[i].value;
+      requests.push(...kpiTileFormat(tabId, rowZeroBased, c0, tiles[i].tone));
+    });
+    grid.push(labelRow);
+    grid.push(valueRow);
+    requests.push(setRowHeight(tabId, rowZeroBased, 18));
+    requests.push(setRowHeight(tabId, rowZeroBased + 1, 38));
+    grid.push(blank12());
+    requests.push(setRowHeight(tabId, rowZeroBased + 2, 8));
+    return rowZeroBased + 3;
+  };
+  const pushSpacer = (rowZeroBased: number): number => {
+    grid.push(blank12());
+    requests.push(setRowHeight(tabId, rowZeroBased, 12));
+    return rowZeroBased + 1;
+  };
+
+  // ── compose ────────────────────────────────────────────────
+  let r = 0;
+  r = pushTitle(
+    'Payments Dashboard',
+    `Live mirror of the Payments module · ${cohortPayments.length} cohort entries · ${fmtUsd0(totalPaid)} paid of ${fmtUsd0(totalPlanned)} planned · generated ${at.toLocaleString()} by ${displayName(input.generatedBy) || input.generatedBy}.`,
+  );
+
+  r = pushSection(r, 'Top metrics');
+  r = pushKpiRow(r, [
+    { label: 'Cohort entries', value: cohortPayments.length, tone: 'navy' },
+    { label: 'Pending',  value: statusCount['Pending Approval'] ?? 0, tone: 'amber' },
+    { label: 'Paid',     value: statusCount['Paid'] ?? 0, tone: 'green' },
+    { label: 'Rejected', value: statusCount['Rejected'] ?? 0, tone: 'red' },
+  ]);
+
+  r = pushSection(r, 'By status (count · USD)');
+  const maxStatusCount = Math.max(1, ...Object.values(statusCount));
+  for (const s of PAY_STATUSES) {
+    const row = blank12();
+    row[0] = s;
+    row[1] = statusCount[s] ?? 0;
+    row[2] = bar(statusCount[s] ?? 0, maxStatusCount);
+    row[10] = fmtUsd0(statusUsd[s] ?? 0);
+    grid.push(row);
+    requests.push(...barRowFormat(tabId, r, 'amber'));
+    requests.push(setRowHeight(tabId, r, 22));
+    r += 1;
+  }
+  r = pushSpacer(r);
+
+  r = pushSection(r, 'By donor (cohort 3, paid)');
+  const maxDonorCap = Math.max(donor.Dutch.cap, donor.SIDA.cap);
+  for (const d of ['Dutch', 'SIDA'] as const) {
+    const b = donor[d];
+    const row = blank12();
+    row[0] = `${d} · ${fmtUsd0(b.paid)} paid · ${fmtUsd0(b.planned)} planned · cap ${fmtUsd0(b.cap)}`;
+    row[1] = `${b.cap > 0 ? Math.round((b.paid / b.cap) * 100) : 0}%`;
+    row[2] = bar(b.paid, maxDonorCap);
+    grid.push(row);
+    requests.push(...barRowFormat(tabId, r, d === 'Dutch' ? 'orange' : 'teal'));
+    requests.push(setRowHeight(tabId, r, 22));
+    r += 1;
+  }
+  r = pushSpacer(r);
+
+  r = pushSection(r, 'By Account Manager (cohort 3)');
+  const amHeader = blank12();
+  amHeader[0] = 'Account Manager';
+  amHeader[1] = 'Companies';
+  amHeader[2] = 'Paid #';
+  amHeader[3] = 'Paid USD';
+  amHeader[4] = 'Planned USD';
+  grid.push(amHeader);
+  requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+    horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+    padding: { left: 12, right: 8, top: 4, bottom: 4 },
+    textFormat: { fontFamily: FONT, fontSize: 9, bold: true, foregroundColorStyle: { rgbColor: COLOR.muted } },
+  }));
+  r += 1;
+  const amOrder = [
+    ...ACCOUNT_MANAGERS.map(a => displayName(a.email)),
+    '(unassigned)',
+  ].filter(k => {
+    const b = amBuckets.get(k);
+    return !!b && (b.companies.size > 0 || b.paidCount > 0 || b.plannedUsd > 0);
+  });
+  for (const k of amOrder) {
+    const b = amBuckets.get(k)!;
+    const row = blank12();
+    row[0] = k;
+    row[1] = b.companies.size;
+    row[2] = b.paidCount;
+    row[3] = fmtUsd0(b.paidUsd);
+    row[4] = fmtUsd0(b.plannedUsd);
+    grid.push(row);
+    requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { left: 12, right: 8, top: 4, bottom: 4 },
+      textFormat: { fontFamily: FONT, fontSize: 10, foregroundColorStyle: { rgbColor: COLOR.navy } },
+    }));
+    r += 1;
+  }
+  r = pushSpacer(r);
+
+  if (monthRows.length > 0) {
+    r = pushSection(r, 'By month (paid USD)');
+    for (const [ym, b] of monthRows) {
+      const row = blank12();
+      row[0] = ym;
+      row[1] = b.count;
+      row[2] = bar(b.paid, maxMonth);
+      row[10] = fmtUsd0(b.paid);
+      grid.push(row);
+      requests.push(...barRowFormat(tabId, r, 'teal'));
+      requests.push(setRowHeight(tabId, r, 22));
+      r += 1;
+    }
+    r = pushSpacer(r);
+  }
+
+  r = pushSection(r, 'Top 10 paid');
+  const topHeader = blank12();
+  topHeader[0] = 'Payment';
+  topHeader[1] = 'Date';
+  topHeader[2] = 'Payee';
+  topHeader[5] = 'Company';
+  topHeader[10] = 'USD';
+  grid.push(topHeader);
+  requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+    horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+    padding: { left: 12, right: 8, top: 4, bottom: 4 },
+    textFormat: { fontFamily: FONT, fontSize: 9, bold: true, foregroundColorStyle: { rgbColor: COLOR.muted } },
+  }));
+  r += 1;
+  for (const { p, v } of topPaid) {
+    const row = blank12();
+    row[0] = p.payment_id || '';
+    row[1] = p.payment_date || '';
+    row[2] = p.payee_name || '';
+    const c = masterById.get(p.company_id || '');
+    row[5] = c?.company_name || p.company_id || '';
+    row[10] = fmtUsd0(v);
+    grid.push(row);
+    requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { left: 12, right: 8, top: 4, bottom: 4 },
+      textFormat: { fontFamily: FONT, fontSize: 10, foregroundColorStyle: { rgbColor: COLOR.navy } },
+    }));
+    r += 1;
+  }
+
+  return { values: grid, requests, lastRow: grid.length };
+}
+
 // ─── Procurement dashboard ──────────────────────────────────────────
 //
 // Mirrors the Companies dashboard layout: navy banner + 4 KPI tiles +

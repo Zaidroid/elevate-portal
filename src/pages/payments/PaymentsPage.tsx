@@ -1,14 +1,15 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Search, Plus, CheckCircle2, XCircle, Download, RefreshCw } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { isAdmin } from '../../config/team';
+import { ACCOUNT_MANAGERS, displayName, isAdmin } from '../../config/team';
 import { useModuleData } from '../../data/useModuleData';
-import type { Payment } from '../../data/types';
+import type { Payment, PR, Company } from '../../data/types';
+import { keepCompaniesSection } from '../../lib/sheets/sections';
+import { canonicalCohortName, cohortEntryFor } from '../../config/cohort3Aliases';
+import { COHORT3_BUDGET_TOTAL_USD } from '../../config/interventions';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { PaymentsSourceComparisonView } from './SourceComparisonView';
-
-
 
 const PAYEE_TYPES = ['Vendor', 'Advisor', 'Participant', 'Conference'];
 const PAYMENT_STATUSES = ['Pending Approval', 'Approved', 'Sent to Finance', 'Paid', 'Rejected'];
@@ -17,14 +18,74 @@ const FUND_CODES = ['97060', '91763'];
 const inputClass =
   'w-full rounded-lg border border-slate-200 bg-brand-editable/40 px-3 py-2 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-700 dark:text-white';
 
+function fmtUsd0(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return '$0';
+  return `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+}
+
+function fundDonor(fund: string | undefined): 'Dutch' | 'SIDA' | null {
+  const f = (fund || '').trim();
+  if (!f) return null;
+  if (/dutch/i.test(f) || f === '97060') return 'Dutch';
+  if (/sida/i.test(f) || f === '91763') return 'SIDA';
+  return null;
+}
+
 export function PaymentsPage() {
   const { user } = useAuth();
   const admin = user ? isAdmin(user.email) : false;
 
+  const payHook = useModuleData<Payment>('payments', 'payments');
+  const masterHook = useModuleData<Company>('companies', 'companies');
+  const q1 = useModuleData<PR>('procurement', 'q1');
+  const q2 = useModuleData<PR>('procurement', 'q2');
+  const q3 = useModuleData<PR>('procurement', 'q3');
+  const q4 = useModuleData<PR>('procurement', 'q4');
 
-  const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<Payment>(
-    'payments', 'payments'
+  // Section-aware: pull only Companies-section payment rows. Without
+  // this, vendor / individual / advisor sub-section rows leak in and
+  // the table renders blank cells because the columns don't match.
+  // This was the no-data root cause from the audit.
+  const rows = useMemo(
+    () => keepCompaniesSection(payHook.rows, payHook.headers) as Payment[],
+    [payHook.rows, payHook.headers],
   );
+
+  // All cohort PRs across the 4 quarters — used by the CreatePaymentDrawer
+  // to auto-fill company / fund / amount when the user types a pr_id.
+  const allPrs = useMemo<PR[]>(() => [
+    ...keepCompaniesSection(q1.rows, q1.headers) as PR[],
+    ...keepCompaniesSection(q2.rows, q2.headers) as PR[],
+    ...keepCompaniesSection(q3.rows, q3.headers) as PR[],
+    ...keepCompaniesSection(q4.rows, q4.headers) as PR[],
+  ], [q1.rows, q1.headers, q2.rows, q2.headers, q3.rows, q3.headers, q4.rows, q4.headers]);
+
+  // company_id → derived view (canonical name + AM + donor + budget cap).
+  type CompanyLookup = {
+    companyId: string;
+    name: string;
+    amName: string;
+    donor: string;
+    budgetCap: number;
+  };
+  const companyLookup = useMemo(() => {
+    const m = new Map<string, CompanyLookup>();
+    for (const c of masterHook.rows) {
+      if (!c.company_id) continue;
+      const entry = cohortEntryFor(c.company_name || '');
+      const am = (c.profile_manager_email || entry?.am || '').toLowerCase();
+      const amName = ACCOUNT_MANAGERS.find(a => a.email.toLowerCase() === am)?.name
+        || (am ? displayName(am) : '');
+      m.set(c.company_id, {
+        companyId: c.company_id,
+        name: entry?.canonical || c.company_name || c.company_id,
+        amName,
+        donor: entry?.donor || c.fund_code || '',
+        budgetCap: entry?.budgetUsd || 0,
+      });
+    }
+    return m;
+  }, [masterHook.rows]);
 
   const [query, setQuery] = useState('');
   const [view, setView] = useState<'output' | 'source'>('output');
@@ -40,9 +101,60 @@ export function PaymentsPage() {
     );
   }, [rows, query]);
 
+  // ── Donor burn (Dutch / SIDA) ─────────────────────────────────
+  // Same shape as the procurement summary: paid (settled Payments) vs
+  // planned (sum of cohort PR.total_cost_usd) vs the 2026 cap.
+  const donorBurn = useMemo(() => {
+    const dutch = { paid: 0, planned: 0 };
+    const sida  = { paid: 0, planned: 0 };
+    const isCohortRow = (companyId: string | undefined): boolean => {
+      const lk = companyLookup.get(companyId || '');
+      if (!lk) return false;
+      return canonicalCohortName(lk.name) !== null;
+    };
+    for (const p of rows) {
+      if (!isCohortRow(p.company_id)) continue;
+      if ((p.status || '').toLowerCase() !== 'paid') continue;
+      const v = parseFloat(String(p.amount_usd || '').replace(/[^0-9.\-]/g, ''));
+      if (!Number.isFinite(v)) continue;
+      const d = fundDonor(p.fund_code);
+      if (d === 'Dutch') dutch.paid += v;
+      else if (d === 'SIDA') sida.paid += v;
+    }
+    for (const pr of allPrs) {
+      if (!isCohortRow(pr.company_id)) continue;
+      const v = parseFloat(String(pr.total_cost_usd || '').replace(/[^0-9.\-]/g, ''));
+      if (!Number.isFinite(v)) continue;
+      const d = fundDonor(pr.fund_code);
+      if (d === 'Dutch') dutch.planned += v;
+      else if (d === 'SIDA') sida.planned += v;
+    }
+    return {
+      Dutch: { ...dutch, cap: COHORT3_BUDGET_TOTAL_USD.dutch },
+      SIDA:  { ...sida,  cap: COHORT3_BUDGET_TOTAL_USD.sida },
+    };
+  }, [rows, allPrs, companyLookup]);
+
   const columns: Column<Payment>[] = [
     { key: 'payee_name', header: 'Payee' },
     { key: 'payee_type', header: 'Type', width: '110px' },
+    {
+      key: 'company',
+      header: 'Company / AM',
+      width: '210px',
+      render: r => {
+        const lk = companyLookup.get(r.company_id);
+        if (!lk) return <span className="text-2xs text-slate-400">{r.company_id || '—'}</span>;
+        return (
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-navy-500 dark:text-white">{lk.name}</div>
+            <div className="text-2xs text-slate-500">
+              {lk.amName || '—'}{lk.donor ? ` · ${lk.donor}` : ''}
+            </div>
+          </div>
+        );
+      },
+    },
     { key: 'amount_usd', header: 'Amount USD', width: '120px' },
     { key: 'fund_code', header: 'Fund', width: '90px' },
     { key: 'payment_date', header: 'Date', width: '110px' },
@@ -53,25 +165,14 @@ export function PaymentsPage() {
     },
   ];
 
-  if (!true) { // sheet always configured
-    return (
-      <Card>
-        <CardHeader title="Payments" />
-        <p className="text-sm text-slate-500">
-          Set <code className="rounded bg-slate-100 px-1">VITE_SHEET_PAYMENTS</code> in your environment.
-        </p>
-      </Card>
-    );
-  }
-
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       <PageHeader
         title="Payments"
-        badges={[{ label: `${rows.length} entries`, tone: 'teal' }]}
+        badges={[{ label: `${rows.length} cohort entries`, tone: 'teal' }]}
         actions={
           <>
-            <Button variant="ghost" onClick={refresh} title="Reload">
+            <Button variant="ghost" onClick={payHook.refresh} title="Reload">
               <RefreshCw className="h-4 w-4" />
             </Button>
             <Button
@@ -88,6 +189,38 @@ export function PaymentsPage() {
           </>
         }
       />
+
+      {/* Donor burn — paid vs planned vs cap, same numbers procurement shows. */}
+      <Card>
+        <CardHeader title="Donor burn" subtitle="Settled Payments vs planned PRs vs the 2026 cap, scoped to cohort 3." />
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+          {(['Dutch', 'SIDA'] as const).map(d => {
+            const b = donorBurn[d];
+            const fill = d === 'Dutch' ? 'bg-brand-orange' : 'bg-brand-teal';
+            const planPct = b.cap > 0 ? Math.min(150, Math.round((b.planned / b.cap) * 100)) : 0;
+            const paidPct = b.cap > 0 ? Math.min(100, Math.round((b.paid / b.cap) * 100)) : 0;
+            return (
+              <div key={d}>
+                <div className="flex items-baseline justify-between text-sm">
+                  <span className="font-bold text-navy-500 dark:text-white">{d}</span>
+                  <span className="text-xs text-slate-500">
+                    <span className="font-mono">{fmtUsd0(b.paid)}</span> / <span className="font-mono">{fmtUsd0(b.cap)}</span> <span className="ml-1 font-mono">({paidPct}%)</span>
+                  </span>
+                </div>
+                <div className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
+                  <div className="relative h-full">
+                    <div className={`absolute left-0 top-0 h-full ${fill} opacity-50`} style={{ width: `${Math.min(100, planPct)}%` }} />
+                    <div className={`absolute left-0 top-0 h-full ${fill}`} style={{ width: `${paidPct}%` }} />
+                  </div>
+                </div>
+                <div className="mt-0.5 text-2xs uppercase tracking-wider text-slate-500">
+                  <span className="font-mono">{fmtUsd0(b.planned)}</span> committed (PRs)
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
 
       <div className="flex gap-2 rounded-xl border border-slate-200 bg-white p-1 dark:border-navy-700 dark:bg-navy-600">
         <button
@@ -113,9 +246,9 @@ export function PaymentsPage() {
         </button>
       </div>
 
-      {error && view === 'output' && (
+      {payHook.error && view === 'output' && (
         <Card className="border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950">
-          <p className="text-sm text-red-700 dark:text-red-300">Failed to load: {error.message}</p>
+          <p className="text-sm text-red-700 dark:text-red-300">Failed to load: {payHook.error.message}</p>
         </Card>
       )}
 
@@ -132,7 +265,7 @@ export function PaymentsPage() {
               className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-600 dark:text-white"
             />
           </div>
-          <DataTable columns={columns} rows={filtered} loading={loading} onRowClick={r => setSelected(r)} />
+          <DataTable columns={columns} rows={filtered} loading={payHook.loading} onRowClick={r => setSelected(r)} />
         </>
       )}
 
@@ -142,7 +275,7 @@ export function PaymentsPage() {
         onClose={() => setSelected(null)}
         onSave={async updates => {
           if (!selected) return;
-          await updateRow(selected.payment_id, updates);
+          await payHook.updateRow(selected.payment_id, updates);
           setSelected(null);
         }}
       />
@@ -150,8 +283,9 @@ export function PaymentsPage() {
       <CreatePaymentDrawer
         open={creating}
         onClose={() => setCreating(false)}
+        prs={allPrs}
         onCreate={async row => {
-          await createRow(row);
+          await payHook.createRow(row);
           setCreating(false);
         }}
       />
@@ -169,7 +303,7 @@ function PaymentDrawer({
 }) {
   const [draft, setDraft] = useState<Payment | null>(payment);
   const [saving, setSaving] = useState(false);
-  useMemo(() => setDraft(payment), [payment]);
+  useEffect(() => { setDraft(payment); }, [payment]);
 
   if (!payment || !draft) return <Drawer open={false} onClose={onClose} title="" children={null} />;
 
@@ -277,16 +411,49 @@ function PaymentDrawer({
 }
 
 function CreatePaymentDrawer({
-  open, onClose, onCreate,
+  open, onClose, onCreate, prs,
 }: {
   open: boolean;
   onClose: () => void;
   onCreate: (row: Partial<Payment>) => Promise<void>;
+  /** All cohort PRs across the 4 quarters, used to auto-fill on pr_id. */
+  prs: PR[];
 }) {
   const [draft, setDraft] = useState<Partial<Payment>>({
     status: 'Pending Approval', currency: 'USD', finance_contact: 'Khamis Eweis',
   });
   const [saving, setSaving] = useState(false);
+  // Whether the latest pr_id input matched a cohort PR — affects the
+  // green/amber hint shown under the field.
+  const [lastMatchedPr, setLastMatchedPr] = useState<PR | null>(null);
+
+  // PR ID → PR map for fast O(1) lookup as the user types.
+  const prById = useMemo(() => {
+    const m = new Map<string, PR>();
+    for (const p of prs) if (p.pr_id) m.set(p.pr_id.trim(), p);
+    return m;
+  }, [prs]);
+
+  const onPrIdChange = (next: string) => {
+    const trimmed = next.trim();
+    const found = trimmed ? prById.get(trimmed) : undefined;
+    setLastMatchedPr(found ?? null);
+    if (found) {
+      // Pull the company / fund / intervention / amount across into
+      // the draft, but only fill fields the user hasn't already
+      // overridden so we don't clobber edits in flight.
+      setDraft(prev => ({
+        ...prev,
+        pr_id: trimmed,
+        company_id: prev.company_id || found.company_id || '',
+        intervention_type: prev.intervention_type || found.intervention_type || '',
+        fund_code: prev.fund_code || found.fund_code || '',
+        amount_usd: prev.amount_usd || found.total_cost_usd || '',
+      }));
+    } else {
+      setDraft(prev => ({ ...prev, pr_id: trimmed }));
+    }
+  };
 
   const canCreate = !!(draft.payment_id && draft.payee_name && draft.amount_usd);
 
@@ -304,6 +471,7 @@ function CreatePaymentDrawer({
             try {
               await onCreate(draft);
               setDraft({ status: 'Pending Approval', currency: 'USD', finance_contact: 'Khamis Eweis' });
+              setLastMatchedPr(null);
             } finally { setSaving(false); }
           }} disabled={saving || !canCreate}>
             {saving ? 'Creating…' : 'Create'}
@@ -315,6 +483,17 @@ function CreatePaymentDrawer({
         <Field label="Payment ID" required>
           <input className={inputClass} value={draft.payment_id || ''}
             onChange={e => setDraft({ ...draft, payment_id: e.target.value })} placeholder="PAY-E3-0001" />
+        </Field>
+        <Field label="PR ID (optional — auto-fills company / fund / amount when matched)">
+          <input className={inputClass} value={draft.pr_id || ''}
+            onChange={e => onPrIdChange(e.target.value)} placeholder="PR-E3-001" />
+          {(draft.pr_id || '').trim().length > 0 && (
+            <p className={`mt-1 text-2xs ${lastMatchedPr ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-500'}`}>
+              {lastMatchedPr
+                ? `Matched: ${lastMatchedPr.activity || lastMatchedPr.item_description || lastMatchedPr.pr_id} · company ${lastMatchedPr.company_id || '—'}`
+                : 'No matching PR yet — fields stay editable.'}
+            </p>
+          )}
         </Field>
         <Field label="Payee Name" required>
           <input className={inputClass} value={draft.payee_name || ''}
@@ -331,6 +510,19 @@ function CreatePaymentDrawer({
           <Field label="Amount USD" required>
             <input className={inputClass} value={draft.amount_usd || ''}
               onChange={e => setDraft({ ...draft, amount_usd: e.target.value })} />
+          </Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Company ID">
+            <input className={inputClass} value={draft.company_id || ''}
+              onChange={e => setDraft({ ...draft, company_id: e.target.value })} />
+          </Field>
+          <Field label="Fund Code">
+            <select className={inputClass} value={draft.fund_code || ''}
+              onChange={e => setDraft({ ...draft, fund_code: e.target.value })}>
+              <option value="">—</option>
+              {FUND_CODES.map(f => <option key={f} value={f}>{f}</option>)}
+            </select>
           </Field>
         </div>
 
