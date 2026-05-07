@@ -13,7 +13,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Building2, MapPin, Users as UsersIcon, ClipboardList, MessageCircle,
+  Building2, MapPin, ClipboardList, MessageCircle,
   Search, RefreshCw, Filter as FilterIcon,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
@@ -265,14 +265,9 @@ export function CompaniesPage() {
 
 // ─── Sub-components ──────────────────────────────────────────────────
 
-// AM email → an accent color used as the card's left rail. Lets you scan
-// the grid and spot which AM owns which company at a glance.
-const AM_ACCENT: Record<string, string> = {
-  'ayesh@gazaskygeeks.com': 'from-brand-red/80 to-brand-red',
-  'doaa@gazaskygeeks.com':  'from-brand-teal/80 to-brand-teal',
-  'muna@gazaskygeeks.com':  'from-brand-orange/80 to-brand-orange',
-};
-const AM_ACCENT_BAR: Record<string, string> = {
+// AM email → small accent dot color. The visual signal is just a
+// 3-pixel left rail in the AM's color, not a full coloured band.
+const AM_RAIL: Record<string, string> = {
   'ayesh@gazaskygeeks.com': 'bg-brand-red',
   'doaa@gazaskygeeks.com':  'bg-brand-teal',
   'muna@gazaskygeeks.com':  'bg-brand-orange',
@@ -299,72 +294,55 @@ function CompanyCard({
     const p = pillarFor(a.intervention_type);
     if (p) pillarSet.add(p.code);
   }
-  const subSet = new Set<string>();
-  for (const a of assignments) {
-    const sub = (a.sub_intervention || '').trim();
-    if (sub) subSet.add(sub);
-  }
   const fundDisplay = fundLabel(fund);
   const fundTone: Tone = fund === 'Dutch' || fund === '97060' ? 'orange' : 'teal';
   const amEmail = (company.profile_manager_email || '').toLowerCase();
   const amName = amEmail ? displayName(amEmail).split(' ')[0] : 'Unassigned';
   const isWithdrawn = (company.status || '').toLowerCase() === 'withdrawn';
+  const railClass = AM_RAIL[amEmail] || 'bg-slate-300';
 
   return (
     <Link
       to={`/companies/${company.company_id}`}
-      className={`group relative block overflow-hidden rounded-2xl border bg-white shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-card dark:bg-navy-900 ${
+      className={`group relative flex overflow-hidden rounded-lg border bg-white text-sm transition-all hover:border-brand-teal/50 hover:shadow-sm dark:bg-navy-900 ${
         isWithdrawn
-          ? 'border-red-200 opacity-75 hover:opacity-100 dark:border-red-900'
-          : 'border-slate-200 hover:border-brand-teal/40 dark:border-navy-700 dark:hover:border-brand-teal/40'
+          ? 'border-red-200 opacity-70 hover:opacity-100 dark:border-red-900'
+          : 'border-slate-200 dark:border-navy-700'
       }`}
     >
-      {/* Top accent band — AM color + city */}
-      <div className={`relative bg-gradient-to-r p-4 pb-3 text-white ${
-        amEmail && AM_ACCENT[amEmail] ? AM_ACCENT[amEmail] : 'from-slate-500 to-slate-600'
-      }`}>
-        {/* status pill in top-right of accent band */}
-        <Badge
-          tone={statusTone(company.status || 'Active') as Tone}
-          className="absolute right-3 top-3"
-        >
-          {company.status || 'Active'}
-        </Badge>
+      {/* AM color rail — slim left edge, no overhead */}
+      <div className={`w-1 flex-shrink-0 ${railClass}`} />
 
-        <h3 className="pr-20 text-lg font-extrabold leading-tight text-white">
-          {company.company_name || company.company_id}
-        </h3>
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-2xs font-semibold uppercase tracking-wider text-white/85">
-          {company.city && (
-            <span className="inline-flex items-center gap-0.5">
-              <MapPin className="h-3 w-3" /> {company.city}
-            </span>
-          )}
-          {company.sector && (
-            <span className="inline-flex items-center gap-0.5">
-              <span className="opacity-50">·</span> {company.sector}
-            </span>
-          )}
+      <div className="min-w-0 flex-1 p-3">
+        {/* Title row */}
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <h3 className="truncate text-sm font-bold text-navy-500 group-hover:text-brand-teal dark:text-white">
+              {company.company_name || company.company_id}
+            </h3>
+            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-2xs text-slate-500">
+              {company.city && (
+                <span className="inline-flex items-center gap-0.5">
+                  <MapPin className="h-2.5 w-2.5" /> {company.city}
+                </span>
+              )}
+              {company.sector && <span>· {company.sector}</span>}
+              <span>· {amName}</span>
+            </div>
+          </div>
+          <Badge tone={statusTone(company.status || 'Active') as Tone}>
+            {company.status || 'Active'}
+          </Badge>
         </div>
-        <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-white/20 px-2 py-0.5 text-2xs font-bold uppercase tracking-wider text-white backdrop-blur-sm">
-          <UsersIcon className="h-3 w-3" />
-          {amName}
-        </div>
-      </div>
 
-      {/* Body — pillars + interventions + stats */}
-      <div className="p-4 pt-3">
+        {/* Pillars — small chips inline */}
         {pillarSet.size > 0 && (
-          <div className="mb-3 flex flex-wrap gap-1">
+          <div className="mt-2 flex flex-wrap gap-1">
             {Array.from(pillarSet).map(code => {
               const p = CORE_PILLARS.find(x => x.code === code);
               if (!p) return null;
-              const colorClass =
-                p.code === 'CB' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                : p.code === 'MA' ? 'bg-navy-100 text-navy-700 dark:bg-navy-700 dark:text-slate-200'
-                : 'bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-200';
               return (
-                <span key={p.code} className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-2xs font-bold uppercase tracking-wider ${colorClass}`}>
+                <span key={p.code} className="rounded bg-slate-100 px-1.5 py-0.5 text-2xs font-semibold text-slate-700 dark:bg-navy-700 dark:text-slate-300">
                   {p.shortLabel}
                 </span>
               );
@@ -372,47 +350,30 @@ function CompanyCard({
           </div>
         )}
 
-        {subSet.size > 0 && (
-          <div className="mb-3 text-2xs leading-relaxed text-slate-600 dark:text-slate-400">
-            {Array.from(subSet).join(' · ')}
+        {/* Compact stats row */}
+        <div className="mt-2 flex items-center justify-between text-2xs text-slate-500">
+          <div className="flex items-center gap-3">
+            <span title="Interventions">
+              <ClipboardList className="mr-0.5 inline h-3 w-3" />
+              {assignments.length}
+            </span>
+            <span title="Comments">
+              <MessageCircle className="mr-0.5 inline h-3 w-3" />
+              {commentCount}
+            </span>
+            {totalBudget > 0 && (
+              <span title="Budget">{fmtUsd(totalBudget)}</span>
+            )}
+            {fundDisplay && <Badge tone={fundTone}>{fundDisplay}</Badge>}
           </div>
-        )}
-
-        <dl className="grid grid-cols-3 gap-1.5 text-center">
-          <Stat icon={<ClipboardList className="h-3 w-3" />} label="Interv" value={String(assignments.length)} accentColor={AM_ACCENT_BAR[amEmail]} />
-          <Stat icon={<MessageCircle className="h-3 w-3" />} label="Notes" value={String(commentCount)} />
-          <Stat icon={<UsersIcon className="h-3 w-3" />} label="Budget" value={fmtUsd(totalBudget).replace('$', '$')} />
-        </dl>
-      </div>
-
-      {/* Footer — fund + last activity */}
-      <div className="flex items-center justify-between gap-2 border-t border-slate-100 bg-slate-50 px-4 py-2 text-2xs dark:border-navy-700 dark:bg-navy-700/40">
-        <div className="flex items-center gap-2">
-          {fundDisplay
-            ? <Badge tone={fundTone}>{fundDisplay}</Badge>
-            : <span className="text-slate-400">no donor</span>}
+          {lastActivity && (
+            <span className="truncate text-slate-400" title={`${lastActivity.action} · ${lastActivity.user_email}`}>
+              {timeAgo(lastActivity.timestamp || '')}
+            </span>
+          )}
         </div>
-        {lastActivity ? (
-          <span className="truncate text-slate-500" title={`${lastActivity.action} · ${lastActivity.user_email}`}>
-            {timeAgo(lastActivity.timestamp || '')} · {lastActivity.action.replace(/_/g, ' ')}
-          </span>
-        ) : (
-          <span className="text-slate-400">no activity yet</span>
-        )}
       </div>
     </Link>
-  );
-}
-
-function Stat({ icon, label, value, accentColor }: { icon: React.ReactNode; label: string; value: string; accentColor?: string }) {
-  return (
-    <div className="overflow-hidden rounded-md border border-slate-200 dark:border-navy-700">
-      {accentColor && <div className={`h-0.5 ${accentColor}`} />}
-      <div className="px-2 py-1.5">
-        <div className="flex items-center justify-center gap-1 text-2xs uppercase tracking-wider text-slate-500">{icon} {label}</div>
-        <div className="mt-0.5 truncate text-sm font-bold text-navy-500 dark:text-white">{value}</div>
-      </div>
-    </div>
   );
 }
 
