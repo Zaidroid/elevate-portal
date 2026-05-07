@@ -18,6 +18,7 @@ import type { ModuleKey } from '../../config/sheets';
 import { ensureHumanFriendlyTab } from '../../lib/sheets/output-formatting';
 import { AutoMergeCohortCard } from './AutoMergeCohortCard';
 import { RebuildDashboardsCard } from './RebuildDashboardsCard';
+import { BackfillCohortFieldsCard } from './BackfillCohortFieldsCard';
 
 type LookupCategory = {
   module: ModuleKey;
@@ -193,6 +194,7 @@ export function LookupsPage() {
         </Card>
       )}
 
+      <BackfillCohortFieldsCard />
       <RebuildDashboardsCard />
       <AutoMergeCohortCard />
       <ReformatOutputTabsCard />

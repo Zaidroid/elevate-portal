@@ -265,6 +265,19 @@ export function CompaniesPage() {
 
 // ─── Sub-components ──────────────────────────────────────────────────
 
+// AM email → an accent color used as the card's left rail. Lets you scan
+// the grid and spot which AM owns which company at a glance.
+const AM_ACCENT: Record<string, string> = {
+  'ayesh@gazaskygeeks.com': 'from-brand-red/80 to-brand-red',
+  'doaa@gazaskygeeks.com':  'from-brand-teal/80 to-brand-teal',
+  'muna@gazaskygeeks.com':  'from-brand-orange/80 to-brand-orange',
+};
+const AM_ACCENT_BAR: Record<string, string> = {
+  'ayesh@gazaskygeeks.com': 'bg-brand-red',
+  'doaa@gazaskygeeks.com':  'bg-brand-teal',
+  'muna@gazaskygeeks.com':  'bg-brand-orange',
+};
+
 function CompanyCard({
   company,
   assignments,
@@ -284,71 +297,121 @@ function CompanyCard({
   const pillarSet = new Set<string>();
   for (const a of assignments) {
     const p = pillarFor(a.intervention_type);
-    if (p) pillarSet.add(p.shortLabel);
+    if (p) pillarSet.add(p.code);
+  }
+  const subSet = new Set<string>();
+  for (const a of assignments) {
+    const sub = (a.sub_intervention || '').trim();
+    if (sub) subSet.add(sub);
   }
   const fundDisplay = fundLabel(fund);
   const fundTone: Tone = fund === 'Dutch' || fund === '97060' ? 'orange' : 'teal';
+  const amEmail = (company.profile_manager_email || '').toLowerCase();
+  const amName = amEmail ? displayName(amEmail).split(' ')[0] : 'Unassigned';
+  const isWithdrawn = (company.status || '').toLowerCase() === 'withdrawn';
 
   return (
     <Link
       to={`/companies/${company.company_id}`}
-      className="group block rounded-2xl border border-slate-200 bg-white p-4 transition hover:border-brand-teal/50 hover:shadow-card dark:border-navy-700 dark:bg-navy-900 dark:hover:border-brand-teal/40"
+      className={`group relative block overflow-hidden rounded-2xl border bg-white shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-card dark:bg-navy-900 ${
+        isWithdrawn
+          ? 'border-red-200 opacity-75 hover:opacity-100 dark:border-red-900'
+          : 'border-slate-200 hover:border-brand-teal/40 dark:border-navy-700 dark:hover:border-brand-teal/40'
+      }`}
     >
-      <header className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <h3 className="truncate text-base font-bold text-navy-500 group-hover:text-brand-teal dark:text-white">
-            {company.company_name || company.company_id}
-          </h3>
-          <div className="mt-0.5 flex flex-wrap items-center gap-2 text-2xs uppercase tracking-wider text-slate-500">
-            {company.city && (
-              <span className="inline-flex items-center gap-0.5">
-                <MapPin className="h-3 w-3" /> {company.city}
-              </span>
-            )}
-            {company.sector && <span>· {company.sector}</span>}
-          </div>
-        </div>
-        <Badge tone={statusTone(company.status || 'Active') as Tone}>
+      {/* Top accent band — AM color + city */}
+      <div className={`relative bg-gradient-to-r p-4 pb-3 text-white ${
+        amEmail && AM_ACCENT[amEmail] ? AM_ACCENT[amEmail] : 'from-slate-500 to-slate-600'
+      }`}>
+        {/* status pill in top-right of accent band */}
+        <Badge
+          tone={statusTone(company.status || 'Active') as Tone}
+          className="absolute right-3 top-3"
+        >
           {company.status || 'Active'}
         </Badge>
-      </header>
 
-      {pillarSet.size > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1">
-          {Array.from(pillarSet).map(p => (
-            <span key={p} className="rounded bg-slate-100 px-1.5 py-0.5 text-2xs font-bold uppercase tracking-wider text-slate-600 dark:bg-navy-700 dark:text-slate-300">
-              {p}
+        <h3 className="pr-20 text-lg font-extrabold leading-tight text-white">
+          {company.company_name || company.company_id}
+        </h3>
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-2xs font-semibold uppercase tracking-wider text-white/85">
+          {company.city && (
+            <span className="inline-flex items-center gap-0.5">
+              <MapPin className="h-3 w-3" /> {company.city}
             </span>
-          ))}
+          )}
+          {company.sector && (
+            <span className="inline-flex items-center gap-0.5">
+              <span className="opacity-50">·</span> {company.sector}
+            </span>
+          )}
         </div>
-      )}
-
-      <dl className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
-        <Stat icon={<ClipboardList className="h-3 w-3" />} label="Interv" value={String(assignments.length)} />
-        <Stat icon={<UsersIcon className="h-3 w-3" />} label="AM" value={company.profile_manager_email ? displayName(company.profile_manager_email).split(' ')[0] : '—'} />
-        <Stat icon={<MessageCircle className="h-3 w-3" />} label="Notes" value={String(commentCount)} />
-      </dl>
-
-      <footer className="mt-3 flex items-center justify-between gap-2 border-t border-slate-100 pt-2 text-2xs text-slate-500 dark:border-navy-700">
-        <div className="flex items-center gap-2">
-          {fundDisplay && <Badge tone={fundTone}>{fundDisplay}</Badge>}
-          <span>{fmtUsd(totalBudget)}</span>
+        <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-white/20 px-2 py-0.5 text-2xs font-bold uppercase tracking-wider text-white backdrop-blur-sm">
+          <UsersIcon className="h-3 w-3" />
+          {amName}
         </div>
-        {lastActivity && (
-          <span className="truncate" title={`${lastActivity.action} · ${lastActivity.user_email}`}>
-            {timeAgo(lastActivity.timestamp || '')} · {lastActivity.action}
-          </span>
+      </div>
+
+      {/* Body — pillars + interventions + stats */}
+      <div className="p-4 pt-3">
+        {pillarSet.size > 0 && (
+          <div className="mb-3 flex flex-wrap gap-1">
+            {Array.from(pillarSet).map(code => {
+              const p = CORE_PILLARS.find(x => x.code === code);
+              if (!p) return null;
+              const colorClass =
+                p.code === 'CB' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                : p.code === 'MA' ? 'bg-navy-100 text-navy-700 dark:bg-navy-700 dark:text-slate-200'
+                : 'bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-200';
+              return (
+                <span key={p.code} className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-2xs font-bold uppercase tracking-wider ${colorClass}`}>
+                  {p.shortLabel}
+                </span>
+              );
+            })}
+          </div>
         )}
-      </footer>
+
+        {subSet.size > 0 && (
+          <div className="mb-3 text-2xs leading-relaxed text-slate-600 dark:text-slate-400">
+            {Array.from(subSet).join(' · ')}
+          </div>
+        )}
+
+        <dl className="grid grid-cols-3 gap-1.5 text-center">
+          <Stat icon={<ClipboardList className="h-3 w-3" />} label="Interv" value={String(assignments.length)} accentColor={AM_ACCENT_BAR[amEmail]} />
+          <Stat icon={<MessageCircle className="h-3 w-3" />} label="Notes" value={String(commentCount)} />
+          <Stat icon={<UsersIcon className="h-3 w-3" />} label="Budget" value={fmtUsd(totalBudget).replace('$', '$')} />
+        </dl>
+      </div>
+
+      {/* Footer — fund + last activity */}
+      <div className="flex items-center justify-between gap-2 border-t border-slate-100 bg-slate-50 px-4 py-2 text-2xs dark:border-navy-700 dark:bg-navy-700/40">
+        <div className="flex items-center gap-2">
+          {fundDisplay
+            ? <Badge tone={fundTone}>{fundDisplay}</Badge>
+            : <span className="text-slate-400">no donor</span>}
+        </div>
+        {lastActivity ? (
+          <span className="truncate text-slate-500" title={`${lastActivity.action} · ${lastActivity.user_email}`}>
+            {timeAgo(lastActivity.timestamp || '')} · {lastActivity.action.replace(/_/g, ' ')}
+          </span>
+        ) : (
+          <span className="text-slate-400">no activity yet</span>
+        )}
+      </div>
     </Link>
   );
 }
 
-function Stat({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+function Stat({ icon, label, value, accentColor }: { icon: React.ReactNode; label: string; value: string; accentColor?: string }) {
   return (
-    <div className="rounded-md bg-slate-50 px-2 py-1.5 dark:bg-navy-700/40">
-      <div className="flex items-center justify-center gap-1 text-2xs text-slate-500">{icon} {label}</div>
-      <div className="mt-0.5 truncate font-bold text-navy-500 dark:text-white">{value}</div>
+    <div className="overflow-hidden rounded-md border border-slate-200 dark:border-navy-700">
+      {accentColor && <div className={`h-0.5 ${accentColor}`} />}
+      <div className="px-2 py-1.5">
+        <div className="flex items-center justify-center gap-1 text-2xs uppercase tracking-wider text-slate-500">{icon} {label}</div>
+        <div className="mt-0.5 truncate text-sm font-bold text-navy-500 dark:text-white">{value}</div>
+      </div>
     </div>
   );
 }

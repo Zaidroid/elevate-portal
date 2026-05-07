@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { AlertTriangle, Award, Download, TrendingUp, Users, ClipboardList, Wallet, Plane, GraduationCap } from 'lucide-react';
 import { useModuleData } from '../../data/useModuleData';
 import { Card, CardHeader, Button, Badge, downloadCsv, timestampedFilename } from '../../lib/ui';
-import { INTERVENTION_TYPES, CORE_PILLARS, pillarFor } from '../../config/interventions';
+import { CORE_PILLARS, pillarFor } from '../../config/interventions';
 import type { Advisor, FollowUp } from '../../types/advisor';
 import { computeStage1, computeStage2 } from '../../lib/advisor-scoring';
 import type { Tone } from '../../lib/ui';
@@ -109,20 +109,53 @@ export function ReportsPage() {
       procurementByStatus[st] = (procurementByStatus[st] || 0) + 1;
     }
 
-    // Intervention coverage matrix: company x intervention_type (boolean assigned).
-    const coverage: Record<string, Set<string>> = {}; // intervention_type -> set of company_ids
+    // Intervention coverage — split into pillar rollup AND sub-intervention
+    // detail, instead of mixing both in one table (the old version listed
+    // pillars + their subs together, which produced confusing "duplicates"
+    // like MKG and Marketing Agency next to each other; subs were always
+    // 0 because the assignment rows store pillar codes in
+    // intervention_type and sub names in sub_intervention).
+    const pillarCoverage: Record<string, Set<string>> = {};
     for (const a of assignments) {
-      const t = a.intervention_type || 'Unknown';
-      if (!coverage[t]) coverage[t] = new Set();
-      if (a.company_id) coverage[t].add(a.company_id);
+      const code = pillarFor(a.intervention_type || '')?.code;
+      if (!code) continue;
+      if (!pillarCoverage[code]) pillarCoverage[code] = new Set();
+      if (a.company_id) pillarCoverage[code].add(a.company_id);
     }
-    const coverageRows = INTERVENTION_TYPES.map(t => ({
-      intervention: t,
-      companies: coverage[t]?.size || 0,
-      planned: assignments.filter(a => a.intervention_type === t && a.status === 'Planned').length,
-      in_progress: assignments.filter(a => a.intervention_type === t && a.status === 'In Progress').length,
-      completed: assignments.filter(a => a.intervention_type === t && a.status === 'Completed').length,
+    const pillarCoverageRows = CORE_PILLARS.map(p => ({
+      intervention: p.label,
+      companies: pillarCoverage[p.code]?.size || 0,
+      planned:     assignments.filter(a => pillarFor(a.intervention_type || '')?.code === p.code && a.status === 'Planned').length,
+      in_progress: assignments.filter(a => pillarFor(a.intervention_type || '')?.code === p.code && a.status === 'In Progress').length,
+      completed:   assignments.filter(a => pillarFor(a.intervention_type || '')?.code === p.code && a.status === 'Completed').length,
     }));
+
+    const subCoverage: Record<string, Set<string>> = {};
+    const subCounts: Record<string, { planned: number; in_progress: number; completed: number }> = {};
+    const allSubs: string[] = CORE_PILLARS.flatMap(p => p.subInterventions);
+    for (const sub of allSubs) {
+      subCoverage[sub] = new Set();
+      subCounts[sub] = { planned: 0, in_progress: 0, completed: 0 };
+    }
+    for (const a of assignments) {
+      const sub = (a.sub_intervention || '').trim();
+      if (!sub || !(sub in subCoverage)) continue;
+      if (a.company_id) subCoverage[sub].add(a.company_id);
+      if (a.status === 'Planned')      subCounts[sub].planned += 1;
+      if (a.status === 'In Progress')  subCounts[sub].in_progress += 1;
+      if (a.status === 'Completed')    subCounts[sub].completed += 1;
+    }
+    const subCoverageRows = allSubs.map(sub => {
+      const parent = CORE_PILLARS.find(p => p.subInterventions.includes(sub));
+      return {
+        intervention: parent ? `${parent.shortLabel} · ${sub}` : sub,
+        companies: subCoverage[sub]?.size || 0,
+        planned: subCounts[sub].planned,
+        in_progress: subCounts[sub].in_progress,
+        completed: subCounts[sub].completed,
+      };
+    });
+    const coverageRows = pillarCoverageRows; // back-compat for the donor export
 
     // Fund burn: planned (PR total) vs spent (Paid payments).
     const burn: Record<string, { planned: number; spent: number }> = {};
@@ -211,6 +244,8 @@ export function ReportsPage() {
       procurementByStatus,
       procurementTotalUSD,
       coverageRows,
+      pillarCoverageRows,
+      subCoverageRows,
       burn,
       confsByDecision,
       deadlinesThisWeek,
@@ -353,11 +388,20 @@ export function ReportsPage() {
 
         <Card>
           <CardHeader
-            title="Intervention coverage"
-            subtitle="How many companies and how far each intervention has progressed"
-            action={<ExportButton filename="report_intervention_coverage" rows={stats.coverageRows} />}
+            title="Intervention coverage · by pillar"
+            subtitle="Companies and progress per top-level pillar (Market Access · Capacity Building · Marketing & Branding)."
+            action={<ExportButton filename="report_intervention_coverage_pillars" rows={stats.pillarCoverageRows} />}
           />
-          <CoverageTable rows={stats.coverageRows} />
+          <CoverageTable rows={stats.pillarCoverageRows} />
+        </Card>
+
+        <Card>
+          <CardHeader
+            title="Intervention coverage · by sub-intervention"
+            subtitle="Drill-down: the sub-intervention each pillar resolves into (Train To Hire, C-Suite, Marketing Agency, etc.)."
+            action={<ExportButton filename="report_intervention_coverage_subs" rows={stats.subCoverageRows} />}
+          />
+          <CoverageTable rows={stats.subCoverageRows} />
         </Card>
 
         <Card>
