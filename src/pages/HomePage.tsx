@@ -29,6 +29,7 @@ import type { Tone } from '../lib/ui';
 import { useModuleData } from '../data/useModuleData';
 import type { Company, Assignment, PR, Payment, Agreement } from '../data/types';
 import { ACCOUNT_MANAGERS, displayName } from '../config/team';
+import { PersonalGreeting } from '../lib/greeting';
 import { canonicalCohortName, COHORT3_ALIASES } from '../config/cohort3Aliases';
 import { COHORT3_BUDGET_TOTAL_USD, pillarFor } from '../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from './companies/interviewedSource';
@@ -269,7 +270,7 @@ export function HomePage() {
   const daysIn = Math.floor((Date.now() - COHORT_START.getTime()) / (1000 * 60 * 60 * 24));
   const totalDays = COHORT_LENGTH_WEEKS * 7;
   const daysRemaining = Math.max(0, totalDays - daysIn);
-  const greeting = user?.email ? `Welcome, ${displayName(user.email).split(' ')[0]}` : 'Home';
+  // Personal greeting renders inline JSX (English line + Arabic nickname span).
 
   const maxLoad = Math.max(1, ...amRollup.map(a => a.companies));
   const maxPillar = Math.max(1, ...Object.values(pillarSpread));
@@ -283,7 +284,9 @@ export function HomePage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="text-2xs font-bold uppercase tracking-[0.15em] text-brand-red">Cohort 3 · {PHASE_LABEL[phase]}</div>
-            <h1 className="mt-1 text-2xl font-extrabold text-navy-500 dark:text-white">{greeting}</h1>
+            <h1 className="mt-1 text-2xl font-extrabold text-navy-500 dark:text-white">
+              <PersonalGreeting email={user?.email} fallback="Home" />
+            </h1>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
               Week {week} of {COHORT_LENGTH_WEEKS} · {daysRemaining} days remaining · started {COHORT_START.toISOString().slice(0, 10)}
             </p>

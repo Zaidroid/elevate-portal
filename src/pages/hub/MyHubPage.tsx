@@ -15,7 +15,7 @@ import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
 import { useScopedView } from '../../data/useScopedView';
 import type { Company, Assignment, PR, Payment, Agreement } from '../../data/types';
-import { displayName } from '../../config/team';
+import { PersonalGreeting } from '../../lib/greeting';
 import { pillarFor } from '../../config/interventions';
 import { canonicalCohortName, COHORT3_ALIASES } from '../../config/cohort3Aliases';
 import { computeAlerts, type Alert } from '../../lib/alerts/index';
@@ -188,7 +188,7 @@ export function MyHubPage() {
 
   // ─── render ────────────────────────────────────────────────────────
 
-  const greeting = user?.email ? `Welcome, ${displayName(user.email).split(' ')[0]}` : 'My hub';
+  const greeting = <PersonalGreeting email={user?.email} fallback="My hub" />;
   const cohortSize = COHORT3_ALIASES.length;
 
   const refreshAll = () => {

@@ -31,6 +31,7 @@ import type { ReactNode } from 'react';
 import { useAuth } from '../services/auth';
 import { getTier, isAdmin } from '../config/team';
 import { sessionEvents } from '../lib/sheets/client';
+import { PersonalGreeting } from '../lib/greeting';
 
 type NavItem = {
   to: string;
@@ -343,6 +344,11 @@ export function AppShell({
       <div className="border-t border-slate-200 px-3 py-3 dark:border-navy-700">
         {!collapsed ? (
           <>
+            {user?.email && (
+              <div className="mb-2 px-1 text-[12px] font-semibold leading-snug text-slate-500 dark:text-slate-400">
+                <PersonalGreeting email={user.email} />
+              </div>
+            )}
             <div className="mb-3 flex items-center gap-2.5 px-1">
               {user?.picture ? (
                 <img

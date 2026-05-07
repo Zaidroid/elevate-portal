@@ -9,16 +9,21 @@
 import type { TeamMember, Tier } from '../types';
 import { fetchRange } from '../lib/sheets/client';
 
+// TODO: Zaid to confirm Arabic nicknames per team member.
+// First pass uses respectful short forms based on first names / known
+// colloquial nicknames. Each team member sees their nickname inside the
+// English greeting (e.g. "Good morning, زيد.") in the TopBar and on
+// HomePage / MyHubPage. Falls back to English first name when missing.
 export const AUTHORIZED_USERS: TeamMember[] = [
-  { email: 'zaid@gazaskygeeks.com', name: 'Zaid Salem', role: 'admin', tier: 'leadership', active: true, title: 'Market Access Officer' },
-  { email: 'israa@gazaskygeeks.com', name: 'Israa Hamoudeh', role: 'admin', tier: 'leadership', active: true, title: 'Team Lead' },
-  { email: 'raouf@gazaskygeeks.com', name: 'Raouf Said', role: 'admin', tier: 'leadership', active: true, title: 'Co-working Spaces Lead' },
+  { email: 'zaid@gazaskygeeks.com', name: 'Zaid Salem', role: 'admin', tier: 'leadership', active: true, title: 'Market Access Officer', nicknameAr: 'زيد' },
+  { email: 'israa@gazaskygeeks.com', name: 'Israa Hamoudeh', role: 'admin', tier: 'leadership', active: true, title: 'Team Lead', nicknameAr: 'إسراء' },
+  { email: 'raouf@gazaskygeeks.com', name: 'Raouf Said', role: 'admin', tier: 'leadership', active: true, title: 'Co-working Spaces Lead', nicknameAr: 'رؤوف' },
 
-  { email: 'ayesh@gazaskygeeks.com', name: 'Mohammed Ayesh', role: 'user', tier: 'profile_manager', active: true, title: 'Profile Manager' },
-  { email: 'doaa@gazaskygeeks.com', name: 'Doaa Younis', role: 'user', tier: 'profile_manager', active: true, title: 'Profile Manager' },
+  { email: 'ayesh@gazaskygeeks.com', name: 'Mohammed Ayesh', role: 'user', tier: 'profile_manager', active: true, title: 'Profile Manager', nicknameAr: 'عايش' },
+  { email: 'doaa@gazaskygeeks.com', name: 'Doaa Younis', role: 'user', tier: 'profile_manager', active: true, title: 'Profile Manager', nicknameAr: 'دعاء' },
 
-  { email: 'muna@gazaskygeeks.com', name: 'Muna Mahroum', role: 'user', tier: 'member', active: true, title: 'Pre-TTH' },
-  { email: 'mzourob@gazaskygeeks.com', name: 'Mohammed Zourob', role: 'user', tier: 'member', active: true, title: 'ElevateBridge Filtration' },
+  { email: 'muna@gazaskygeeks.com', name: 'Muna Mahroum', role: 'user', tier: 'member', active: true, title: 'Pre-TTH', nicknameAr: 'منى' },
+  { email: 'mzourob@gazaskygeeks.com', name: 'Mohammed Zourob', role: 'user', tier: 'member', active: true, title: 'ElevateBridge Filtration', nicknameAr: 'زعرب' },
 ];
 
 // Account Managers — the three team members who own a finalized
@@ -74,6 +79,15 @@ function parseRoster(rows: string[][]): TeamMember[] {
   const colActive = idx('active');
   const colTitle = idx('title');
   const colTier = idx('tier'); // optional
+  // Personal Arabic nickname column. Accepted spellings: nickname_ar,
+  // nickname ar, arabic_nickname, nickname (ar). All optional.
+  const colNicknameAr = (() => {
+    for (const candidate of ['nickname_ar', 'nickname ar', 'arabic_nickname', 'nickname (ar)']) {
+      const i = headers.indexOf(candidate);
+      if (i >= 0) return i;
+    }
+    return -1;
+  })();
   if (colEmail < 0 || colName < 0) return [];
 
   const out: TeamMember[] = [];
@@ -91,6 +105,7 @@ function parseRoster(rows: string[][]): TeamMember[] {
       explicitTier === 'leadership' || explicitTier === 'profile_manager' || explicitTier === 'member'
         ? (explicitTier as Tier)
         : deriveTier(role, title);
+    const nicknameAr = colNicknameAr >= 0 ? (row[colNicknameAr] || '').trim() : '';
     out.push({
       email,
       name: (row[colName] || '').trim() || email,
@@ -98,6 +113,7 @@ function parseRoster(rows: string[][]): TeamMember[] {
       tier,
       active,
       title: title || undefined,
+      nicknameAr: nicknameAr || undefined,
     });
   }
   return out;
@@ -181,4 +197,10 @@ export function getActiveTeam(): TeamMember[] {
 
 export function displayName(email: string): string {
   return getUserByEmail(email)?.name || email;
+}
+
+// Personal Arabic nickname (e.g., "زيد"). Returns empty string if the
+// member has none set; callers should fall back to the English first name.
+export function nicknameAr(email: string): string {
+  return getUserByEmail(email)?.nicknameAr || '';
 }
