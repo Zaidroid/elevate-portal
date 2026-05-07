@@ -123,6 +123,13 @@ export type Advisor = {
   markets_experience: string;
   /** Free-text description of that market experience. */
   markets_detail: string;
+  /** Cohort 3 sub-interventions the advisor is interested in or qualified
+   *  for (comma-separated codes from src/config/interventions.ts —
+   *  e.g. "C-Suite, Marketing Agency"). Drives smartMatch overlap. */
+  sub_interventions: string;
+  /** Pillar focus (CB / MKG / MA) — looser, used when the form doesn't
+   *  collect explicit sub-intervention preferences. */
+  pillar_focus: string;
 
   // Tracker columns appended by builders/advisors.py
   pipeline_status: string;

@@ -101,7 +101,20 @@ export type EnrichedAdvisor = Advisor & {
   conflict_company_name?: string;
 };
 
-export type CompanyLite = { company_id: string; company_name: string; sector?: string; governorate?: string; status?: string };
+export type CompanyLite = {
+  company_id: string;
+  company_name: string;
+  sector?: string;
+  governorate?: string;
+  status?: string;
+  /** Sub-intervention codes the company is engaged in (e.g. ['C-Suite',
+   *  'Train To Hire']). Drives smartMatch overlap. Sourced from the
+   *  company's Assignments rows. Empty when no assignments yet. */
+  subs?: string[];
+  /** Pillar codes derived from `subs` (e.g. ['MA', 'CB']). Cached so the
+   *  matcher doesn't have to call pillarFor() on every comparison. */
+  pillars?: string[];
+};
 
 // Detect duplicate advisor rows on the sheet. Each entry lists the rows
 // that share the same key so the UI can surface a banner + run the

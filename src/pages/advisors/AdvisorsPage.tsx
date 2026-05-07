@@ -24,7 +24,7 @@ import {
   Table as TableIcon,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { getUserByEmail, isAdmin } from '../../config/team';
+import { ACCOUNT_MANAGERS, getUserByEmail, isAdmin, isLeadership } from '../../config/team';
 import { useModuleData } from '../../data/useModuleData';
 import { getSheetId, getTab } from '../../config/sheets';
 import {
@@ -43,6 +43,8 @@ import {
 import type { Column, TabItem, Tone } from '../../lib/ui';
 import { CATEGORY_META } from '../../lib/advisor-scoring';
 import type { AdvisorPipelineId } from '../../lib/advisor-scoring';
+import { pillarFor as pillarForObj } from '../../config/interventions';
+const pillarForCode = (code: string): string | undefined => pillarForObj(code)?.code;
 import type {
   ActivityRow,
   Advisor,
@@ -103,7 +105,23 @@ const PIPELINE_LABEL_BY_ID: Record<AdvisorPipelineId, string> = {
 export function AdvisorsPage() {
   const { user } = useAuth();
   const userEmail = user?.email || '';
+  // Coarse gate — any signed-in @gazaskygeeks user can interact with the
+  // page (sync form, leave comments, view candidates). Per-action gates
+  // for stage transitions live below.
   const canEdit = isAdmin(userEmail) || /@gazaskygeeks\.com$/i.test(userEmail);
+  // Intake stages — admin / leadership only. Starts at "new"; admin
+  // can move advisors to acknowledged → allocated, or hold / reject.
+  const canDoIntake = isAdmin(userEmail) || isLeadership(userEmail);
+  // The AM-side pipeline (intro → assessment → approved → matched).
+  // An AM can only manage rows where they are the assignee.
+  // Admins / leadership can manage any row (so they can unstick things).
+  const canManagePipeline = (advisor: { assignee_email?: string }): boolean => {
+    if (canDoIntake) return true;
+    if (!canEdit) return false;
+    return (advisor.assignee_email || '').toLowerCase() === userEmail.toLowerCase();
+  };
+  // Anyone with edit rights can park a row on hold or reject (escape hatches).
+  const canEscape = canEdit;
   const toast = useToast();
 
   // sheetId + tab names are still needed for appendActivity / dedup / form-import
@@ -117,17 +135,45 @@ export function AdvisorsPage() {
   const actHook = useModuleData<ActivityRow>('advisors', 'activity');
   const cmtHook = useModuleData<AdvisorComment>('advisors', 'comments');
 
-  // Companies — needed for conflict-of-interest detection.
+  // Companies — needed for conflict-of-interest detection AND for
+  // smart match against the cohort. Pulling Assignments too so each
+  // CompanyLite carries the sub-intervention codes it's engaged in.
   const { rows: companyRows } = useModuleData<Record<string, string>>('companies', 'companies');
+  const { rows: companyAssignmentRows } = useModuleData<Record<string, string>>('companies', 'assignments');
   const companies = useMemo<CompanyLite[]>(
-    () => companyRows.map(c => ({
-      company_id: c.company_id,
-      company_name: c.company_name,
-      sector: c.sector,
-      governorate: c.governorate,
-      status: c.status,
-    })),
-    [companyRows]
+    () => {
+      // Pre-index assignments by company_id so the company lite can
+      // surface the sub-interventions it actually has work on, not
+      // just what reviewers proposed during selection.
+      const subsByCompany = new Map<string, Set<string>>();
+      const pillarsByCompany = new Map<string, Set<string>>();
+      for (const a of companyAssignmentRows) {
+        const cid = a.company_id;
+        if (!cid) continue;
+        const sub = (a.sub_intervention || '').trim();
+        const it = (a.intervention_type || '').trim();
+        if (sub) {
+          if (!subsByCompany.has(cid)) subsByCompany.set(cid, new Set());
+          subsByCompany.get(cid)!.add(sub);
+        }
+        // Resolve pillar via interventions.ts (handles legacy codes).
+        const p = it ? pillarForCode(it) : undefined;
+        if (p) {
+          if (!pillarsByCompany.has(cid)) pillarsByCompany.set(cid, new Set());
+          pillarsByCompany.get(cid)!.add(p);
+        }
+      }
+      return companyRows.map(c => ({
+        company_id: c.company_id,
+        company_name: c.company_name,
+        sector: c.sector,
+        governorate: c.governorate,
+        status: c.status,
+        subs:    Array.from(subsByCompany.get(c.company_id)    ?? []),
+        pillars: Array.from(pillarsByCompany.get(c.company_id) ?? []),
+      }));
+    },
+    [companyRows, companyAssignmentRows]
   );
 
   const [tab, setTab] = useState<string>('dashboard');
@@ -286,10 +332,56 @@ export function AdvisorsPage() {
     const nextLabel = PIPELINE_LABEL_BY_ID[next];
     if (adv.pipeline_status === nextLabel) return;
 
-    // Stage gate: moving an advisor INTO Approved or Rejected requires a
-    // documented reason. Prompt for it; if the user cancels, abort the
-    // transition entirely. The reason gets posted as a comment so the
-    // audit trail captures *why*, not just what changed.
+    // ── Role gate ───────────────────────────────────────────────
+    // Intake stages: admin / leadership only.
+    // Pipeline stages: assignee AM only (admins always allowed).
+    // on_hold + rejected: any signed-in editor (escape hatches).
+    const isIntake = next === 'acknowledged' || next === 'allocated';
+    const isPipeline = next === 'intro_sched' || next === 'intro_done' || next === 'assessment' || next === 'approved' || next === 'matched';
+    const isEscape = next === 'on_hold' || next === 'rejected';
+    if (isIntake && !canDoIntake) {
+      toast.error('Only admins can move advisors through the intake stages.');
+      return;
+    }
+    if (isPipeline && !canManagePipeline(adv)) {
+      toast.error('Only the assigned AM (or admins) can manage this stage.');
+      return;
+    }
+    if (isEscape && !canEscape) {
+      toast.error('You don\'t have edit rights on this advisor.');
+      return;
+    }
+
+    // ── Allocate handoff ────────────────────────────────────────
+    // When admin moves an advisor to "Allocated", they must pick which
+    // AM owns it. The picked email goes into assignee_email so the
+    // advisor lands in that AM's pipeline (canManagePipeline above).
+    let assigneeEmailUpdate: string | undefined;
+    if (next === 'allocated') {
+      const choices = ACCOUNT_MANAGERS.map((a, i) => `${i + 1}. ${a.name} (${a.email})`).join('\n');
+      const picked = window.prompt(
+        `Allocate ${adv.full_name || advisorId} to which AM?\n\n${choices}\n\nEnter 1–${ACCOUNT_MANAGERS.length} or paste an email:`,
+        adv.assignee_email || '',
+      );
+      if (picked === null) return; // cancelled
+      const trimmed = picked.trim();
+      let resolved = '';
+      const asIdx = parseInt(trimmed, 10);
+      if (!Number.isNaN(asIdx) && asIdx >= 1 && asIdx <= ACCOUNT_MANAGERS.length) {
+        resolved = ACCOUNT_MANAGERS[asIdx - 1].email;
+      } else if (trimmed.includes('@')) {
+        resolved = trimmed;
+      }
+      if (!resolved) {
+        toast.error('Please pick 1-3 or paste a valid email.');
+        return;
+      }
+      assigneeEmailUpdate = resolved;
+    }
+
+    // Stage gate: moving INTO Approved or Rejected requires a written
+    // justification. The reason gets posted as a comment so the audit
+    // trail captures *why*, not just what changed.
     let justification: string | null = null;
     if (nextLabel === 'Approved' || nextLabel === 'Rejected') {
       justification = window.prompt(
@@ -307,7 +399,9 @@ export function AdvisorsPage() {
       // Re-stamp scores alongside the status change so the sheet's
       // Dashboard tab never goes stale on bulk moves / drag-drop.
       const scored = scoreFields({ ...adv, pipeline_status: nextLabel });
-      await advHook.updateRow(advisorId, { pipeline_status: nextLabel, ...scored } as Partial<Advisor>);
+      const updates: Partial<Advisor> = { pipeline_status: nextLabel, ...scored };
+      if (assigneeEmailUpdate) updates.assignee_email = assigneeEmailUpdate;
+      await advHook.updateRow(advisorId, updates);
       if (sheetId) {
         await appendActivity(sheetId, tabActivity, {
           user_email: userEmail,

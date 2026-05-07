@@ -72,6 +72,14 @@ const HEADER_RULES: Array<[keyof Advisor, string[]]> = [
   ['markets_experience', ['markets', 'experience working']],
   ['markets_experience', ['markets/regions']],
   ['markets_detail', ['briefly describe', 'markets']],
+  // Sub-intervention preferences — best-effort needles. The form may
+  // not collect these explicitly today; once it does, the import picks
+  // them up without a code change. Tighter needles win first match.
+  ['sub_interventions', ['sub-intervention', 'preferred']],
+  ['sub_interventions', ['sub intervention', 'interest']],
+  ['sub_interventions', ['c-suite', 'marketing agency', 'train']],
+  ['pillar_focus', ['pillar', 'focus']],
+  ['pillar_focus', ['capacity building', 'market access']],
 ];
 
 function routeHeader(legacy: string): keyof Advisor | null {
