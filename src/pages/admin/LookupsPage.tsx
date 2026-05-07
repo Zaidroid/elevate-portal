@@ -19,6 +19,7 @@ import { ensureHumanFriendlyTab } from '../../lib/sheets/output-formatting';
 import { AutoMergeCohortCard } from './AutoMergeCohortCard';
 import { RebuildDashboardsCard } from './RebuildDashboardsCard';
 import { BackfillCohortFieldsCard } from './BackfillCohortFieldsCard';
+import { BackfillInterventionsCard } from './BackfillInterventionsCard';
 
 type LookupCategory = {
   module: ModuleKey;
@@ -195,6 +196,7 @@ export function LookupsPage() {
       )}
 
       <BackfillCohortFieldsCard />
+      <BackfillInterventionsCard />
       <RebuildDashboardsCard />
       <AutoMergeCohortCard />
       <ReformatOutputTabsCard />
