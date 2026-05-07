@@ -17,7 +17,7 @@
 // interviewed override applied), not from sheet formulas — that's what
 // fixes the "interviewed=29 vs portal-says-52" mismatch.
 
-import type { Company, Assignment, PR, Payment } from '../../data/types';
+import type { Company, Assignment, PR, Payment, Conference, ConferenceTrackerRow } from '../../data/types';
 import type { Review } from '../companies/reviewTypes';
 import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
 import { pillarFor, COHORT3_BUDGET_TOTAL_USD } from '../../config/interventions';
@@ -833,6 +833,248 @@ export function buildPaymentsDashboard(input: {
     const c = masterById.get(p.company_id || '');
     row[5] = c?.company_name || p.company_id || '';
     row[10] = fmtUsd0(v);
+    grid.push(row);
+    requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { left: 12, right: 8, top: 4, bottom: 4 },
+      textFormat: { fontFamily: FONT, fontSize: 10, foregroundColorStyle: { rgbColor: COLOR.navy } },
+    }));
+    r += 1;
+  }
+
+  return { values: grid, requests, lastRow: grid.length };
+}
+
+// ─── Conferences dashboard ──────────────────────────────────────────
+//
+// Same primitives. KPIs by decision, by tier × decision crosstab, top
+// companies by participation, and a planned spend strip from the
+// catalogue's estimated_cost_per_company_usd × committed-companies.
+
+const DECISIONS = ['Nominated', 'Committed', 'Withdrawn', 'Attended'];
+
+export function buildConferencesDashboard(input: {
+  catalogue: Conference[];
+  tracker: ConferenceTrackerRow[];
+  companies: Company[];
+  generatedBy: string;
+  generatedAt?: Date;
+  tabId: number;
+}): FormattedDashboard {
+  const at = input.generatedAt ?? new Date();
+  const tabId = input.tabId;
+
+  // Build a lookup so each tracker row can be filtered by cohort.
+  const masterById = new Map<string, Company>();
+  for (const c of input.companies) if (c.company_id) masterById.set(c.company_id, c);
+  const isCohortRow = (row: ConferenceTrackerRow): boolean => {
+    if (canonicalCohortName(row.company_name || '')) return true;
+    const c = masterById.get(row.company_id || '');
+    return !!c && canonicalCohortName(c.company_name || '') !== null;
+  };
+  const cohortTracker = input.tracker.filter(isCohortRow);
+
+  const num = (s: string | undefined) => {
+    const v = parseFloat(String(s || '').replace(/[^0-9.\-]/g, ''));
+    return Number.isFinite(v) ? v : 0;
+  };
+
+  // Conference cost lookup (catalogue carries per-company estimate).
+  const costByConfId = new Map<string, number>();
+  const costByConfName = new Map<string, number>();
+  for (const c of input.catalogue) {
+    const v = num(c.estimated_cost_per_company_usd);
+    if (c.conference_id) costByConfId.set(c.conference_id, v);
+    if (c.name) costByConfName.set(c.name, v);
+  }
+  const tierByConfId = new Map<string, string>();
+  for (const c of input.catalogue) if (c.conference_id) tierByConfId.set(c.conference_id, c.tier || '—');
+
+  // KPIs by decision
+  const decisionCount: Record<string, number> = {};
+  for (const d of DECISIONS) decisionCount[d] = 0;
+  for (const r of cohortTracker) {
+    const d = (r.decision || '').trim();
+    if (d in decisionCount) decisionCount[d] += 1;
+  }
+  const totalNominations = cohortTracker.length;
+
+  // Tier × decision crosstab
+  const TIERS = ['T1', 'T2', 'T3'];
+  const tierByDecision: Record<string, Record<string, number>> = {};
+  for (const t of TIERS) {
+    tierByDecision[t] = {};
+    for (const d of DECISIONS) tierByDecision[t][d] = 0;
+  }
+  for (const r of cohortTracker) {
+    const tier = tierByConfId.get(r.conference_id || '') || '';
+    const d = (r.decision || '').trim();
+    if (tier in tierByDecision && d in tierByDecision[tier]) {
+      tierByDecision[tier][d] += 1;
+    }
+  }
+
+  // Per-company nomination count + committed cost estimate
+  type CoAgg = { companyName: string; nominations: number; committed: number; estimatedUsd: number };
+  const byCompany = new Map<string, CoAgg>();
+  for (const r of cohortTracker) {
+    const k = canonicalCohortName(r.company_name || '') || r.company_name || r.company_id || '';
+    if (!k) continue;
+    if (!byCompany.has(k)) byCompany.set(k, { companyName: k, nominations: 0, committed: 0, estimatedUsd: 0 });
+    const b = byCompany.get(k)!;
+    b.nominations += 1;
+    const decision = (r.decision || '').trim();
+    if (decision === 'Committed' || decision === 'Attended') {
+      b.committed += 1;
+      const est = costByConfId.get(r.conference_id || '') ?? costByConfName.get(r.conference_name || '') ?? 0;
+      b.estimatedUsd += est;
+    }
+  }
+  const topCompanies = Array.from(byCompany.values())
+    .sort((a, b) => b.nominations - a.nominations || b.estimatedUsd - a.estimatedUsd)
+    .slice(0, 12);
+  const maxNomCo = Math.max(1, ...topCompanies.map(b => b.nominations));
+
+  // Total estimated cost across all committed/attended cohort rows.
+  const totalCommittedUsd = Array.from(byCompany.values()).reduce((s, b) => s + b.estimatedUsd, 0);
+
+  // ── grid + format ──────────────────────────────────────────
+  const grid: DashboardGrid = [];
+  const requests: unknown[] = [];
+
+  requests.push(setTabProps(tabId));
+  for (let c = 0; c < 12; c++) requests.push(setColumnWidth(tabId, c, 96));
+
+  const blank12 = (): DashboardCell[] => Array.from({ length: 12 }, () => '');
+
+  const pushTitle = (text: string, sub: string): number => {
+    grid.push([text, ...new Array(11).fill('')]);
+    requests.push(mergeRow(tabId, 0, 0, 12));
+    requests.push(repeatCellFormat(tabId, 0, 1, 0, 12, {
+      backgroundColorStyle: { rgbColor: COLOR.navy },
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { top: 8, bottom: 8, left: 14, right: 8 },
+      textFormat: { fontFamily: FONT, fontSize: 18, bold: true, foregroundColorStyle: { rgbColor: COLOR.white } },
+    }));
+    requests.push(setRowHeight(tabId, 0, 36));
+    grid.push([sub, ...new Array(11).fill('')]);
+    requests.push(mergeRow(tabId, 1, 0, 12));
+    requests.push(repeatCellFormat(tabId, 1, 2, 0, 12, {
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { top: 4, bottom: 6, left: 14, right: 8 },
+      textFormat: { fontFamily: FONT, fontSize: 10, italic: true, foregroundColorStyle: { rgbColor: COLOR.muted } },
+    }));
+    requests.push(setRowHeight(tabId, 1, 22));
+    grid.push(blank12());
+    requests.push(setRowHeight(tabId, 2, 8));
+    return 3;
+  };
+  const pushSection = (rowZeroBased: number, label: string): number => {
+    const row = blank12(); row[0] = label;
+    grid.push(row);
+    requests.push(...sectionHeaderFormat(tabId, rowZeroBased));
+    return rowZeroBased + 1;
+  };
+  const pushKpiRow = (rowZeroBased: number, tiles: KpiTile[]): number => {
+    while (tiles.length < 4) tiles.push({ label: '', value: '', tone: 'navy' });
+    const labelRow: DashboardCell[] = blank12();
+    const valueRow: DashboardCell[] = blank12();
+    [0, 3, 6, 9].forEach((c0, i) => {
+      labelRow[c0] = tiles[i].label.toUpperCase();
+      valueRow[c0] = tiles[i].value;
+      requests.push(...kpiTileFormat(tabId, rowZeroBased, c0, tiles[i].tone));
+    });
+    grid.push(labelRow);
+    grid.push(valueRow);
+    requests.push(setRowHeight(tabId, rowZeroBased, 18));
+    requests.push(setRowHeight(tabId, rowZeroBased + 1, 38));
+    grid.push(blank12());
+    requests.push(setRowHeight(tabId, rowZeroBased + 2, 8));
+    return rowZeroBased + 3;
+  };
+  const pushBarRow = (rowZeroBased: number, label: string, count: number, max: number, tone: Tone): number => {
+    const row: DashboardCell[] = blank12();
+    row[0] = label;
+    row[1] = count;
+    row[2] = bar(count, max);
+    grid.push(row);
+    requests.push(...barRowFormat(tabId, rowZeroBased, tone));
+    requests.push(setRowHeight(tabId, rowZeroBased, 22));
+    return rowZeroBased + 1;
+  };
+  const pushSpacer = (rowZeroBased: number): number => {
+    grid.push(blank12());
+    requests.push(setRowHeight(tabId, rowZeroBased, 12));
+    return rowZeroBased + 1;
+  };
+
+  let r = 0;
+  r = pushTitle(
+    'Conferences Dashboard',
+    `Live mirror of cohort 3 conference nominations · ${totalNominations} entries · ${decisionCount['Committed']} committed · est. ${fmtUsd0(totalCommittedUsd)} · generated ${at.toLocaleString()} by ${displayName(input.generatedBy) || input.generatedBy}.`,
+  );
+
+  r = pushSection(r, 'Top metrics');
+  r = pushKpiRow(r, [
+    { label: 'Nominations', value: totalNominations, tone: 'navy' },
+    { label: 'Committed',   value: decisionCount['Committed'] ?? 0, tone: 'green' },
+    { label: 'Withdrawn',   value: decisionCount['Withdrawn'] ?? 0, tone: 'red' },
+    { label: 'Attended',    value: decisionCount['Attended'] ?? 0, tone: 'teal' },
+  ]);
+
+  r = pushSection(r, 'By decision');
+  const maxDecision = Math.max(1, ...Object.values(decisionCount));
+  for (const d of DECISIONS) {
+    r = pushBarRow(r, d, decisionCount[d] ?? 0, maxDecision, d === 'Withdrawn' ? 'red' : 'teal');
+  }
+  r = pushSpacer(r);
+
+  // Tier × decision crosstab as a wide table.
+  r = pushSection(r, 'By tier × decision');
+  const tdHeader = blank12();
+  tdHeader[0] = 'Tier';
+  DECISIONS.forEach((d, i) => { tdHeader[1 + i] = d; });
+  grid.push(tdHeader);
+  requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+    horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+    padding: { left: 12, right: 8, top: 4, bottom: 4 },
+    textFormat: { fontFamily: FONT, fontSize: 9, bold: true, foregroundColorStyle: { rgbColor: COLOR.muted } },
+  }));
+  r += 1;
+  for (const t of TIERS) {
+    const row = blank12();
+    row[0] = t;
+    DECISIONS.forEach((d, i) => { row[1 + i] = tierByDecision[t][d]; });
+    grid.push(row);
+    requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+      horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+      padding: { left: 12, right: 8, top: 4, bottom: 4 },
+      textFormat: { fontFamily: FONT, fontSize: 10, foregroundColorStyle: { rgbColor: COLOR.navy } },
+    }));
+    r += 1;
+  }
+  r = pushSpacer(r);
+
+  r = pushSection(r, 'By company (top 12 by nominations)');
+  const coHeader = blank12();
+  coHeader[0] = 'Company';
+  coHeader[1] = 'Nominations';
+  coHeader[2] = 'Committed';
+  coHeader[10] = 'Est. USD';
+  grid.push(coHeader);
+  requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
+    horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',
+    padding: { left: 12, right: 8, top: 4, bottom: 4 },
+    textFormat: { fontFamily: FONT, fontSize: 9, bold: true, foregroundColorStyle: { rgbColor: COLOR.muted } },
+  }));
+  r += 1;
+  for (const b of topCompanies) {
+    const row = blank12();
+    row[0] = b.companyName;
+    row[1] = b.nominations;
+    row[2] = b.committed;
+    row[3] = bar(b.nominations, maxNomCo, 24);
+    row[10] = fmtUsd0(b.estimatedUsd);
     grid.push(row);
     requests.push(repeatCellFormat(tabId, r, r + 1, 0, 12, {
       horizontalAlignment: 'LEFT', verticalAlignment: 'MIDDLE',

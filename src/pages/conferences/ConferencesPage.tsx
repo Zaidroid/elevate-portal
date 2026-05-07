@@ -2,9 +2,12 @@ import { useMemo, useState } from 'react';
 import { Search, Plus, ExternalLink, Download } from 'lucide-react';
 
 import { useModuleData } from '../../data/useModuleData';
-import type { Conference, ConferenceTrackerRow as TrackerRow } from '../../data/types';
+import type { Conference, ConferenceTrackerRow as TrackerRow, Company } from '../../data/types';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
+import { keepCompaniesSection } from '../../lib/sheets/sections';
+import { canonicalCohortName, cohortEntryFor } from '../../config/cohort3Aliases';
+import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
 
 type View = 'catalogue' | 'tracker';
 
@@ -68,8 +71,16 @@ export function ConferencesPage() {
 
 function Catalogue() {
 
-  const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<Conference>(
-    'conferences', 'catalogue'
+  const hook = useModuleData<Conference>('conferences', 'catalogue');
+  const { loading, error, refresh, updateRow, createRow } = hook;
+  // Section-aware: Catalogue tab is team-grouped (Companies / Vendors /
+  // Marketing) — without keepCompaniesSection, we read separator rows
+  // and unrelated team blocks. Catalogue itself isn't cohort-scoped
+  // (it's the worldwide event list); the section filter just keeps us
+  // on the proper data block.
+  const rows = useMemo(
+    () => keepCompaniesSection(hook.rows, hook.headers) as Conference[],
+    [hook.rows, hook.headers],
   );
 
   const [query, setQuery] = useState('');
@@ -130,9 +141,31 @@ function Catalogue() {
 
 function Tracker() {
 
-  const { rows, loading, error, refresh, updateRow } = useModuleData<TrackerRow>(
-    'conferences', 'tracker'
-  );
+  const hook = useModuleData<TrackerRow>('conferences', 'tracker');
+  const masterHook = useModuleData<Company>('companies', 'companies');
+  const { loading, error, refresh, updateRow } = hook;
+
+  // Section-aware AND cohort-scoped. Tracker rows for non-cohort
+  // companies (e.g. previous cohorts the team hasn't deleted yet, or
+  // pre-cohort applicants) used to leak in here — now we drop them at
+  // the source so the table only shows cohort 3 nominations.
+  const rows = useMemo(() => {
+    const sectioned = keepCompaniesSection(hook.rows, hook.headers) as TrackerRow[];
+    return sectioned.filter(r => canonicalCohortName(r.company_name || '') !== null);
+  }, [hook.rows, hook.headers]);
+
+  // company_id → AM lookup so each tracker row can show who owns it.
+  const amByCompanyId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of masterHook.rows) {
+      if (!c.company_id) continue;
+      const lower = (c.profile_manager_email || cohortEntryFor(c.company_name || '')?.am || '').toLowerCase();
+      const amName = ACCOUNT_MANAGERS.find(a => a.email.toLowerCase() === lower)?.name
+        || (lower ? displayName(lower) : '');
+      m.set(c.company_id, amName);
+    }
+    return m;
+  }, [masterHook.rows]);
 
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<TrackerRow | null>(null);
@@ -145,7 +178,20 @@ function Tracker() {
   }, [rows, query]);
 
   const columns: Column<TrackerRow>[] = [
-    { key: 'company_name', header: 'Company' },
+    {
+      key: 'company',
+      header: 'Company / AM',
+      render: r => {
+        const canon = canonicalCohortName(r.company_name || '') || r.company_name || '';
+        const am = amByCompanyId.get(r.company_id) || '';
+        return (
+          <div className="min-w-0">
+            <div className="truncate font-semibold text-navy-500 dark:text-white">{canon}</div>
+            {am && <div className="text-2xs text-slate-500">{am}</div>}
+          </div>
+        );
+      },
+    },
     { key: 'conference_name', header: 'Conference' },
     { key: 'fit_score', header: 'Fit', width: '70px' },
     {
