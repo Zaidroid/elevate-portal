@@ -9,21 +9,21 @@
 import type { TeamMember, Tier } from '../types';
 import { fetchRange } from '../lib/sheets/client';
 
-// TODO: Zaid to confirm Arabic nicknames per team member.
-// First pass uses respectful short forms based on first names / known
-// colloquial nicknames. Each team member sees their nickname inside the
-// English greeting (e.g. "Good morning, زيد.") in the TopBar and on
-// HomePage / MyHubPage. Falls back to English first name when missing.
+// Personal Arabic nicknames per team member. These are the affectionate
+// forms colleagues use day-to-day (kept verbatim from the original Home
+// page implementation that was lost in the May 2026 HomePage refactor).
+// Each team member sees their nickname inside the English greeting
+// ("Good morning, دعدع.") in the sidebar / Home / MyHub.
 export const AUTHORIZED_USERS: TeamMember[] = [
-  { email: 'zaid@gazaskygeeks.com', name: 'Zaid Salem', role: 'admin', tier: 'leadership', active: true, title: 'Market Access Officer', nicknameAr: 'زيد' },
-  { email: 'israa@gazaskygeeks.com', name: 'Israa Hamoudeh', role: 'admin', tier: 'leadership', active: true, title: 'Team Lead', nicknameAr: 'إسراء' },
-  { email: 'raouf@gazaskygeeks.com', name: 'Raouf Said', role: 'admin', tier: 'leadership', active: true, title: 'Co-working Spaces Lead', nicknameAr: 'رؤوف' },
+  { email: 'zaid@gazaskygeeks.com', name: 'Zaid Salem', role: 'admin', tier: 'leadership', active: true, title: 'Market Access Officer', nicknameAr: 'ابو حسام' },
+  { email: 'israa@gazaskygeeks.com', name: 'Israa Hamoudeh', role: 'admin', tier: 'leadership', active: true, title: 'Team Lead', nicknameAr: 'ام ليلى' },
+  { email: 'raouf@gazaskygeeks.com', name: 'Raouf Said', role: 'admin', tier: 'leadership', active: true, title: 'Co-working Spaces Lead', nicknameAr: 'ابو جون' },
 
-  { email: 'ayesh@gazaskygeeks.com', name: 'Mohammed Ayesh', role: 'user', tier: 'profile_manager', active: true, title: 'Profile Manager', nicknameAr: 'عايش' },
-  { email: 'doaa@gazaskygeeks.com', name: 'Doaa Younis', role: 'user', tier: 'profile_manager', active: true, title: 'Profile Manager', nicknameAr: 'دعاء' },
+  { email: 'ayesh@gazaskygeeks.com', name: 'Mohammed Ayesh', role: 'user', tier: 'profile_manager', active: true, title: 'Profile Manager', nicknameAr: 'ابو بلال' },
+  { email: 'doaa@gazaskygeeks.com', name: 'Doaa Younis', role: 'user', tier: 'profile_manager', active: true, title: 'Profile Manager', nicknameAr: 'دعدع' },
 
-  { email: 'muna@gazaskygeeks.com', name: 'Muna Mahroum', role: 'user', tier: 'member', active: true, title: 'Pre-TTH', nicknameAr: 'منى' },
-  { email: 'mzourob@gazaskygeeks.com', name: 'Mohammed Zourob', role: 'user', tier: 'member', active: true, title: 'ElevateBridge Filtration', nicknameAr: 'زعرب' },
+  { email: 'muna@gazaskygeeks.com', name: 'Muna Mahroum', role: 'user', tier: 'member', active: true, title: 'Pre-TTH', nicknameAr: 'منمن' },
+  { email: 'mzourob@gazaskygeeks.com', name: 'Mohammed Zourob', role: 'user', tier: 'member', active: true, title: 'ElevateBridge Filtration' },
 ];
 
 // Account Managers — the three team members who own a finalized
@@ -199,8 +199,15 @@ export function displayName(email: string): string {
   return getUserByEmail(email)?.name || email;
 }
 
-// Personal Arabic nickname (e.g., "زيد"). Returns empty string if the
-// member has none set; callers should fall back to the English first name.
+// Personal Arabic nickname (e.g., "ابو حسام"). Falls back to the
+// hardcoded roster when the live Team sheet has no nickname_ar column —
+// otherwise the moment the sheet loads, AUTHORIZED_USERS gets replaced
+// by a parsed copy with no nicknames and the greeting silently regresses.
+// Callers fall back to the English first name when this returns ''.
 export function nicknameAr(email: string): string {
-  return getUserByEmail(email)?.nicknameAr || '';
+  const live = getUserByEmail(email)?.nicknameAr;
+  if (live) return live;
+  const n = normalize(email);
+  const fallback = AUTHORIZED_USERS.find(u => u.email.toLowerCase() === n)?.nicknameAr;
+  return fallback || '';
 }
