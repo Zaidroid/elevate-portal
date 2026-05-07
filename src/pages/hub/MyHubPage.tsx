@@ -10,7 +10,7 @@
 
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { ExternalLink, RefreshCw } from 'lucide-react';
+import { ExternalLink, MoreHorizontal, RefreshCw } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
 import { useScopedView } from '../../data/useScopedView';
@@ -20,6 +20,7 @@ import { pillarFor } from '../../config/interventions';
 import { canonicalCohortName, COHORT3_ALIASES } from '../../config/cohort3Aliases';
 import { computeAlerts, type Alert } from '../../lib/alerts/index';
 import { keepCompaniesSection } from '../../lib/sheets/sections';
+import { aggregateByCity, aggregateBySub } from '../../data/aggregations';
 import {
   Badge,
   Button,
@@ -55,6 +56,24 @@ function fmtUsdOrDash(n: number): string {
   // better as an em-dash than "$0".
   if (!Number.isFinite(n) || n === 0) return '—';
   return fmtUsd(n);
+}
+
+// Alert.kind → short verb-first action label that hints at what the AM
+// is being asked to do (vs. the generic "Open"). Phase D / E / G will
+// turn each of these into in-place resolution actions; the phrasing
+// here already matches the eventual action so it doesn't need rewording.
+function alertActionLabel(kind: Alert['kind']): string {
+  switch (kind) {
+    case 'pr_overdue':
+    case 'pr_due_soon':            return 'Resolve PR';
+    case 'payment_pending_approval': return 'Review payment';
+    case 'agreement_unsigned':      return 'Mark signed';
+    case 'followup_overdue':        return 'Open follow-up';
+    case 'conf_visa_pending':       return 'Open visa';
+    case 'advisor_mention':         return 'View comment';
+    case 'advisor_stuck':           return 'Move advisor';
+    default:                        return 'Open';
+  }
 }
 
 export function MyHubPage() {
@@ -186,6 +205,30 @@ export function MyHubPage() {
     return n;
   }, [myAssignments]);
 
+  // Total paid across my pool, for the insight card.
+  const myPaid = useMemo(() => {
+    let n = 0;
+    for (const p of payments.rows) {
+      if ((p.status || '').toLowerCase() !== 'paid') continue;
+      if (view.scope === 'all' ? !cohortCompanyIds.has(p.company_id) : !myCompanyIds.has(p.company_id)) continue;
+      const v = parseFloat(String(p.amount_usd || '').replace(/[^0-9.\-]/g, ''));
+      if (Number.isFinite(v)) n += v;
+    }
+    return n;
+  }, [payments.rows, view.scope, myCompanyIds, cohortCompanyIds]);
+
+  // Pool-scoped rollups (same helpers HomePage uses, scoped to view.scoped
+  // instead of the whole cohort). Kept in MyHubPage so 'mine' vs 'all'
+  // toggle is honoured automatically.
+  const cityRollup = useMemo(
+    () => aggregateByCity(view.scoped, myAssignments, payments.rows),
+    [view.scoped, myAssignments, payments.rows],
+  );
+  const subRollup = useMemo(
+    () => aggregateBySub(view.scoped, myAssignments, payments.rows),
+    [view.scoped, myAssignments, payments.rows],
+  );
+
   // ─── render ────────────────────────────────────────────────────────
 
   const greeting = <PersonalGreeting email={user?.email} fallback="My hub" />;
@@ -246,8 +289,11 @@ export function MyHubPage() {
                   <div className="text-sm font-semibold text-navy-500 dark:text-white">{a.title}</div>
                   <div className="truncate text-xs text-slate-500">{a.detail}</div>
                 </div>
-                <Link to={a.href} className="text-xs text-brand-teal hover:underline">
-                  Open <ExternalLink className="inline h-3 w-3" />
+                <Link
+                  to={a.href}
+                  className="flex-shrink-0 rounded-md border border-brand-teal/30 bg-brand-teal/10 px-2 py-1 text-2xs font-bold uppercase tracking-wider text-brand-teal transition hover:bg-brand-teal/20"
+                >
+                  {alertActionLabel(a.kind)} <ExternalLink className="inline h-3 w-3" />
                 </Link>
               </li>
             ))}
@@ -264,8 +310,75 @@ export function MyHubPage() {
         <CompaniesTable
           rows={view.scoped}
           asgByCompany={asgByCompany}
+          onStatusChange={async (companyId, nextStatus) => {
+            await master.updateRow(companyId, { status: nextStatus });
+          }}
         />
       </Card>
+
+      {/* My pool insights — same shape as the admin Home, scoped to mine. */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <Card>
+          <CardHeader
+            title={view.scope === 'mine' ? 'My cities' : 'Cohort cities'}
+            subtitle={cityRollup.length === 0 ? 'No cities to summarise yet.' : `${cityRollup.length} cit${cityRollup.length === 1 ? 'y' : 'ies'} in scope · ${fmtUsd(myPaid)} paid out of ${fmtUsd(myBudget)} committed.`}
+          />
+          {cityRollup.length === 0 ? (
+            <EmptyState title="No city data yet" />
+          ) : (
+            <ul className="space-y-2 text-sm">
+              {cityRollup.map(c => {
+                const max = Math.max(1, ...cityRollup.map(x => x.companies));
+                return (
+                  <li key={c.city}>
+                    <div className="flex items-center justify-between">
+                      <Link
+                        to={`/companies?city=${encodeURIComponent(c.city)}`}
+                        className="font-semibold text-navy-500 hover:text-brand-teal hover:underline dark:text-white"
+                      >
+                        {c.city}
+                      </Link>
+                      <span className="text-2xs text-slate-500">
+                        <span className="font-mono">{c.companies}</span> co · <span className="font-mono">{c.interventions}</span> int · <span className="font-mono">{fmtUsd(c.paidUsd)}</span> paid
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
+                      <div className="h-full rounded-full bg-brand-teal" style={{ width: `${Math.round((c.companies / max) * 100)}%` }} />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </Card>
+        <Card>
+          <CardHeader
+            title={view.scope === 'mine' ? 'My sub-interventions' : 'All sub-interventions'}
+            subtitle="Where the work is — companies covered and assignment count per sub."
+          />
+          {subRollup.every(s => s.companies === 0 && s.assignmentsTotal === 0) ? (
+            <EmptyState title="No interventions yet" />
+          ) : (
+            <ul className="divide-y divide-slate-100 text-sm dark:divide-navy-700">
+              {subRollup.filter(s => s.companies > 0 || s.assignmentsTotal > 0).map(s => (
+                <li key={`${s.pillar}::${s.sub}`} className="py-1.5">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <Link
+                      to={`/companies?sub=${encodeURIComponent(s.sub)}`}
+                      className="truncate font-semibold text-navy-500 hover:text-brand-teal hover:underline dark:text-white"
+                    >
+                      {s.sub}
+                    </Link>
+                    <span className="flex-shrink-0 text-2xs text-slate-500">
+                      <span className="font-mono">{s.companies}</span> co · <span className="font-mono">{s.assignmentsTotal}</span> assigned · <span className="font-mono">{fmtUsd(s.paidUsd)}</span> paid
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+      </div>
 
       {/* My interventions + Activity */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -333,12 +446,18 @@ function ScopeToggle({
   );
 }
 
+// Statuses an AM may move a company through inline. Tracks the canonical
+// pipeline labels used elsewhere in the portal (matches statusTone()).
+const STATUS_OPTIONS = ['Active', 'Onboarding', 'Withdrawn', 'Graduated'];
+
 function CompaniesTable({
   rows,
   asgByCompany,
+  onStatusChange,
 }: {
   rows: Company[];
   asgByCompany: Map<string, Assignment[]>;
+  onStatusChange?: (companyId: string, nextStatus: string) => void | Promise<void>;
 }) {
   const sorted = useMemo(
     () => [...rows].sort((a, b) => (a.company_name || '').localeCompare(b.company_name || '')),
@@ -389,6 +508,12 @@ function CompaniesTable({
         return fmtUsdOrDash(sum);
       },
     },
+    {
+      key: 'actions',
+      header: '',
+      width: '40px',
+      render: c => <RowActions company={c} onStatusChange={onStatusChange} />,
+    },
   ];
   return (
     <DataTable
@@ -396,6 +521,77 @@ function CompaniesTable({
       rows={sorted as unknown as Record<string, unknown>[] as Company[]}
       emptyState={<EmptyState title="No companies" description="Once you have companies in your pool, they appear here." />}
     />
+  );
+}
+
+// Inline row action menu (native <details>, no portals or click-outside
+// plumbing). Three deep links into the company detail page + a quick
+// status change. Status writes go through master.updateRow which hits
+// the sheet directly and refreshes the SheetDataProvider.
+function RowActions({
+  company,
+  onStatusChange,
+}: {
+  company: Company;
+  onStatusChange?: (companyId: string, nextStatus: string) => void | Promise<void>;
+}) {
+  const currentStatus = company.status || 'Active';
+  return (
+    <details className="group relative inline-block">
+      <summary
+        className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-navy-500 dark:hover:bg-navy-700 dark:hover:text-white [&::-webkit-details-marker]:hidden"
+        title="Row actions"
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </summary>
+      <div
+        className="absolute right-0 top-full z-20 mt-1 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg dark:border-navy-700 dark:bg-navy-700"
+      >
+        <Link
+          to={`/companies/${company.company_id}`}
+          className="block px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-navy-600"
+        >
+          Open detail
+        </Link>
+        <Link
+          to={`/companies/${company.company_id}#assignments`}
+          className="block px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-navy-600"
+        >
+          View interventions
+        </Link>
+        <Link
+          to={`/companies/${company.company_id}#advisors`}
+          className="block px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-navy-600"
+        >
+          View advisors
+        </Link>
+        {onStatusChange && (
+          <div className="border-t border-slate-100 dark:border-navy-600">
+            <div className="px-3 pb-1 pt-2 text-2xs font-bold uppercase tracking-wider text-slate-400">
+              Set status
+            </div>
+            {STATUS_OPTIONS.map(s => (
+              <button
+                key={s}
+                type="button"
+                disabled={s === currentStatus}
+                onClick={async () => {
+                  await onStatusChange(company.company_id, s);
+                }}
+                className={`flex w-full items-center justify-between px-3 py-1.5 text-xs transition ${
+                  s === currentStatus
+                    ? 'cursor-default text-slate-400 dark:text-slate-500'
+                    : 'text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-navy-600'
+                }`}
+              >
+                <span>{s}</span>
+                {s === currentStatus && <span className="text-2xs">current</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
