@@ -63,7 +63,9 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/selection', label: 'Selection', icon: <CheckCircle2 className="h-[17px] w-[17px]" /> },
       { to: '/companies', label: 'Companies', icon: <Building2 className="h-[17px] w-[17px]" /> },
+      { to: '/elevatebridge', label: 'ElevateBridge', icon: <Briefcase className="h-[17px] w-[17px]" /> },
       { to: '/conferences', label: 'Conferences', icon: <Plane className="h-[17px] w-[17px]" /> },
+      { to: '/advisors', label: 'Advisors', icon: <GraduationCap className="h-[17px] w-[17px]" /> },
     ],
   },
   {
@@ -72,13 +74,6 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/procurement', label: 'Procurement', icon: <ClipboardList className="h-[17px] w-[17px]" /> },
       { to: '/payments', label: 'Payments', icon: <Wallet className="h-[17px] w-[17px]" />, adminOnly: true },
       { to: '/docs', label: 'Docs & agreements', icon: <FileText className="h-[17px] w-[17px]" /> },
-    ],
-  },
-  {
-    label: 'People',
-    items: [
-      { to: '/advisors', label: 'Advisors', icon: <GraduationCap className="h-[17px] w-[17px]" /> },
-      { to: '/elevatebridge', label: 'ElevateBridge', icon: <Briefcase className="h-[17px] w-[17px]" /> },
     ],
   },
   {

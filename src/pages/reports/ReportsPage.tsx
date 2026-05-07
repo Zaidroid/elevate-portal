@@ -10,6 +10,7 @@ import { useAuth } from '../../services/auth';
 import { getSheetId } from '../../config/sheets';
 import { exportAllDonorReports } from '../../lib/export/donorExport';
 import type { Company, Assignment, PR, Payment, Conference, ConferenceTrackerRow, Agreement } from '../../data/types';
+import { keepCompaniesSection } from '../../lib/sheets/sections';
 
 type Row = Record<string, string>;
 
@@ -17,10 +18,14 @@ export function ReportsPage() {
   const { rows: companies }   = useModuleData<Row>('companies',   'companies');
   const { rows: assignments } = useModuleData<Row>('companies',   'assignments');
   const { rows: payments }    = useModuleData<Row>('payments',    'payments');
-  const { rows: q1 }          = useModuleData<Row>('procurement', 'q1');
-  const { rows: q2 }          = useModuleData<Row>('procurement', 'q2');
-  const { rows: q3 }          = useModuleData<Row>('procurement', 'q3');
-  const { rows: q4 }          = useModuleData<Row>('procurement', 'q4');
+  const q1Hook = useModuleData<Row>('procurement', 'q1');
+  const q2Hook = useModuleData<Row>('procurement', 'q2');
+  const q3Hook = useModuleData<Row>('procurement', 'q3');
+  const q4Hook = useModuleData<Row>('procurement', 'q4');
+  const q1 = useMemo(() => keepCompaniesSection(q1Hook.rows, q1Hook.headers), [q1Hook.rows, q1Hook.headers]);
+  const q2 = useMemo(() => keepCompaniesSection(q2Hook.rows, q2Hook.headers), [q2Hook.rows, q2Hook.headers]);
+  const q3 = useMemo(() => keepCompaniesSection(q3Hook.rows, q3Hook.headers), [q3Hook.rows, q3Hook.headers]);
+  const q4 = useMemo(() => keepCompaniesSection(q4Hook.rows, q4Hook.headers), [q4Hook.rows, q4Hook.headers]);
   const { rows: confTracker } = useModuleData<ConferenceTrackerRow>('conferences', 'tracker');
   const { rows: conferences }  = useModuleData<Conference>('conferences', 'catalogue');
   const { rows: agreements }   = useModuleData<Agreement>('docs', 'agreements');

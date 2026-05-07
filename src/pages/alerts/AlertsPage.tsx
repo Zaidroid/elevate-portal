@@ -22,6 +22,7 @@ import { useModuleData } from '../../data/useModuleData';
 
 import { Badge, Card, CardHeader, EmptyState } from '../../lib/ui';
 import { alertCounts, computeAlerts, type Alert, type AlertKind } from '../../lib/alerts';
+import { keepCompaniesSection } from '../../lib/sheets/sections';
 
 type Row = Record<string, string>;
 
@@ -40,10 +41,15 @@ export function AlertsPage() {
   const { user } = useAuth();
   const admin = isAdmin(user?.email || '');
 
-  const { rows: q1 }             = useModuleData<Row>('procurement', 'q1');
-  const { rows: q2 }             = useModuleData<Row>('procurement', 'q2');
-  const { rows: q3 }             = useModuleData<Row>('procurement', 'q3');
-  const { rows: q4 }             = useModuleData<Row>('procurement', 'q4');
+  const q1Hook = useModuleData<Row>('procurement', 'q1');
+  const q2Hook = useModuleData<Row>('procurement', 'q2');
+  const q3Hook = useModuleData<Row>('procurement', 'q3');
+  const q4Hook = useModuleData<Row>('procurement', 'q4');
+  // Filter to "Companies" section only — see lib/sheets/sections.ts
+  const q1 = useMemo(() => keepCompaniesSection(q1Hook.rows, q1Hook.headers), [q1Hook.rows, q1Hook.headers]);
+  const q2 = useMemo(() => keepCompaniesSection(q2Hook.rows, q2Hook.headers), [q2Hook.rows, q2Hook.headers]);
+  const q3 = useMemo(() => keepCompaniesSection(q3Hook.rows, q3Hook.headers), [q3Hook.rows, q3Hook.headers]);
+  const q4 = useMemo(() => keepCompaniesSection(q4Hook.rows, q4Hook.headers), [q4Hook.rows, q4Hook.headers]);
   const { rows: payments }        = useModuleData<Row>('payments',    'payments');
   const { rows: agreements }      = useModuleData<Row>('docs',        'agreements');
   const { rows: followups }       = useModuleData<Row>('advisors',    'followups');
@@ -54,7 +60,7 @@ export function AlertsPage() {
 
   const alerts = useMemo(
     () => computeAlerts({
-      prs: [...q1, ...q2, ...q3, ...q4],
+      prs: [...q1, ...q2, ...q3, ...q4] as unknown as Row[],
       payments,
       agreements,
       followups,

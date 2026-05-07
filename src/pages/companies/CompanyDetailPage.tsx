@@ -24,6 +24,7 @@ import { useModuleData } from '../../data/useModuleData';
 import { getSheetId } from '../../config/sheets';
 import type { Company, Contact, Assignment, PR, Payment, ConferenceTrackerRow as ConferenceRow, Agreement as Doc, SelectionRow } from '../../data/types';
 import type { Advisor } from '../../types/advisor';
+import { keepCompaniesSection } from '../../lib/sheets/sections';
 import { getProfileManagers, displayName } from '../../config/team';
 import { derivePRFields } from '../../lib/procurement/compute';
 import { INTERVENTION_TYPES, CORE_PILLARS, pillarFor } from '../../config/interventions';
@@ -102,10 +103,16 @@ export function CompanyDetailPage() {
   // Source Data from Selection workbook.
   const sourceData = useModuleData<Record<string, string>>('selection', 'sourceData');
 
-  const q1 = useModuleData<PR>('procurement', 'q1');
-  const q2 = useModuleData<PR>('procurement', 'q2');
-  const q3 = useModuleData<PR>('procurement', 'q3');
-  const q4 = useModuleData<PR>('procurement', 'q4');
+  const q1Hook = useModuleData<PR>('procurement', 'q1');
+  const q2Hook = useModuleData<PR>('procurement', 'q2');
+  const q3Hook = useModuleData<PR>('procurement', 'q3');
+  const q4Hook = useModuleData<PR>('procurement', 'q4');
+  // Keep the original hook objects so create/update paths still work,
+  // but expose only the Companies-section rows for display + joins.
+  const q1 = { ...q1Hook, rows: useMemo(() => keepCompaniesSection(q1Hook.rows, q1Hook.headers) as PR[], [q1Hook.rows, q1Hook.headers]) };
+  const q2 = { ...q2Hook, rows: useMemo(() => keepCompaniesSection(q2Hook.rows, q2Hook.headers) as PR[], [q2Hook.rows, q2Hook.headers]) };
+  const q3 = { ...q3Hook, rows: useMemo(() => keepCompaniesSection(q3Hook.rows, q3Hook.headers) as PR[], [q3Hook.rows, q3Hook.headers]) };
+  const q4 = { ...q4Hook, rows: useMemo(() => keepCompaniesSection(q4Hook.rows, q4Hook.headers) as PR[], [q4Hook.rows, q4Hook.headers]) };
 
   const payments = useModuleData<Payment>('payments', 'payments');
   const confs    = useModuleData<ConferenceRow>('conferences', 'tracker');

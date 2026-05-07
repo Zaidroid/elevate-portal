@@ -4,6 +4,7 @@ import { derivePRFields } from '../../lib/procurement/compute';
 import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
 import type { PR } from '../../data/types';
+import { keepCompaniesSection } from '../../lib/sheets/sections';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { SourceComparisonView } from './SourceComparisonView';
@@ -53,13 +54,32 @@ export function ProcurementPage() {
   const q3Hook = useModuleData<PR>('procurement', 'q3');
   const q4Hook = useModuleData<PR>('procurement', 'q4');
 
-  // Active quarter data — just pick from the already-loaded hooks.
+  // Filter each quarter to the "Companies" section only — the team's
+  // procurement sheets group rows by team (Companies / Individuals /
+  // Marketing / etc.) using near-empty separator rows. Without this,
+  // the page reads vendors + individuals + stray text rows and counts
+  // get nonsensical (e.g. "1996" PRs because a year cell from a
+  // separator row was being treated as data).
+  const q1Companies = useMemo(() => keepCompaniesSection(q1Hook.rows, q1Hook.headers), [q1Hook.rows, q1Hook.headers]);
+  const q2Companies = useMemo(() => keepCompaniesSection(q2Hook.rows, q2Hook.headers), [q2Hook.rows, q2Hook.headers]);
+  const q3Companies = useMemo(() => keepCompaniesSection(q3Hook.rows, q3Hook.headers), [q3Hook.rows, q3Hook.headers]);
+  const q4Companies = useMemo(() => keepCompaniesSection(q4Hook.rows, q4Hook.headers), [q4Hook.rows, q4Hook.headers]);
+
+  const activeRows: PR[] = view === 'q1' ? q1Companies as PR[]
+    : view === 'q2' ? q2Companies as PR[]
+    : view === 'q3' ? q3Companies as PR[]
+    : view === 'q4' ? q4Companies as PR[]
+    : q1Companies as PR[];
+  // Active quarter data — picks rows from the section-filtered view but
+  // still uses the underlying hook for refresh/updateRow/createRow so
+  // mutations land in the right place.
   const activeHook = view === 'q1' ? q1Hook : view === 'q2' ? q2Hook : view === 'q3' ? q3Hook : q4Hook;
-  const { rows, loading, error, refresh, updateRow, createRow } = isQuarter ? activeHook : q1Hook;
+  const { loading, error, refresh, updateRow, createRow } = isQuarter ? activeHook : q1Hook;
+  const rows = activeRows;
 
   const allE3Rows = useMemo(() => [
-    ...q1Hook.rows, ...q2Hook.rows, ...q3Hook.rows, ...q4Hook.rows,
-  ], [q1Hook.rows, q2Hook.rows, q3Hook.rows, q4Hook.rows]);
+    ...q1Companies, ...q2Companies, ...q3Companies, ...q4Companies,
+  ] as PR[], [q1Companies, q2Companies, q3Companies, q4Companies]);
 
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<PR | null>(null);

@@ -19,6 +19,7 @@ import { displayName } from '../../config/team';
 import { pillarFor } from '../../config/interventions';
 import { canonicalCohortName, COHORT3_ALIASES } from '../../config/cohort3Aliases';
 import { computeAlerts, type Alert } from '../../lib/alerts/index';
+import { keepCompaniesSection } from '../../lib/sheets/sections';
 import {
   Badge,
   Button,
@@ -71,10 +72,15 @@ export function MyHubPage() {
   const q4           = useModuleData<PR>('procurement', 'q4');
   const agreements   = useModuleData<Agreement>('docs', 'agreements');
 
-  const allPrs = useMemo<PR[]>(
-    () => [...q1.rows, ...q2.rows, ...q3.rows, ...q4.rows],
-    [q1.rows, q2.rows, q3.rows, q4.rows],
-  );
+  // Filter each quarter to the "Companies" section only (the team's
+  // procurement sheets group rows under team labels — without filtering
+  // we read individuals + vendors + stray header rows).
+  const allPrs = useMemo<PR[]>(() => [
+    ...keepCompaniesSection(q1.rows, q1.headers),
+    ...keepCompaniesSection(q2.rows, q2.headers),
+    ...keepCompaniesSection(q3.rows, q3.headers),
+    ...keepCompaniesSection(q4.rows, q4.headers),
+  ] as PR[], [q1.rows, q1.headers, q2.rows, q2.headers, q3.rows, q3.headers, q4.rows, q4.headers]);
 
   // Filter master rows to cohort 3 BEFORE scoping. The cohort is decided
   // by the canonical alias map (src/config/cohort3Aliases.ts), not by
