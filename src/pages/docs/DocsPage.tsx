@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Search, Plus, ExternalLink, Download } from 'lucide-react';
 
 import { useModuleData } from '../../data/useModuleData';
@@ -144,7 +144,7 @@ function AgreementDrawer({
 }) {
   const [draft, setDraft] = useState<Agreement | null>(agreement);
   const [saving, setSaving] = useState(false);
-  useMemo(() => setDraft(agreement), [agreement]);
+  useEffect(() => { setDraft(agreement); }, [agreement]);
 
   if (!agreement || !draft) return <Drawer open={false} onClose={onClose} title="" children={null} />;
 

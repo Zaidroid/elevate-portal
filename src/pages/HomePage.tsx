@@ -33,6 +33,7 @@ import { canonicalCohortName, COHORT3_ALIASES } from '../config/cohort3Aliases';
 import { COHORT3_BUDGET_TOTAL_USD } from '../config/interventions';
 import { aggregateByAm, aggregateByCity, aggregateByDonor, aggregateBySub } from '../data/aggregations';
 import type { AmAggregation, CityAggregation, DonorAggregation, SubAggregation } from '../data/aggregations';
+import { PILLARS as PILLARS_FOR_DIAG } from '../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from './companies/interviewedSource';
 import { computeAlerts, type Alert } from '../lib/alerts/index';
 import { keepCompaniesSection } from '../lib/sheets/sections';
@@ -155,6 +156,41 @@ export function HomePage() {
     [amRollup],
   );
 
+  // Diagnostic: how many cohort assignments did we manage to attribute
+  // to a sub-intervention vs how many got dropped (and what the dropped
+  // intervention_type / sub_intervention values look like). Surfaced
+  // under the By-Sub card so when a sub renders 0 we can see whether
+  // that's because the data is missing or because we're failing to
+  // recognise it. Per feedback_diagnostic_first.md.
+  const subDropDiagnostic = useMemo(() => {
+    let counted = 0;
+    let dropped = 0;
+    const droppedSamples = new Map<string, number>(); // "intervention_type::sub_intervention" → count
+    for (const a of assignments.rows) {
+      if (!cohortIds.has(a.company_id)) continue;
+      const subRaw = (a.sub_intervention || '').trim();
+      const itRaw = (a.intervention_type || '').trim();
+      // Mirror the resolver path used by aggregateBySub.
+      const tryResolve = (v: string) => {
+        // Match against the canonical sub list AND legacy codes.
+        // Canonical first.
+        for (const p of PILLARS_FOR_DIAG) for (const sub of p.subInterventions) if (sub === v) return true;
+        return false;
+      };
+      const ok = tryResolve(subRaw) || tryResolve(itRaw);
+      if (ok) counted += 1;
+      else {
+        dropped += 1;
+        const key = `${itRaw || '∅'} :: ${subRaw || '∅'}`;
+        droppedSamples.set(key, (droppedSamples.get(key) ?? 0) + 1);
+      }
+    }
+    const top = Array.from(droppedSamples.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6);
+    return { counted, dropped, top };
+  }, [assignments.rows, cohortIds]);
+
   // Alerts scoped to cohort 3.
   const alerts: Alert[] = useMemo(() => {
     const all = computeAlerts({
@@ -248,7 +284,7 @@ export function HomePage() {
       </div>
 
       {/* Row 2: by sub-intervention (full width — the cohort-design view) */}
-      <SubInsightCard rows={subRollup} />
+      <SubInsightCard rows={subRollup} drop={subDropDiagnostic} />
 
       {/* Row 3: donor budget burn with sub drilldown */}
       <DonorInsightCard rows={donorRollup} dutchCap={dutchCap} sidaCap={sidaCap} />
@@ -431,7 +467,7 @@ const PILLAR_BAR_TONE: Record<string, string> = {
   navy: 'bg-navy-500 dark:bg-navy-400',
 };
 
-function SubInsightCard({ rows }: { rows: SubAggregation[] }) {
+function SubInsightCard({ rows, drop }: { rows: SubAggregation[]; drop: { counted: number; dropped: number; top: Array<[string, number]> } }) {
   const maxCo = Math.max(1, ...rows.map(r => r.companies));
   // Group rows visually under their pillar label without losing the
   // single-table density (one row per sub).
@@ -439,6 +475,23 @@ function SubInsightCard({ rows }: { rows: SubAggregation[] }) {
   return (
     <Card>
       <CardHeader title="By Sub-intervention" subtitle="The 8 cohort sub-interventions, each with companies covered, status mix, planned vs paid spend." />
+      {drop.dropped > 0 && (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-2xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+          <div className="font-semibold">
+            Diagnostic: {drop.counted} cohort assignments attributed · {drop.dropped} dropped because their intervention_type / sub_intervention didn't match the canonical taxonomy.
+          </div>
+          {drop.top.length > 0 && (
+            <ul className="mt-1.5 list-inside list-disc">
+              {drop.top.map(([key, n]) => (
+                <li key={key} className="font-mono">{key} <span className="opacity-70">×{n}</span></li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-1">
+            If you expect Marketing / Legal to count these, edit the assignment in the sheet so <code>sub_intervention</code> is one of the canonical names (e.g. <code>Marketing Agency</code>, <code>Legal Assessment</code>) — or extend <code>src/config/interventions.ts:LEGACY</code> with the spelling you use.
+          </p>
+        </div>
+      )}
       <ul className="divide-y divide-slate-100 text-sm dark:divide-navy-700">
         {rows.map(s => {
           const showPillar = s.pillarLabel !== lastPillar;

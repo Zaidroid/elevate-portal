@@ -37,8 +37,12 @@ export const PILLARS: Pillar[] = [
     label: 'Market Access',
     shortLabel: 'MA',
     color: 'navy',
-    description: 'Helping companies reach new markets — legal/registration, conferences, C-Suite coaching, ElevateBridge sales support.',
-    subInterventions: ['Legal Support', 'Conferences', 'C-Suite', 'ElevateBridge'],
+    description: 'Helping companies reach new markets — legal/registration (Assessment + 2 tiers), conferences, C-Suite coaching, ElevateBridge sales support.',
+    // Legal is a 3-step pipeline: every cohort company starts at "Legal
+    // Assessment" (~9 currently) then graduates to Tier 1 OR Tier 2 based
+    // on need. Tracking them as separate subs lets the dashboard count
+    // each step (and budget allocations are per-tier).
+    subInterventions: ['Legal Assessment', 'Legal Tier 1', 'Legal Tier 2', 'Conferences', 'C-Suite', 'ElevateBridge'],
   },
 ];
 
@@ -79,9 +83,20 @@ const LEGACY: Record<string, { pillar: string; sub: string; flavor?: string }> =
   'MA-Bridge': { pillar: 'MA', sub: 'ElevateBridge' },
   'Conferences': { pillar: 'MA', sub: 'Conferences' },
   'Conference': { pillar: 'MA', sub: 'Conferences' },
-  'MA-Legal': { pillar: 'MA', sub: 'Legal Support' },
-  'Legal': { pillar: 'MA', sub: 'Legal Support' },
-  'MA-Market Registration': { pillar: 'MA', sub: 'Legal Support' },
+  // Legal — pre-2026 rows used a single 'Legal Support' sub. The team
+  // has since split that into a 3-step pipeline (Assessment → Tier 1 OR
+  // Tier 2). Old rows resolve to "Legal Assessment" as the entry stage;
+  // explicit tier rows resolve to their tier. Keep both spellings in
+  // case some sheets use "Legal Tier1" without a space.
+  'MA-Legal': { pillar: 'MA', sub: 'Legal Assessment' },
+  'Legal': { pillar: 'MA', sub: 'Legal Assessment' },
+  'Legal Support': { pillar: 'MA', sub: 'Legal Assessment' },
+  'MA-Market Registration': { pillar: 'MA', sub: 'Legal Assessment' },
+  'Legal Assessment': { pillar: 'MA', sub: 'Legal Assessment' },
+  'Legal Tier 1': { pillar: 'MA', sub: 'Legal Tier 1' },
+  'Legal Tier1': { pillar: 'MA', sub: 'Legal Tier 1' },
+  'Legal Tier 2': { pillar: 'MA', sub: 'Legal Tier 2' },
+  'Legal Tier2': { pillar: 'MA', sub: 'Legal Tier 2' },
 };
 
 // Map any intervention type (new code, sub code, OR legacy code) to its
@@ -173,9 +188,28 @@ export const COHORT3_BUDGET_2026: Record<string, BudgetEntry> = {
     slots: { dutch: 6, sida: 10 },
     usd: { dutch: 33600, sida: 42400 },
   },
+  // Legal split — placeholder allocation. The team's master plan has
+  // 3 Dutch + 3 SIDA legal slots at $18k each side; until the per-tier
+  // breakdown is confirmed, split the slots and budget evenly across
+  // Assessment + Tier 1 + Tier 2. Adjust here when the team locks in
+  // the actual split.
+  'Legal Assessment': {
+    slots: { dutch: 1, sida: 1 },
+    usd: { dutch: 3000, sida: 3000 },
+  },
+  'Legal Tier 1': {
+    slots: { dutch: 1, sida: 1 },
+    usd: { dutch: 6000, sida: 6000 },
+  },
+  'Legal Tier 2': {
+    slots: { dutch: 1, sida: 1 },
+    usd: { dutch: 9000, sida: 9000 },
+  },
+  // Legacy bucket kept for backwards compat with anything still
+  // reading 'Legal Support'.
   'Legal Support': {
     slots: { dutch: 3, sida: 3 },
-    usd: { dutch: 18000, sida: 18000 }, // 3 registrations + Legal Firm + Local Legal Advisors
+    usd: { dutch: 18000, sida: 18000 },
   },
   'Conferences': {
     slots: { dutch: 0, sida: 8 },
@@ -210,7 +244,12 @@ export const SUB_INTERVENTION_LOAD_WEIGHT: Record<string, number> = {
   'Marketing Resources': 2,
   'C-Suite':             2,
   'ElevateBridge':       2,
-  'Legal Support':       2,
+  // Legal — Assessment is a quick screen (1), Tier 1 is full registration
+  // / IP work (3), Tier 2 is bigger overseas / litigation engagements (4).
+  'Legal Support':       2, // legacy alias, kept for old rows
+  'Legal Assessment':    1,
+  'Legal Tier 1':        3,
+  'Legal Tier 2':        4,
   'Conferences':         1,
 };
 

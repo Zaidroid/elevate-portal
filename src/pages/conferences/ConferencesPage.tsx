@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Search, Plus, ExternalLink, Download } from 'lucide-react';
 
 import { useModuleData } from '../../data/useModuleData';
@@ -16,6 +16,10 @@ type View = 'catalogue' | 'tracker';
 const TIERS = ['T1', 'T2', 'T3'];
 const FUND_ELIGIBLE = ['Dutch', 'SIDA', 'Both'];
 const DECISIONS = ['Nominated', 'Committed', 'Withdrawn', 'Attended'];
+// Conference catalogue lifecycle. Free-text status was a footgun (Cancelled
+// got typed differently each time and never matched filters); pick from a
+// closed list instead.
+const CONF_STATUSES = ['Tracked', 'Confirmed', 'Cancelled', 'Postponed', 'Completed'];
 
 const inputClass =
   'w-full rounded-lg border border-slate-200 bg-brand-editable/40 px-3 py-2 text-sm outline-none focus:border-brand-teal dark:border-navy-700 dark:bg-navy-700 dark:text-white';
@@ -250,8 +254,16 @@ function ConferenceDrawer({ conference, onClose, onSave }: {
 }) {
   const [draft, setDraft] = useState<Conference | null>(conference);
   const [saving, setSaving] = useState(false);
-  useMemo(() => setDraft(conference), [conference]);
+  // setDraft must run as a side effect, not inside useMemo (which is for
+  // pure computations). The useMemo form was firing setState during
+  // render — sometimes the second drawer opening would still hold the
+  // first conference's data.
+  useEffect(() => { setDraft(conference); }, [conference]);
   if (!conference || !draft) return <Drawer open={false} onClose={onClose} title="" children={null} />;
+  // Hard guard against the "edited row had no conference_id, save
+  // overwrote the wrong row" scenario. Surface it as a warning the user
+  // sees BEFORE clicking Save instead of after the data is corrupted.
+  const missingId = !draft.conference_id || !draft.conference_id.trim();
 
   return (
     <Drawer
@@ -262,11 +274,23 @@ function ConferenceDrawer({ conference, onClose, onSave }: {
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button onClick={async () => { setSaving(true); try { await onSave(draft); } finally { setSaving(false); } }}
-            disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button>
+            disabled={saving || missingId}>{saving ? 'Saving…' : 'Save'}</Button>
         </>
       }
     >
       <div className="space-y-4">
+        {missingId && (
+          <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+            This row has no <code>conference_id</code> in the sheet.
+            Saving without an ID would overwrite the first ID-less row by
+            mistake. Set an ID below (e.g. <code>CONF-016</code>) before
+            saving.
+          </div>
+        )}
+        <Field label="Conference ID">
+          <input className={inputClass} value={draft.conference_id || ''}
+            onChange={e => setDraft({ ...draft, conference_id: e.target.value })} placeholder="CONF-016" />
+        </Field>
         <Field label="Name">
           <input className={inputClass} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} />
         </Field>
@@ -300,7 +324,10 @@ function ConferenceDrawer({ conference, onClose, onSave }: {
             </select>
           </Field>
           <Field label="Status">
-            <input className={inputClass} value={draft.status} onChange={e => setDraft({ ...draft, status: e.target.value })} />
+            <select className={inputClass} value={draft.status} onChange={e => setDraft({ ...draft, status: e.target.value })}>
+              <option value="">—</option>
+              {CONF_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
           </Field>
         </div>
         <Field label="Website">
@@ -325,7 +352,7 @@ function TrackerDrawer({ row, onClose, onSave }: {
 }) {
   const [draft, setDraft] = useState<TrackerRow | null>(row);
   const [saving, setSaving] = useState(false);
-  useMemo(() => setDraft(row), [row]);
+  useEffect(() => { setDraft(row); }, [row]);
   if (!row || !draft) return <Drawer open={false} onClose={onClose} title="" children={null} />;
 
   return (

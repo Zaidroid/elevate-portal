@@ -213,6 +213,14 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
     const { sheetId, tab, idColumn } = resolved;
     const slot = slotsRef.current[key] ?? EMPTY_SLOT;
 
+    // Refuse empty IDs. Without this, the row-matching loop below finds
+    // the FIRST row whose ID column is also blank and overwrites it —
+    // that's the "edited wemakefuture, web summit got clobbered" bug.
+    // If a row has no ID, mint one in the caller before touching it.
+    if (!id || !String(id).trim()) {
+      throw new Error(`Cannot update row with blank ${idColumn}. Add an ID to the row first (open it, save once with a generated ID), then retry.`);
+    }
+
     // Optimistic update.
     const optimisticRows = slot.rows.map(r =>
       r[idColumn] === id ? { ...r, ...updates } : r

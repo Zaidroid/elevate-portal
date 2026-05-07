@@ -20,7 +20,7 @@
 import type { Company, Assignment, PR, Payment, Conference, ConferenceTrackerRow } from '../../data/types';
 import type { Review } from '../companies/reviewTypes';
 import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
-import { pillarFor, COHORT3_BUDGET_TOTAL_USD } from '../../config/interventions';
+import { pillarFor, PILLARS, resolveIntervention, COHORT3_BUDGET_TOTAL_USD } from '../../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from '../companies/interviewedSource';
 import { COHORT3_ALIASES, canonicalCohortName, cohortEntryFor } from '../../config/cohort3Aliases';
 
@@ -83,10 +83,9 @@ function effectiveStatus(c: Company): string {
   return sheetStatus || 'Applicant';
 }
 
-const SUB_INTERVENTIONS = [
-  'C-Suite', 'Train To Hire', 'Upskilling', 'Marketing Agency',
-  'Marketing Resources', 'ElevateBridge', 'Legal Support', 'Conferences',
-];
+// Source the sub list from PILLARS so taxonomy edits land in the
+// dashboard automatically. Order = pillar order × sub order.
+const SUB_INTERVENTIONS = PILLARS.flatMap(p => p.subInterventions);
 
 // ─── Bar string ─────────────────────────────────────────────────────
 
@@ -331,8 +330,15 @@ export function buildCompaniesDashboard(input: {
   for (const s of SUB_INTERVENTIONS) subCount[s] = 0;
   for (const a of input.assignments) {
     if (!cohortIds.has(a.company_id)) continue;
-    const sub = (a.sub_intervention || '').trim();
-    if (sub) subCount[sub] = (subCount[sub] ?? 0) + 1;
+    // Resolve through the canonical taxonomy so legacy spellings
+    // ("Legal", "Legal Support", "MA-Legal") bucket into "Legal
+    // Assessment" instead of leaking into a stray key. Prefer the
+    // explicit sub_intervention field; fall back to intervention_type.
+    const subRaw = (a.sub_intervention || '').trim();
+    const itRaw = (a.intervention_type || '').trim();
+    const r = (subRaw && resolveIntervention(subRaw)) || (itRaw && resolveIntervention(itRaw));
+    const sub = r && r.sub ? r.sub : '';
+    if (sub && subCount[sub] !== undefined) subCount[sub] += 1;
   }
   const maxSub = Math.max(1, ...Object.values(subCount));
 

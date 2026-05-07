@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, Search, Download } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
@@ -183,7 +183,7 @@ function TeamDrawer({
 }) {
   const [draft, setDraft] = useState<TeamRow | null>(member);
   const [saving, setSaving] = useState(false);
-  useMemo(() => setDraft(member), [member]);
+  useEffect(() => { setDraft(member); }, [member]);
   if (!member || !draft) return <Drawer open={false} onClose={onClose} title="" children={null} />;
 
   return (
