@@ -43,6 +43,7 @@ export function AdvisorDetailDrawer({
   onCreateFollowUp,
   onMarkFollowUpDone,
   onAddComment,
+  onLogOutreach,
 }: {
   advisor: EnrichedAdvisor | null;
   open: boolean;
@@ -56,6 +57,7 @@ export function AdvisorDetailDrawer({
   onCreateFollowUp: (fu: Partial<FollowUp>) => Promise<void>;
   onMarkFollowUpDone: (id: string) => Promise<void>;
   onAddComment: (body: string) => Promise<void>;
+  onLogOutreach?: (advisorId: string, templateKey: string, templateLabel: string) => Promise<void>;
 }) {
   const [tab, setTab] = useState<string>('profile');
   useEffect(() => {
@@ -143,6 +145,10 @@ export function AdvisorDetailDrawer({
             onAdvance={async (nextLabel) => {
               await onTrackerSave({ pipeline_status: nextLabel } as Partial<EnrichedAdvisor>);
             }}
+            onLogOutreach={onLogOutreach
+              ? async (templateKey, templateLabel) =>
+                  onLogOutreach(advisor.advisor_id, templateKey, templateLabel)
+              : undefined}
           />
         )}
         {advisor.pipeline_status === 'Approved' && companies.length > 0 && canEdit && (
@@ -217,6 +223,7 @@ function NextActionCard({
   userTitle,
   companies,
   onAdvance,
+  onLogOutreach,
 }: {
   advisor: EnrichedAdvisor;
   userEmail: string;
@@ -224,6 +231,7 @@ function NextActionCard({
   userTitle?: string;
   companies: CompanyLite[];
   onAdvance: (nextLabel: string) => Promise<void>;
+  onLogOutreach?: (templateKey: string, templateLabel: string) => Promise<void>;
 }) {
   const [advancing, setAdvancing] = useState(false);
   const currentId = STATUS_TO_ID[advisor.pipeline_status || 'New'] || 'new';
@@ -300,6 +308,19 @@ function NextActionCard({
             <div className="flex flex-col items-end gap-1">
               <a
                 href={mailto}
+                onClick={() => {
+                  // Schedule a confirm prompt 800ms after the click — by
+                  // then the OS mail compose window has opened. If the
+                  // user confirms they sent it, log to the Outreach Log.
+                  if (!onLogOutreach) return;
+                  const key = tplKey;
+                  const label = TEMPLATE_LABELS[key];
+                  setTimeout(() => {
+                    if (window.confirm(`Did you send the "${label}" email to ${advisor.full_name}?`)) {
+                      void onLogOutreach(key, label);
+                    }
+                  }, 800);
+                }}
                 className="inline-flex items-center gap-1 rounded-lg border border-brand-teal/40 bg-brand-teal/10 px-3 py-1.5 text-xs font-semibold text-brand-teal transition-colors hover:bg-brand-teal hover:text-white"
                 title="Opens your default mail client (Outlook on a Mac/Windows when set as default) with the message pre-filled"
               >
@@ -310,11 +331,26 @@ function NextActionCard({
                 href={outlookWeb}
                 target="_blank"
                 rel="noopener noreferrer"
+                onClick={() => {
+                  if (!onLogOutreach) return;
+                  const key = tplKey;
+                  const label = TEMPLATE_LABELS[key];
+                  setTimeout(() => {
+                    if (window.confirm(`Did you send the "${label}" email to ${advisor.full_name}?`)) {
+                      void onLogOutreach(key, label);
+                    }
+                  }, 800);
+                }}
                 className="text-2xs font-semibold text-slate-500 hover:text-brand-teal hover:underline"
                 title="Open in Outlook on the web"
               >
                 Outlook web →
               </a>
+              {advisor.last_outreach_at && (
+                <span className="text-2xs text-slate-400" title={`Last outreach: ${advisor.last_outreach_at}`}>
+                  Last sent {advisor.last_outreach_at.slice(0, 10)} · {advisor.last_outreach_template || ''}
+                </span>
+              )}
             </div>
           )}
         </div>

@@ -23,6 +23,7 @@ import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
 import { getSheetId } from '../../config/sheets';
 import type { Company, Contact, Assignment, PR, Payment, ConferenceTrackerRow as ConferenceRow, Agreement as Doc, SelectionRow } from '../../data/types';
+import type { Advisor } from '../../types/advisor';
 import { getProfileManagers, displayName } from '../../config/team';
 import { derivePRFields } from '../../lib/procurement/compute';
 import { INTERVENTION_TYPES, CORE_PILLARS, pillarFor } from '../../config/interventions';
@@ -44,6 +45,7 @@ import type { TabItem } from '../../lib/ui';
 import type { ActivityRow, CompanyComment, PreDecisionRecommendation, Review } from './reviewTypes';
 import { summarizeReviews } from './reviewTypes';
 import { ActivityTimeline as AuditLogTimeline } from './ActivityTimeline';
+import { AssignedAdvisorsTab } from './AssignedAdvisorsTab';
 
 
 
@@ -89,6 +91,9 @@ export function CompanyDetailPage() {
   const companies     = useModuleData<Company>('companies', 'companies');
   const contacts      = useModuleData<Contact>('companies', 'contacts');
   const assignments   = useModuleData<Assignment>('companies', 'assignments');
+  // Reverse mapping: advisors whose assignment_company_id points at us.
+  // The Advisors page is the master; this view is read-only here.
+  const advisors      = useModuleData<Advisor>('advisors', 'advisors');
   const reviewsDoc    = useModuleData<Review>('companies', 'reviews');
   const activityDoc   = useModuleData<ActivityRow>('companies', 'activity');
   const commentsDoc   = useModuleData<CompanyComment>('companies', 'comments');
@@ -177,6 +182,10 @@ export function CompanyDetailPage() {
   const companyAssignments = useMemo(
     () => assignments.rows.filter(a => masterKey && a.company_id === masterKey),
     [assignments.rows, masterKey]
+  );
+  const assignedAdvisors = useMemo(
+    () => advisors.rows.filter(a => masterKey && (a.assignment_company_id || '') === masterKey),
+    [advisors.rows, masterKey]
   );
   const companyReviews = useMemo(
     () => reviewsDoc.rows.filter(r => masterKey && r.company_id === masterKey),
@@ -309,6 +318,7 @@ export function CompanyDetailPage() {
   const tabs: TabItem[] = [
     { value: 'overview', label: 'Overview', icon: <Building2 className="h-4 w-4" /> },
     { value: 'program', label: 'Program', icon: <Activity className="h-4 w-4" />, count: companyAssignments.length },
+    { value: 'advisors', label: 'Advisors', icon: <GraduationCap className="h-4 w-4" />, count: assignedAdvisors.length },
     { value: 'comments', label: 'Comments', icon: <MessageCircle className="h-4 w-4" />, count: companyComments.length + companyPreDecisions.length },
     { value: 'selection', label: 'Selection', icon: <Sparkles className="h-4 w-4" />, count: hasSelection ? 1 : 0 },
     { value: 'activity', label: 'Activity', icon: <LayoutDashboard className="h-4 w-4" />, count: activityCount },
@@ -481,6 +491,9 @@ export function CompanyDetailPage() {
             }}
             masterKey={masterKey}
           />
+        )}
+        {tab === 'advisors' && (
+          <AssignedAdvisorsTab rows={assignedAdvisors} />
         )}
         {tab === 'comments' && (
           <CommentsTab

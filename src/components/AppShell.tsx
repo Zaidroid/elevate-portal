@@ -15,11 +15,12 @@ import {
   FileText,
   GraduationCap,
   Home,
-  Kanban as KanbanIcon,
+  Inbox,
   LogOut,
   Menu,
   Moon,
   Plane,
+  RefreshCw,
   Sun,
   Upload,
   Users,
@@ -35,7 +36,12 @@ type NavItem = {
   to: string;
   label: string;
   icon: ReactNode;
+  /** Show only to admins / leadership. */
   adminOnly?: boolean;
+  /** Show only to AMs (profile_manager + member tiers). Used to hide
+   *  "My hub" from admins, since they land on Home and don't have a
+   *  pool to scope to. */
+  amOnly?: boolean;
 };
 
 type NavGroup = {
@@ -45,37 +51,41 @@ type NavGroup = {
 
 const NAV_GROUPS: NavGroup[] = [
   {
-    label: 'Workspace',
+    label: 'Today',
     items: [
-      { to: '/', label: 'Home', icon: <Home className="h-[17px] w-[17px]" /> },
-      { to: '/board', label: 'Workboard', icon: <KanbanIcon className="h-[17px] w-[17px]" /> },
+      { to: '/my-hub', label: 'My hub', icon: <Inbox className="h-[17px] w-[17px]" />, amOnly: true },
+      { to: '/', label: 'Home', icon: <Home className="h-[17px] w-[17px]" />, adminOnly: true },
+      { to: '/alerts', label: 'Alerts', icon: <Bell className="h-[17px] w-[17px]" /> },
     ],
   },
   {
-    label: 'Pipeline',
+    label: 'Cohort',
     items: [
       { to: '/selection', label: 'Selection', icon: <CheckCircle2 className="h-[17px] w-[17px]" /> },
       { to: '/companies', label: 'Companies', icon: <Building2 className="h-[17px] w-[17px]" /> },
+      { to: '/conferences', label: 'Conferences', icon: <Plane className="h-[17px] w-[17px]" /> },
+    ],
+  },
+  {
+    label: 'Operations',
+    items: [
       { to: '/procurement', label: 'Procurement', icon: <ClipboardList className="h-[17px] w-[17px]" /> },
       { to: '/payments', label: 'Payments', icon: <Wallet className="h-[17px] w-[17px]" />, adminOnly: true },
-    ],
-  },
-  {
-    label: 'Delivery',
-    items: [
-      { to: '/conferences', label: 'Conferences', icon: <Plane className="h-[17px] w-[17px]" /> },
       { to: '/docs', label: 'Docs & agreements', icon: <FileText className="h-[17px] w-[17px]" /> },
-      { to: '/elevatebridge', label: 'ElevateBridge', icon: <Briefcase className="h-[17px] w-[17px]" /> },
-      { to: '/advisors', label: 'Advisors', icon: <GraduationCap className="h-[17px] w-[17px]" /> },
     ],
   },
   {
-    label: 'Insights',
+    label: 'People',
     items: [
-      { to: '/alerts', label: 'Alerts', icon: <Bell className="h-[17px] w-[17px]" /> },
+      { to: '/advisors', label: 'Advisors', icon: <GraduationCap className="h-[17px] w-[17px]" /> },
+      { to: '/elevatebridge', label: 'ElevateBridge', icon: <Briefcase className="h-[17px] w-[17px]" /> },
+    ],
+  },
+  {
+    label: 'Reporting',
+    items: [
       { to: '/reports', label: 'Reports', icon: <BarChart3 className="h-[17px] w-[17px]" /> },
       { to: '/logframes', label: 'Logframes', icon: <BarChart3 className="h-[17px] w-[17px]" /> },
-      { to: '/team', label: 'Team roster', icon: <Users className="h-[17px] w-[17px]" />, adminOnly: true },
     ],
   },
   {
@@ -83,6 +93,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/import', label: 'Bulk import', icon: <Upload className="h-[17px] w-[17px]" />, adminOnly: true },
       { to: '/admin/lookups', label: 'Lookups', icon: <ClipboardList className="h-[17px] w-[17px]" />, adminOnly: true },
+      { to: '/team', label: 'Team roster', icon: <Users className="h-[17px] w-[17px]" />, adminOnly: true },
     ],
   },
 ];
@@ -144,24 +155,27 @@ export function AppShell({
   isDarkMode: boolean;
   toggleTheme: () => void;
 }) {
-  const { user, signOut, sessionExpiringSoon, sessionExpired } = useAuth();
+  const { user, signOut, sessionExpiringSoon, sessionExpired, refreshing, extendSession } = useAuth();
   const navigate = useNavigate();
   const admin = user ? isAdmin(user.email) : false;
   const tier = user?.email ? getTier(user.email) : 'member';
 
-  // ── Session warning banner state ───────────────────────────────────────
-  type SessionWarning = 'ok' | 'expiring' | 'expired';
+  // ── Session banner state ───────────────────────────────────────────────
+  // Tiered: ok < expiring (5 min warning, soft) < refreshing (user
+  // clicked Extend, popup is open) < expired (real 401 from Google).
+  type SessionWarning = 'ok' | 'expiring' | 'refreshing' | 'expired';
   const [sessionWarning, setSessionWarning] = useState<SessionWarning>('ok');
 
-
-  // React to auth-state flags (set by the watchdog in AuthService)
   useEffect(() => {
     if (sessionExpired) setSessionWarning('expired');
+    else if (refreshing) setSessionWarning('refreshing');
     else if (sessionExpiringSoon) setSessionWarning('expiring');
     else setSessionWarning('ok');
-  }, [sessionExpiringSoon, sessionExpired]);
+  }, [sessionExpiringSoon, sessionExpired, refreshing]);
 
-  // Also listen to the event bus emitted by sheets/client.ts on 401/no-token
+  // Hard logout signal from sheets/client.ts (only fired on second
+  // consecutive 401, see request() in client.ts). Lets a runtime auth
+  // failure still escalate to the red banner even if state lags.
   useEffect(() => {
     const onExpired = () => setSessionWarning('expired');
     sessionEvents.addEventListener('session-expired', onExpired);
@@ -230,7 +244,13 @@ export function AppShell({
 
       <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-4">
         {NAV_GROUPS.map(group => {
-          const visible = group.items.filter(i => !i.adminOnly || admin);
+          const visible = group.items.filter(i => {
+            if (i.adminOnly && !admin) return false;
+            // amOnly: hide from admins (who land on Home and have no
+            // pool to scope to). Leadership is admin-tier so also hidden.
+            if (i.amOnly && admin) return false;
+            return true;
+          });
           if (visible.length === 0) return null;
           return (
             <div key={group.label}>
@@ -465,11 +485,25 @@ export function AppShell({
         </div>
 
         <div className="flex-1 px-4 py-6 md:px-8 md:py-8">
-          {/* Session warning banner */}
+          {/* Session banner — soft warning at 5min remaining; user clicks Extend (no auto-popups). */}
           {sessionWarning === 'expiring' && (
-            <div className="mb-4 flex items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-200">
-              <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-              <span>Your session expires in a few minutes. Save any open changes — the page will prompt you to sign in again shortly.</span>
+            <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-200">
+              <div className="flex items-center gap-3">
+                <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                <span>Your session expires in a few minutes. Click <strong>Extend</strong> to keep working without re-signing in.</span>
+              </div>
+              <button
+                onClick={() => extendSession()}
+                className="flex-shrink-0 rounded-md bg-amber-600 px-3 py-1 text-xs font-semibold text-white hover:bg-amber-700"
+              >
+                Extend
+              </button>
+            </div>
+          )}
+          {sessionWarning === 'refreshing' && (
+            <div className="mb-4 flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-600 dark:border-navy-700 dark:bg-navy-700/50 dark:text-slate-300">
+              <RefreshCw className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
+              <span>Extending your session — finish in the popup if it appears.</span>
             </div>
           )}
           {sessionWarning === 'expired' && (

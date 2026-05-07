@@ -2,6 +2,8 @@
 // Pattern extracted from Advisors + selection-tool: Bearer auth from localStorage,
 // 429 exponential backoff, session-expired event bus.
 
+import { assertWritable } from './writeGuard';
+
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
 export const sessionEvents = new EventTarget();
@@ -10,16 +12,21 @@ export type ValueRenderOption = 'FORMATTED_VALUE' | 'UNFORMATTED_VALUE' | 'FORMU
 export type ValueInputOption = 'RAW' | 'USER_ENTERED';
 
 function getAccessToken(silent = false): string | null {
+  // Read the token. We do NOT dispatch session-expired based on the
+  // local clock anymore — the local clock can drift, and the auth
+  // watchdog already handles proactive refresh. The authoritative
+  // signal that the token is dead is a 401 response from Google,
+  // handled in `request()` below.
   const token = localStorage.getItem('google_access_token');
-  const expiry = localStorage.getItem('token_expiry');
-  if (!token || !expiry || Date.now() >= parseInt(expiry)) {
-    if (!silent) sessionEvents.dispatchEvent(new Event('session-expired'));
-    return null;
-  }
+  if (!token) return null;
+  // Soft hint: if the local clock says the token is expired, return
+  // it anyway — request() will hit a 401 and trigger the retry path,
+  // which will give the watchdog a chance to refresh first.
+  void silent;
   return token;
 }
 
-async function request<T>(url: string, options: RequestInit = {}, retries = 3): Promise<T> {
+async function request<T>(url: string, options: RequestInit = {}, retries = 3, firstAttempt = true): Promise<T> {
   const token = getAccessToken();
   if (!token) throw new Error('No valid access token');
 
@@ -33,6 +40,15 @@ async function request<T>(url: string, options: RequestInit = {}, retries = 3): 
   });
 
   if (res.status === 401) {
+    // Tolerate a single transient 401: pause 1 s (the auth watchdog
+    // may be in the middle of a silent refresh), then retry exactly
+    // once with whatever token is in localStorage at that point. Only
+    // a SECOND consecutive 401 fires the session-expired event and
+    // tears the user out of their work.
+    if (firstAttempt) {
+      await new Promise(r => setTimeout(r, 1000));
+      return request<T>(url, options, retries, false);
+    }
     sessionEvents.dispatchEvent(new Event('session-expired'));
     throw new Error('Session expired');
   }
@@ -44,7 +60,7 @@ async function request<T>(url: string, options: RequestInit = {}, retries = 3): 
   if ((res.status === 429 || res.status === 500 || res.status === 502 || res.status === 503) && retries > 0) {
     const delay = Math.pow(2, 4 - retries) * 500;
     await new Promise(r => setTimeout(r, delay));
-    return request<T>(url, options, retries - 1);
+    return request<T>(url, options, retries - 1, firstAttempt);
   }
 
   if (!res.ok) {
@@ -90,6 +106,7 @@ export async function appendRows(
   values: (string | number | boolean)[][],
   opts: { valueInput?: ValueInputOption } = {}
 ): Promise<void> {
+  assertWritable(sheetId);
   const input = opts.valueInput || 'USER_ENTERED';
   const url =
     rangeUrl(sheetId, range) +
@@ -103,6 +120,7 @@ export async function updateRange(
   values: (string | number | boolean)[][],
   opts: { valueInput?: ValueInputOption } = {}
 ): Promise<void> {
+  assertWritable(sheetId);
   const input = opts.valueInput || 'USER_ENTERED';
   const url = `${rangeUrl(sheetId, range)}?valueInputOption=${input}`;
   await request(url, { method: 'PUT', body: JSON.stringify({ values }) });
@@ -112,6 +130,7 @@ export async function batchUpdate(
   sheetId: string,
   requests: unknown[]
 ): Promise<unknown> {
+  assertWritable(sheetId);
   const url = `${SHEETS_API}/${sheetId}:batchUpdate`;
   return request(url, { method: 'POST', body: JSON.stringify({ requests }) });
 }

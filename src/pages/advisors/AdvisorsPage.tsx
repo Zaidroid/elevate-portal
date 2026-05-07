@@ -6,6 +6,7 @@
 // client-side in `enrichAdvisors`.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Activity as ActivityIcon,
   AlertCircle,
@@ -64,7 +65,10 @@ import { AdvisorFollowUpsTab } from './AdvisorFollowUpsTab';
 import { AdvisorActivityTab } from './AdvisorActivityTab';
 import { AdvisorDetailDrawer } from './AdvisorDetailDrawer';
 import { AdvisorDashboard } from './AdvisorDashboard';
-import { importNewFormResponses } from './importFromFormResponses';
+import { importNewFormResponses, type ImportResult } from './importFromFormResponses';
+import { appendOutreachEntry, appendOutreachBatch, stampLastOutreach } from './outreachLog';
+import { writeAdvisorPipelineSnapshot } from './snapshotWriter';
+import { ALL_TEMPLATE_KEYS, renderTemplate, templateMailto, TEMPLATE_LABELS, type TemplateKey } from './emailTemplates';
 import { deduplicateAdvisors } from './deduplicateAdvisors';
 
 // Best-effort year extractor. Handles ISO ('2026-01-15...'), US-locale
@@ -154,6 +158,26 @@ export function AdvisorsPage() {
   // with an auto-poll every 5 minutes.
   const [importing, setImporting] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Deep-link support: /advisors?focus=<advisor_id> auto-opens the
+  // detail drawer for that advisor on mount. Used by company detail
+  // pages to jump directly into the matched advisor's record.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const focus = searchParams.get('focus');
+    if (!focus || !advHook.rows.length) return;
+    if (advHook.rows.some(r => r.advisor_id === focus)) {
+      setSelectedId(focus);
+      const next = new URLSearchParams(searchParams);
+      next.delete('focus');
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, advHook.rows, setSearchParams]);
+  // Last form-import outcome — surfaced in the page header AND a full
+  // diagnostic card below the header so any schema drift / dedupe /
+  // skip is visible without opening devtools.
+  const [lastFormImport, setLastFormImport] = useState<ImportResult | null>(null);
+  const [showImportDetails, setShowImportDetails] = useState(false);
 
   const enriched = useMemo(
     () => enrichAdvisors(advHook.rows, fuHook.rows, cmtHook.rows, actHook.rows, companies),
@@ -280,7 +304,10 @@ export function AdvisorsPage() {
     }
 
     try {
-      await advHook.updateRow(advisorId, { pipeline_status: nextLabel } as Partial<Advisor>);
+      // Re-stamp scores alongside the status change so the sheet's
+      // Dashboard tab never goes stale on bulk moves / drag-drop.
+      const scored = scoreFields({ ...adv, pipeline_status: nextLabel });
+      await advHook.updateRow(advisorId, { pipeline_status: nextLabel, ...scored } as Partial<Advisor>);
       if (sheetId) {
         await appendActivity(sheetId, tabActivity, {
           user_email: userEmail,
@@ -439,6 +466,14 @@ export function AdvisorsPage() {
   const runFormImport = useCallback(async (silent: boolean) => {
     const s = importStateRef.current;
     if (!s.sheetId) return;
+    // Guard: skip if destination headers haven't loaded yet — otherwise
+    // the appendRows call would push empty rows. The poll fires again
+    // shortly so we'll catch up.
+    if (!s.headers || s.headers.length === 0) {
+      if (!silent) toast.info?.('Advisors data still loading — try again in a moment.');
+      else console.info('[advisors] auto-poll skipped: headers not loaded yet');
+      return;
+    }
     const formSheetId = getSheetId('advisorsFormResponses');
     const formTab = getTab('advisorsFormResponses', 'responses');
     if (!formSheetId) {
@@ -456,15 +491,23 @@ export function AdvisorsPage() {
         existingAdvisors: s.existing,
         userEmail: s.userEmail,
       });
+      // Always stash the FULL result + log a structured summary so silent
+      // failures are visible in the UI (FormIntakeDiagnostics card).
+      setLastFormImport(result);
+      const summary = `[advisors] form-poll · fetched=${result.fetched} imported=${result.imported} dupes=${result.alreadyKnown} archived=${result.archived} skippedNoEmail=${result.skippedNoEmail} unmapped=[${result.unmappedHeaders.join(', ')}] errors=[${result.errors.join(' | ')}] at ${result.ranAt}`;
       if (result.errors.length > 0) {
+        console.warn(summary);
         if (!silent) toast.error(`Import error: ${result.errors[0]}`);
-        else console.warn('[advisors] auto-import error:', result.errors[0]);
         return;
       }
+      console.info(summary);
+      // ALWAYS refresh the data layer after a successful poll, even if
+      // imported==0. The previous behavior only refreshed on imported>0,
+      // which left stale data in the cache when an external sync (e.g.,
+      // a teammate appending a row) happened between polls.
+      await advHook.refresh();
       if (result.imported > 0) {
-        // Always notify the user when something actually lands, even on auto.
         toast.success(`${result.imported} new advisor entr${result.imported === 1 ? 'y' : 'ies'} imported${result.archived > 0 ? ` (${result.archived} pre-2026)` : ''}`);
-        await advHook.refresh();
         await appendActivity(s.sheetId, tabActivity, {
           user_email: s.userEmail,
           advisor_id: '',
@@ -562,7 +605,8 @@ export function AdvisorsPage() {
         const adv = enriched.find(a => a.advisor_id === id);
         if (!adv || adv.pipeline_status === targetLabel) continue;
         try {
-          await advHook.updateRow(id, { pipeline_status: targetLabel } as Partial<Advisor>);
+          const scored = scoreFields({ ...adv, pipeline_status: targetLabel });
+          await advHook.updateRow(id, { pipeline_status: targetLabel, ...scored } as Partial<Advisor>);
           if (sheetId) {
             await appendActivity(sheetId, tabActivity, {
               user_email: userEmail,
@@ -621,6 +665,78 @@ export function AdvisorsPage() {
     }
   };
 
+  // Bulk send: opens N compose tabs for the selected advisors, then a
+  // single confirm afterwards batches one Outreach Log write +
+  // per-advisor last_outreach_at stamp.
+  const handleBulkSendEmail = async (templateKey: TemplateKey) => {
+    if (!sheetId) return;
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const advisors = ids
+      .map(id => advHook.rows.find(r => r.advisor_id === id))
+      .filter((a): a is Advisor => !!a && !!a.email);
+    if (advisors.length === 0) {
+      toast.error('No selected advisors have an email address.');
+      return;
+    }
+    const senderName = user?.name || userEmail.split('@')[0];
+    const senderTitle = getUserByEmail(userEmail)?.title;
+    let popupBlocked = 0;
+    for (const a of advisors) {
+      const rendered = renderTemplate(templateKey, {
+        advisor: { full_name: a.full_name, email: a.email, position: a.position, employer: a.employer, country: a.country },
+        sender: { name: senderName, email: userEmail, title: senderTitle },
+      });
+      const w = window.open(templateMailto(rendered), '_blank');
+      if (!w) popupBlocked += 1;
+    }
+    if (popupBlocked > 0) {
+      toast.error(`${popupBlocked} pop-ups blocked — allow pop-ups for this site, then click again.`);
+      return;
+    }
+    const confirmed = window.confirm(`All ${advisors.length} emails sent?`);
+    if (!confirmed) {
+      toast.info?.('Skipped logging — open the drawer to log individual sends.');
+      return;
+    }
+    const sentAt = new Date().toISOString();
+    setBulkRunning(true);
+    try {
+      const label = TEMPLATE_LABELS[templateKey];
+      await appendOutreachBatch(sheetId, advisors.map(a => ({
+        advisor_id: a.advisor_id,
+        advisor_name: a.full_name || '',
+        email: a.email || '',
+        template_key: templateKey,
+        template_label: label,
+        sender_email: userEmail,
+        sent_at: sentAt,
+      })));
+      for (const a of advisors) {
+        try {
+          await stampLastOutreach(advHook.updateRow, a.advisor_id, templateKey, sentAt);
+        } catch (err) {
+          console.warn('[advisors] stamp failed for', a.advisor_id, err);
+        }
+      }
+      await appendActivity(sheetId, tabActivity, {
+        user_email: userEmail,
+        advisor_id: '',
+        action: 'outreach',
+        field: 'bulk',
+        new_value: templateKey,
+        details: `bulk · ${advisors.length} sent`,
+      });
+      await actHook.refresh();
+      toast.success(`Logged ${advisors.length} outreach entries`);
+      setSelectedIds(new Set());
+    } catch (err) {
+      toast.error(`Bulk log failed: ${(err as Error).message}`);
+    } finally {
+      setBulkRunning(false);
+    }
+  };
+
   // Auto-acknowledge: scan for advisors with pipeline_status='New' that
   // pass a strong-fit threshold and auto-advance to 'Acknowledged'. Runs
   // each time the advisor list updates while autoAck is on. Records a
@@ -641,7 +757,8 @@ export function AdvisorsPage() {
         if (candidates.length === 0) return;
         for (const adv of candidates) {
           try {
-            await advHook.updateRow(adv.advisor_id, { pipeline_status: 'Acknowledged' } as Partial<Advisor>);
+            const scored = scoreFields({ ...adv, pipeline_status: 'Acknowledged' });
+            await advHook.updateRow(adv.advisor_id, { pipeline_status: 'Acknowledged', ...scored } as Partial<Advisor>);
             await appendActivity(sheetId, tabActivity, {
               user_email: 'auto-ack',
               advisor_id: adv.advisor_id,
@@ -672,20 +789,88 @@ export function AdvisorsPage() {
     });
   };
 
-  // Auto-poll: pull from the linked Google Form responses sheet on a 5-min
-  // cadence. Fires once 3s after mount (after the initial useSheetDoc load
-  // settles) and then every 5 minutes. Silent unless something new lands.
+  // Auto-poll: pull from the linked Google Form responses sheet.
+  // Fires twice on mount (1.5s + 8s, to catch first paint + post-load
+  // cases where SheetDataProvider hadn't finished its initial fetch),
+  // then every 90 seconds thereafter. The diagnostics card shows the
+  // outcome of every run so the team can see if/why rows aren't
+  // landing.
   useEffect(() => {
     if (!sheetId || !canEdit) return;
     if (!getSheetId('advisorsFormResponses')) return;
-    const POLL_MS = 5 * 60 * 1000;
-    const first = setTimeout(() => { void runFormImport(true); }, 3000);
+    const POLL_MS = 90 * 1000;
+    const first = setTimeout(() => { void runFormImport(true); }, 1500);
+    const second = setTimeout(() => { void runFormImport(true); }, 8000);
     const interval = setInterval(() => { void runFormImport(true); }, POLL_MS);
     return () => {
       clearTimeout(first);
+      clearTimeout(second);
       clearInterval(interval);
     };
   }, [sheetId, canEdit, runFormImport]);
+
+  // Pipeline snapshot mirror tab: rewrite a polished, human-friendly
+  // copy of advisor + follow-up state into the Advisors workbook every
+  // time the data changes (debounced 3 s). The team can open the sheet
+  // directly and use it as a parallel UI to the portal.
+  const snapshotBusy = useRef(false);
+  useEffect(() => {
+    if (!canEdit || !sheetId) return;
+    if (advHook.rows.length === 0) return;
+    const handle = setTimeout(async () => {
+      if (snapshotBusy.current) return;
+      snapshotBusy.current = true;
+      try {
+        const companyNameById = new Map<string, string>();
+        for (const c of companies) {
+          if (c.company_id) companyNameById.set(c.company_id, c.company_name || c.company_id);
+        }
+        await writeAdvisorPipelineSnapshot({
+          advisors: advHook.rows,
+          followups: fuHook.rows,
+          companyNameById,
+          generatedBy: userEmail,
+        });
+      } catch (err) {
+        console.warn('[advisors] snapshot write failed', err);
+      } finally {
+        snapshotBusy.current = false;
+      }
+    }, 3000);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [advHook.rows, fuHook.rows, canEdit, sheetId, userEmail]);
+
+  const handleLogOutreach = async (advisorId: string, templateKey: string, templateLabel: string) => {
+    if (!sheetId) return;
+    const adv = advHook.rows.find(r => r.advisor_id === advisorId);
+    if (!adv) return;
+    const sentAt = new Date().toISOString();
+    try {
+      await appendOutreachEntry(sheetId, {
+        advisor_id: advisorId,
+        advisor_name: adv.full_name || '',
+        email: adv.email || '',
+        template_key: templateKey,
+        template_label: templateLabel,
+        sender_email: userEmail,
+        sent_at: sentAt,
+      });
+      await stampLastOutreach(advHook.updateRow, advisorId, templateKey, sentAt);
+      await appendActivity(sheetId, tabActivity, {
+        user_email: userEmail,
+        advisor_id: advisorId,
+        action: 'outreach',
+        field: 'template',
+        new_value: templateKey,
+        details: `sent ${templateLabel}`,
+      });
+      await actHook.refresh();
+      toast.success(`Outreach logged · ${templateLabel}`);
+    } catch (err) {
+      toast.error(`Couldn't log outreach: ${(err as Error).message}`);
+    }
+  };
 
   const handleAddComment = async (body: string) => {
     if (!selected) return;
@@ -760,15 +945,7 @@ export function AdvisorsPage() {
         ]}
         actions={
           <>
-            {canEdit && (
-              <span
-                className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:border-navy-700 dark:text-slate-400"
-                title="Form responses are pulled every 5 minutes"
-              >
-                <CloudDownload className={`h-3 w-3 ${importing ? 'animate-pulse text-brand-teal' : ''}`} />
-                Auto-sync
-              </span>
-            )}
+            {canEdit && <FormSyncPill last={lastFormImport} importing={importing} onSyncNow={() => runFormImport(false)} />}
             <Button variant="ghost" onClick={() => setShowArchived(v => !v)} title={showArchived ? 'Hide archived' : 'Show archived'}>
               <Archive className="h-4 w-4" />
             </Button>
@@ -786,6 +963,16 @@ export function AdvisorsPage() {
           </>
         }
       />
+
+      {canEdit && (
+        <FormIntakeDiagnostics
+          last={lastFormImport}
+          importing={importing}
+          showDetails={showImportDetails}
+          onToggleDetails={() => setShowImportDetails(v => !v)}
+          onSyncNow={() => runFormImport(false)}
+        />
+      )}
 
       {newEntries.length > 0 && (
         <Card accent="red">
@@ -947,6 +1134,7 @@ export function AdvisorsPage() {
           bulkRunning={bulkRunning}
           onBulkMove={handleBulkMove}
           onBulkAssign={handleBulkAssign}
+          onBulkSendEmail={handleBulkSendEmail}
           onOpen={a => setSelectedId(a.advisor_id)}
         />
       )}
@@ -987,6 +1175,7 @@ export function AdvisorsPage() {
         onCreateFollowUp={handleCreateFollowUp}
         onMarkFollowUpDone={handleMarkFollowUpDone}
         onAddComment={handleAddComment}
+        onLogOutreach={handleLogOutreach}
       />
     </div>
   );
@@ -1000,6 +1189,7 @@ function RosterTable({
   bulkRunning,
   onBulkMove,
   onBulkAssign,
+  onBulkSendEmail,
   onOpen,
 }: {
   advisors: EnrichedAdvisor[];
@@ -1009,8 +1199,11 @@ function RosterTable({
   bulkRunning: boolean;
   onBulkMove: (target: AdvisorPipelineId | 'Archived') => Promise<void>;
   onBulkAssign: () => Promise<void>;
+  onBulkSendEmail: (templateKey: TemplateKey) => Promise<void>;
   onOpen: (a: EnrichedAdvisor) => void;
 }) {
+  const [bulkEmailOpen, setBulkEmailOpen] = useState(false);
+  const [bulkEmailTemplate, setBulkEmailTemplate] = useState<TemplateKey>('intro_invite');
   const allChecked = advisors.length > 0 && advisors.every(a => selectedIds.has(a.advisor_id));
   const someChecked = !allChecked && advisors.some(a => selectedIds.has(a.advisor_id));
 
@@ -1146,9 +1339,35 @@ function RosterTable({
             <Button size="sm" variant="ghost" onClick={() => onBulkMove('acknowledged')} disabled={bulkRunning}>Acknowledge</Button>
             <Button size="sm" variant="ghost" onClick={() => onBulkMove('allocated')} disabled={bulkRunning}>Allocate</Button>
             <Button size="sm" variant="ghost" onClick={onBulkAssign} disabled={bulkRunning}>Set assignee…</Button>
+            <Button size="sm" variant="ghost" onClick={() => setBulkEmailOpen(true)} disabled={bulkRunning}>Send template…</Button>
             <Button size="sm" variant="ghost" onClick={() => onBulkMove('on_hold')} disabled={bulkRunning}>Move to On Hold</Button>
             <Button size="sm" variant="ghost" onClick={() => onBulkMove('Archived')} disabled={bulkRunning}>Archive</Button>
             <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())} disabled={bulkRunning}>Clear</Button>
+          </div>
+        </Card>
+      )}
+      {bulkEmailOpen && (
+        <Card>
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="mb-1 block text-2xs font-bold uppercase tracking-wider text-slate-500">Template</label>
+              <select
+                value={bulkEmailTemplate}
+                onChange={e => setBulkEmailTemplate(e.target.value as TemplateKey)}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-navy-700 dark:bg-navy-900 dark:text-white"
+              >
+                {ALL_TEMPLATE_KEYS.map(k => (
+                  <option key={k} value={k}>{TEMPLATE_LABELS[k]}</option>
+                ))}
+              </select>
+            </div>
+            <p className="flex-1 text-xs text-slate-500">
+              Will open {selectedIds.size} compose tabs (one per advisor). Confirm afterwards to log to the Outreach tab. Pop-ups must be allowed.
+            </p>
+            <Button size="sm" variant="primary" onClick={async () => { await onBulkSendEmail(bulkEmailTemplate); setBulkEmailOpen(false); }} disabled={bulkRunning}>
+              Compose {selectedIds.size}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setBulkEmailOpen(false)}>Cancel</Button>
           </div>
         </Card>
       )}
@@ -1184,6 +1403,255 @@ function pipelineTone(s: string | undefined): Tone {
     case 'On Hold': return 'neutral';
     default: return 'neutral';
   }
+}
+
+// ─── Form intake diagnostics card (loud, full visibility) ───────────
+//
+// The Form Sync Pill in the header is small. When a sync isn't behaving
+// as expected, the team needs to see EVERYTHING about the last run:
+// how many rows were fetched, how many were dupes, how many got skipped
+// for missing email, which form columns are unmapped, AND a per-row
+// list with each row's outcome. Click "Show details" to expand.
+
+function FormIntakeDiagnostics({
+  last,
+  importing,
+  showDetails,
+  onToggleDetails,
+  onSyncNow,
+}: {
+  last: ImportResult | null;
+  importing: boolean;
+  showDetails: boolean;
+  onToggleDetails: () => void;
+  onSyncNow: () => Promise<void> | void;
+}) {
+  const ago = last ? agoFor(last.ranAt) : 'never';
+  const tone =
+    !last ? 'neutral'
+    : last.errors.length > 0 ? 'red'
+    : last.unmappedHeaders.length > 0 ? 'amber'
+    : last.imported > 0 ? 'teal'
+    : 'neutral';
+
+  const dotClass =
+    tone === 'red'   ? 'bg-red-500'
+    : tone === 'amber' ? 'bg-amber-500'
+    : tone === 'teal'  ? 'bg-emerald-500'
+    : 'bg-slate-400';
+
+  return (
+    <Card accent={tone === 'red' ? 'red' : tone === 'amber' ? 'orange' : 'teal'}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <span className={`mt-1 inline-block h-3 w-3 flex-shrink-0 rounded-full ${dotClass}`} />
+          <div>
+            <div className="text-sm font-bold text-navy-500 dark:text-white">
+              Form sync · last ran {ago}
+            </div>
+            <div className="mt-1 flex flex-wrap gap-3 text-xs text-slate-600 dark:text-slate-300">
+              {last ? (
+                <>
+                  <span><strong className="font-mono text-navy-500 dark:text-white">{last.fetched}</strong> fetched</span>
+                  <span className="text-emerald-700 dark:text-emerald-400"><strong className="font-mono">{last.imported}</strong> imported</span>
+                  <span><strong className="font-mono">{last.alreadyKnown}</strong> dupes</span>
+                  {last.archived > 0 && <span><strong className="font-mono">{last.archived}</strong> archived (pre-2026)</span>}
+                  {last.skippedNoEmail > 0 && <span className="text-amber-700 dark:text-amber-400"><strong className="font-mono">{last.skippedNoEmail}</strong> skipped (no email)</span>}
+                  {last.unmappedHeaders.length > 0 && <span className="text-amber-700 dark:text-amber-400"><strong className="font-mono">{last.unmappedHeaders.length}</strong> unmapped column{last.unmappedHeaders.length === 1 ? '' : 's'}</span>}
+                  {last.errors.length > 0 && <span className="text-red-700 dark:text-red-400"><strong className="font-mono">{last.errors.length}</strong> error{last.errors.length === 1 ? '' : 's'}</span>}
+                </>
+              ) : (
+                <span className="italic text-slate-500">No sync has run yet — click <strong>Sync now</strong>.</span>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="primary" onClick={() => void onSyncNow()} disabled={importing}>
+            <CloudDownload className={`h-4 w-4 ${importing ? 'animate-spin' : ''}`} />
+            {importing ? 'Syncing…' : 'Sync now'}
+          </Button>
+          {last && (
+            <Button variant="ghost" onClick={onToggleDetails}>
+              {showDetails ? 'Hide details' : 'Show details'}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {last && last.errors.length > 0 && (
+        <div className="mt-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-700 dark:bg-red-950 dark:text-red-200">
+          <div className="font-semibold">Errors</div>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {last.errors.map((e, i) => <li key={i}>{e}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {last && last.unmappedHeaders.length > 0 && (
+        <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
+          <div className="font-semibold">{last.unmappedHeaders.length} form column{last.unmappedHeaders.length === 1 ? '' : 's'} not mapped to any Advisor field</div>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {last.unmappedHeaders.map((h, i) => <li key={i}><span className="font-mono">{h}</span></li>)}
+          </ul>
+          <div className="mt-1 italic">Add a rule to <code>HEADER_RULES</code> in <code>importFromFormResponses.ts</code> for each of these (or ignore if intentional).</div>
+        </div>
+      )}
+
+      {last && showDetails && (
+        <div className="mt-3 space-y-3">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 dark:border-navy-700 dark:bg-navy-700/50 dark:text-slate-200">
+            <div className="font-semibold">Source / destination</div>
+            <div className="mt-1 grid grid-cols-2 gap-1 font-mono">
+              <div className="text-slate-500">Form sheet:</div>
+              <div className="truncate"><a href={`https://docs.google.com/spreadsheets/d/${last.sourceSheetId}/edit#gid=0`} target="_blank" rel="noreferrer" className="text-brand-teal hover:underline">{last.sourceSheetId.slice(0, 12)}…</a> · <code>{last.sourceTabName}</code></div>
+              <div className="text-slate-500">Advisors tab:</div>
+              <div className="truncate"><a href={`https://docs.google.com/spreadsheets/d/${last.destSheetId}/edit#gid=0`} target="_blank" rel="noreferrer" className="text-brand-teal hover:underline">{last.destSheetId.slice(0, 12)}…</a> · <code>{last.destTabName}</code></div>
+            </div>
+          </div>
+
+          {last.mappedHeaders.length > 0 && (
+            <details className="rounded-lg border border-slate-200 px-3 py-2 text-xs dark:border-navy-700">
+              <summary className="cursor-pointer font-semibold">{last.mappedHeaders.length} mapped form column{last.mappedHeaders.length === 1 ? '' : 's'}</summary>
+              <table className="mt-2 w-full text-left">
+                <thead className="text-2xs uppercase tracking-wider text-slate-500">
+                  <tr><th className="py-1">Form column</th><th className="py-1">→ Advisor field</th></tr>
+                </thead>
+                <tbody className="font-mono text-2xs">
+                  {last.mappedHeaders.map((m, i) => (
+                    <tr key={i} className="border-t border-slate-100 dark:border-navy-700">
+                      <td className="py-1 pr-2">{m.source}</td>
+                      <td className="py-1 text-brand-teal">{m.target}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
+
+          {last.decisions.length > 0 && (
+            <details className="rounded-lg border border-slate-200 px-3 py-2 text-xs dark:border-navy-700" open={last.imported === 0 && last.fetched > 0}>
+              <summary className="cursor-pointer font-semibold">
+                Per-row outcome ({last.decisions.length} rows)
+              </summary>
+              <div className="mt-2 max-h-80 overflow-auto">
+                <table className="w-full text-left">
+                  <thead className="sticky top-0 bg-white text-2xs uppercase tracking-wider text-slate-500 dark:bg-navy-900">
+                    <tr>
+                      <th className="py-1 pr-2">Row</th>
+                      <th className="py-1 pr-2">Email</th>
+                      <th className="py-1 pr-2">Timestamp (raw → normalized)</th>
+                      <th className="py-1 pr-2">Outcome</th>
+                      <th className="py-1">Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody className="font-mono text-2xs">
+                    {last.decisions.map((d, i) => {
+                      const tone =
+                        d.outcome === 'imported' ? 'text-emerald-700 dark:text-emerald-400'
+                        : d.outcome === 'duplicate' ? 'text-slate-500'
+                        : d.outcome === 'archived-pre-2026' ? 'text-slate-500'
+                        : 'text-amber-700 dark:text-amber-400';
+                      return (
+                        <tr key={i} className="border-t border-slate-100 dark:border-navy-700">
+                          <td className="py-1 pr-2">{d.rowIndex}</td>
+                          <td className="py-1 pr-2 truncate max-w-[160px]">{d.email || '—'}</td>
+                          <td className="py-1 pr-2 truncate max-w-[260px]">{d.timestampRaw} → {d.timestampNormalized || '—'}</td>
+                          <td className={`py-1 pr-2 font-bold uppercase tracking-wider ${tone}`}>{d.outcome}</td>
+                          <td className="py-1 text-slate-500 truncate max-w-[200px]">{d.reason || ''}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ─── Form sync status pill ──────────────────────────────────────────
+//
+// Surfaces the auto-poll's last run so silent failures (esp. schema
+// drift in the Google Form column names) become visible to the team
+// without needing devtools. Click the pill or *Sync now* to run a
+// non-silent re-poll immediately.
+
+function FormSyncPill({
+  last,
+  importing,
+  onSyncNow,
+}: {
+  last: ImportResult | null;
+  importing: boolean;
+  onSyncNow: () => Promise<void> | void;
+}) {
+  const hasUnmapped = !!last && last.unmappedHeaders.length > 0;
+  const hasErrors = !!last && last.errors.length > 0;
+  const tone =
+    !last ? 'neutral'
+    : hasErrors ? 'red'
+    : hasUnmapped ? 'amber'
+    : 'teal';
+  const ago = last ? agoFor(last.ranAt) : '—';
+  const tooltip = last
+    ? [
+        `Last sync: ${ago}`,
+        `Fetched ${last.fetched} · Imported ${last.imported} · Dupes ${last.alreadyKnown} · Archived ${last.archived}`,
+        last.skippedNoEmail > 0 ? `Skipped (no email): ${last.skippedNoEmail}` : '',
+        hasUnmapped ? `Unmapped form columns: ${last.unmappedHeaders.join(', ')}` : '',
+        hasErrors ? `Errors: ${last.errors.join(' | ')}` : '',
+      ].filter(Boolean).join('\n')
+    : 'Waiting for first sync…';
+
+  const dotClass =
+    tone === 'red'   ? 'bg-red-500'
+    : tone === 'amber' ? 'bg-amber-500'
+    : tone === 'teal'  ? 'bg-emerald-500'
+    : 'bg-slate-400';
+
+  return (
+    <span
+      className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-300"
+      title={tooltip}
+    >
+      <CloudDownload className={`h-3.5 w-3.5 ${importing ? 'animate-pulse text-brand-teal' : 'text-slate-400'}`} />
+      <span className={`inline-block h-2 w-2 rounded-full ${dotClass}`} />
+      <span>
+        {last
+          ? <>Form sync · <span className="font-mono">{last.imported}</span> in / <span className="font-mono">{last.alreadyKnown}</span> dup · {ago}</>
+          : 'Form sync pending'}
+      </span>
+      {hasUnmapped && (
+        <span className="ml-1 rounded-full bg-amber-100 px-1.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+          {last!.unmappedHeaders.length} unmapped
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={() => void onSyncNow()}
+        className="ml-1 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-brand-teal hover:bg-teal-50 dark:hover:bg-teal-900/30"
+        disabled={importing}
+      >
+        {importing ? '…' : 'Sync now'}
+      </button>
+    </span>
+  );
+}
+
+function agoFor(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '—';
+  const sec = Math.floor((Date.now() - t) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
 }
 
 function toCsvRow(a: EnrichedAdvisor): Record<string, string> {

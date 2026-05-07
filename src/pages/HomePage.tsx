@@ -469,10 +469,10 @@ export function HomePage() {
             {tier === 'leadership' ? 'Leadership' : tier === 'profile_manager' ? 'Profile Manager' : 'Member'}
           </Badge>
           <Link
-            to="/board"
+            to="/companies"
             className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-navy-500 transition hover:border-brand-teal/50 hover:text-brand-teal dark:border-navy-700 dark:bg-navy-700 dark:text-slate-100"
           >
-            <KanbanSquare className="h-3.5 w-3.5" /> Workboard
+            <KanbanSquare className="h-3.5 w-3.5" /> Companies
           </Link>
           {tier === 'profile_manager' && (
             <span className="text-xs text-slate-500 dark:text-slate-400">
@@ -1044,7 +1044,7 @@ function ExecutionHero({ activeCount, activeInterventions, openPRs, pendingPayme
               <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Payments pending</div>
               <div className="mt-0.5 text-2xl font-extrabold text-brand-orange">{pendingPayments}</div>
             </Link>
-            <Link to="/board" className="rounded-lg border border-slate-200 bg-white px-3 py-2 hover:border-brand-teal dark:border-navy-700 dark:bg-navy-700">
+            <Link to="/companies" className="rounded-lg border border-slate-200 bg-white px-3 py-2 hover:border-brand-teal dark:border-navy-700 dark:bg-navy-700">
               <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Live interventions</div>
               <div className="mt-0.5 text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">{activeInterventions}</div>
             </Link>

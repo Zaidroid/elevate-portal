@@ -23,14 +23,11 @@ import {
   BarChart3,
   CheckCircle2,
   ClipboardCheck,
-  Download,
-  ExternalLink,
   Lock,
   MessageCircle,
   RefreshCw,
   Search,
   Trophy,
-  Users,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
@@ -46,9 +43,6 @@ import {
   EmptyState,
   PageHeader,
   Tabs,
-  downloadCsv,
-  timestampedFilename,
-  useToast,
 } from '../../lib/ui';
 import type { TabItem, Tone } from '../../lib/ui';
 import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
@@ -83,6 +77,7 @@ import { appendActivity } from '../companies/activityLog';
 import type { ActivityAction } from '../companies/activityLog';
 import { ActivityTimeline } from '../companies/ActivityTimeline';
 import { startPresenceHeartbeat } from './presence';
+import { Stage3DistributionTab } from './Stage3DistributionTab';
 
 // ─── shared types (matches CompaniesPage shapes) ─────────────────────
 
@@ -104,7 +99,12 @@ export function SelectionPage() {
   const masterSheetId = getSheetId('companies');
   const selectionSheetId = getSheetId('selection');
 
-  const [stage, setStage] = useState<Stage>('review');
+  const [stage, setStage] = useState<Stage>('output');
+  // When the team is post-selection (any company has assignments), the
+  // active tab is Stage 3 and Stage 1 / 2 / Insights are collapsed
+  // behind a "Show selection history" toggle. Pre-selection or for
+  // future cohort cycles, flipping this switch reveals the full flow.
+  const [showHistory, setShowHistory] = useState(false);
 
   // Lazy-mount the selection-tool tabs only when stages 1/2 need them
 
@@ -425,6 +425,74 @@ export function SelectionPage() {
   // surface in the UI alongside everyone else's comments — no separate
   // import button or special call-out.
 
+  // Stage 3 edit handler: applies AM + donor changes to the Companies
+  // master row, then per-assignment add / update / remove against
+  // Intervention Assignments. Optionally propagates AM and/or donor to
+  // every assignment for the company. All writes go through the
+  // central data layer (writeGuard, optimistic updates, refresh).
+  const onEditCompany = async (payload: {
+    companyId: string;
+    companyUpdates: Partial<Master>;
+    assignmentUpdates: { id: string; updates: Partial<Assignment> }[];
+    newAssignments: Assignment[];
+    removedAssignmentIds: string[];
+    propagateAmToAssignments: boolean;
+    propagateDonorToAssignments: boolean;
+  }) => {
+    const { companyId, companyUpdates, assignmentUpdates, newAssignments, removedAssignmentIds,
+      propagateAmToAssignments, propagateDonorToAssignments } = payload;
+
+    const oldRow = master.rows.find(m => m.company_id === companyId);
+    if (Object.keys(companyUpdates).length > 0) {
+      if (oldRow) await master.updateRow(companyId, companyUpdates);
+    }
+
+    // Per-assignment updates queued by the drawer.
+    for (const u of assignmentUpdates) {
+      await assignments.updateRow(u.id, u.updates);
+    }
+    // Propagation: when AM/donor changed at company level, sweep all
+    // existing assignments for this company too (skip ones we just
+    // updated explicitly to avoid double-write).
+    const explicitIds = new Set(assignmentUpdates.map(u => u.id));
+    if (propagateAmToAssignments && companyUpdates.profile_manager_email) {
+      for (const a of assignments.rows) {
+        if (a.company_id !== companyId) continue;
+        if (!a.assignment_id || explicitIds.has(a.assignment_id)) continue;
+        if ((a.owner_email || '').toLowerCase() === companyUpdates.profile_manager_email.toLowerCase()) continue;
+        await assignments.updateRow(a.assignment_id, { owner_email: companyUpdates.profile_manager_email });
+      }
+    }
+    if (propagateDonorToAssignments && companyUpdates.fund_code !== undefined) {
+      for (const a of assignments.rows) {
+        if (a.company_id !== companyId) continue;
+        if (!a.assignment_id || explicitIds.has(a.assignment_id)) continue;
+        if ((a.fund_code || '') === companyUpdates.fund_code) continue;
+        await assignments.updateRow(a.assignment_id, { fund_code: companyUpdates.fund_code });
+      }
+    }
+
+    // Adds.
+    for (const a of newAssignments) {
+      await assignments.createRow(a as unknown as Record<string, string | undefined>);
+    }
+    // Removes.
+    for (const id of removedAssignmentIds) {
+      try {
+        await assignments.deleteRow(id);
+      } catch (err) {
+        console.warn('[stage3] failed to delete assignment', id, err);
+      }
+    }
+
+    logActivity('distribution_reassigned', companyId, {
+      field: Object.keys(companyUpdates).join(',') || 'assignments',
+      old_value: oldRow?.profile_manager_email || '',
+      new_value: companyUpdates.profile_manager_email || oldRow?.profile_manager_email || '',
+      details: `+${newAssignments.length} -${removedAssignmentIds.length} ~${assignmentUpdates.length}`,
+    });
+  };
+
   // ─── tab + flow stage counts ───
   const reviewedAnyone = useMemo(() => {
     const ids = new Set(reviewsDoc.rows.map(r => r.company_id));
@@ -437,18 +505,26 @@ export function SelectionPage() {
     [reviewableForView, lockedCompanyIds],
   );
 
-  const tabs: TabItem[] = [
-    { value: 'review', label: `Stage 1 · Review queue · ${reviewedAnyone}/${reviewableForView.length}`, icon: <ClipboardCheck className="h-4 w-4" /> },
-    {
-      value: 'finalize',
-      label: finalReady ? `Stage 2 · Final decisions · ready` : `Stage 2 · Final decisions · ${reviewableForView.length - reviewedAnyone} left`,
-      icon: <Lock className="h-4 w-4" />,
-      disabled: !finalReady,
-    },
-    { value: 'output', label: `Stage 3 · Final cohort · ${lockedCount}`, icon: <Trophy className="h-4 w-4" /> },
+  // Cohort mode: at least one company has an intervention assignment →
+  // the cohort is committed and Stage 1/2 are history. Stage 2 stays
+  // locked and unreviewed counts disappear from the live UI.
+  const cohortMode = lockedCount > 0;
+  const cohortCount = useMemo(() => {
+    const ids = new Set<string>();
+    for (const a of assignments.rows) if (a.company_id) ids.add(a.company_id);
+    return ids.size;
+  }, [assignments.rows]);
+
+  const historyTabs: TabItem[] = [
+    { value: 'review',   label: `Stage 1 · Review queue · ${reviewedAnyone}/${reviewableForView.length}`, icon: <ClipboardCheck className="h-4 w-4" /> },
+    { value: 'finalize', label: cohortMode ? 'Stage 2 · Locked' : (finalReady ? 'Stage 2 · Ready' : 'Stage 2 · In progress'), icon: <Lock className="h-4 w-4" />, disabled: cohortMode || !finalReady },
     { value: 'insights', label: 'Insights', icon: <BarChart3 className="h-4 w-4" /> },
+  ];
+  const liveTabs: TabItem[] = [
+    { value: 'output',   label: `Stage 3 · Distribution · ${cohortCount}`, icon: <Trophy className="h-4 w-4" /> },
     { value: 'activity', label: 'Activity', icon: <ActivityIcon className="h-4 w-4" /> },
   ];
+  const tabs: TabItem[] = cohortMode && !showHistory ? liveTabs : [...historyTabs, ...liveTabs];
 
   if (!masterSheetId || !selectionSheetId) {
     return (
@@ -466,25 +542,42 @@ export function SelectionPage() {
     <div className="mx-auto max-w-7xl space-y-4">
       <PageHeader
         title="Selection · Cohort 3"
-        badges={[
-          { label: `${reviewableForView.length} reviewable`, tone: 'teal' },
-          { label: `${reviewedAnyone}/${reviewableForView.length} reviewed`, tone: 'amber' as Tone },
-          { label: `${lockedCount} locked`, tone: 'green' as Tone },
-        ]}
+        subtitle={cohortMode ? 'Cohort committed. Stage 3 is the live view; Stage 1/2 are archived under "Show history".' : 'Pre-cohort selection workflow.'}
+        badges={
+          cohortMode
+            ? [
+                { label: `${cohortCount} cohort companies`, tone: 'teal' as Tone },
+                { label: `${assignments.rows.length} interventions`, tone: 'teal' as Tone },
+              ]
+            : [
+                { label: `${reviewableForView.length} reviewable`, tone: 'teal' as Tone },
+                { label: `${reviewedAnyone}/${reviewableForView.length} reviewed`, tone: 'amber' as Tone },
+                { label: `${lockedCount} locked`, tone: 'green' as Tone },
+              ]
+        }
         actions={
-          <Button variant="ghost" onClick={() => { master.refresh(); applicants.refresh(); reviewsDoc.refresh(); assignments.refresh(); }} title="Reload">
-            <RefreshCw className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-2">
+            {cohortMode && (
+              <Button variant="ghost" onClick={() => setShowHistory(v => !v)} title="Show or hide Stage 1/2 history">
+                {showHistory ? 'Hide history' : 'Show history'}
+              </Button>
+            )}
+            <Button variant="ghost" onClick={() => { master.refresh(); applicants.refresh(); reviewsDoc.refresh(); assignments.refresh(); }} title="Reload">
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          </div>
         }
       />
 
-      <StageIndicator
-        current={stage}
-        reviewedAnyone={reviewedAnyone}
-        totalReviewable={reviewableForView.length}
-        lockedCount={lockedCount}
-        onJump={s => setStage(s)}
-      />
+      {(!cohortMode || showHistory) && (
+        <StageIndicator
+          current={stage}
+          reviewedAnyone={reviewedAnyone}
+          totalReviewable={reviewableForView.length}
+          lockedCount={lockedCount}
+          onJump={s => setStage(s)}
+        />
+      )}
 
       <Tabs items={tabs} value={stage} onChange={v => setStage(v as Stage)} />
 
@@ -516,21 +609,36 @@ export function SelectionPage() {
         )}
 
         {stage === 'output' && (
-          <FinalCohortOutput
-            companies={reviewableForView}
+          <Stage3DistributionTab
+            companies={master.rows}
             assignments={assignments.rows}
-            master={master.rows}
-            masterSheetId={masterSheetId}
+            currentUserEmail={user?.email || ''}
+            onEditCompany={onEditCompany}
           />
         )}
 
         {stage === 'insights' && (
-          <InsightsDashboard
-            companies={reviewableForView}
-            reviews={reviewsDoc.rows}
-            assignments={assignments.rows}
-            preDecisions={preDecisionsDoc.rows}
-          />
+          cohortMode ? (
+            <Card>
+              <EmptyState
+                icon={<BarChart3 className="h-8 w-8" />}
+                title="Insights moved to Stage 3"
+                description="Live cohort insights — per-AM load, sub-intervention spread, donor split — are now part of the Stage 3 distribution dashboard. The old pre-cohort Insights view is archived."
+              />
+              <div className="mt-3 flex justify-center">
+                <Button variant="primary" onClick={() => setStage('output')}>
+                  Open Stage 3 distribution
+                </Button>
+              </div>
+            </Card>
+          ) : (
+            <InsightsDashboard
+              companies={reviewableForView}
+              reviews={reviewsDoc.rows}
+              assignments={assignments.rows}
+              preDecisions={preDecisionsDoc.rows}
+            />
+          )
         )}
 
         {stage === 'activity' && (
@@ -624,496 +732,6 @@ function StageIndicator({
   );
 }
 
-
-// ─── FinalCohortOutput ───────────────────────────────────────────────
-
-function FinalCohortOutput({
-  companies,
-  assignments,
-  master,
-  masterSheetId,
-}: {
-  companies: ReviewableCompany[];
-  assignments: Assignment[];
-  master: Master[];
-  masterSheetId: string;
-}) {
-  const toast = useToast();
-  const [search, setSearch] = useState('');
-  const [groupBy, setGroupBy] = useState<'am' | 'pillar' | 'fund'>('am');
-  const [exporting, setExporting] = useState(false);
-
-  // Group assignments by company. Only show companies that have at
-  // least one locked assignment — the resulting cohort.
-  const byCompany = useMemo(() => {
-    const m = new Map<string, Assignment[]>();
-    for (const a of assignments) {
-      const arr = m.get(a.company_id) || [];
-      arr.push(a);
-      m.set(a.company_id, arr);
-    }
-    return m;
-  }, [assignments]);
-
-  const masterById = useMemo(() => {
-    const m = new Map<string, Master>();
-    for (const r of master) if (r.company_id) m.set(r.company_id, r);
-    return m;
-  }, [master]);
-
-  // Per-company aggregate row + pillar breakdown.
-  const cohortRows = useMemo(() => {
-    const out: Array<{
-      company: ReviewableCompany;
-      m: Master | undefined;
-      assigns: Assignment[];
-      byPillar: Map<string, { fund: string; subs: Array<{ name: string; fund: string }> }>;
-      pillarCodes: string[];
-      funds: Set<string>;
-    }> = [];
-    for (const c of companies) {
-      const a = byCompany.get(c.company_id) || [];
-      if (a.length === 0) continue;
-      const byPillar = new Map<string, { fund: string; subs: Array<{ name: string; fund: string }> }>();
-      const funds = new Set<string>();
-      for (const x of a) {
-        const code = pillarFor(x.intervention_type)?.code || x.intervention_type;
-        const cur = byPillar.get(code) || { fund: x.fund_code || '', subs: [] };
-        if (!cur.fund && x.fund_code) cur.fund = x.fund_code;
-        if (x.sub_intervention) cur.subs.push({ name: x.sub_intervention, fund: x.fund_code || '' });
-        byPillar.set(code, cur);
-        if (x.fund_code) funds.add(x.fund_code);
-      }
-      out.push({
-        company: c,
-        m: masterById.get(c.company_id),
-        assigns: a,
-        byPillar,
-        pillarCodes: Array.from(byPillar.keys()),
-        funds,
-      });
-    }
-    return out;
-  }, [companies, byCompany, masterById]);
-
-  // Apply search filter.
-  const visibleRows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return cohortRows;
-    return cohortRows.filter(r =>
-      `${r.company.company_name} ${r.company.sector} ${r.company.city} ${r.company.governorate}`.toLowerCase().includes(q),
-    );
-  }, [cohortRows, search]);
-
-  if (cohortRows.length === 0) {
-    return (
-      <Card>
-        <EmptyState
-          icon={<Trophy className="h-8 w-8" />}
-          title="No locked decisions yet"
-          description="Once Stage 2 starts locking decisions, the final cohort populates here with AMs, donors, pillars and sub-interventions per company. Includes one-click Sheet/CSV export."
-        />
-      </Card>
-    );
-  }
-
-  // Stats
-  const totalCompanies = cohortRows.length;
-  const totalAssignments = assignments.length;
-  const dutchCount = assignments.filter(a => a.fund_code === '97060').length;
-  const sidaCount = assignments.filter(a => a.fund_code === '91763').length;
-  const noFundCount = assignments.filter(a => !a.fund_code).length;
-  const dualFundCompanies = cohortRows.filter(r => r.funds.has('97060') && r.funds.has('91763')).length;
-
-  // Per-pillar coverage: distinct companies served per pillar
-  const pillarCompanySets = new Map<string, Set<string>>();
-  for (const r of cohortRows) {
-    for (const p of r.pillarCodes) {
-      const set = pillarCompanySets.get(p) || new Set();
-      set.add(r.company.company_id);
-      pillarCompanySets.set(p, set);
-    }
-  }
-
-  // Per-sub-intervention counts
-  const subCounts = new Map<string, number>();
-  for (const a of assignments) {
-    if (a.sub_intervention) subCounts.set(a.sub_intervention, (subCounts.get(a.sub_intervention) || 0) + 1);
-  }
-
-  // Per-AM
-  const amBuckets = new Map<string, typeof cohortRows>();
-  for (const r of cohortRows) {
-    const key = r.m?.profile_manager_email || '';
-    const arr = amBuckets.get(key) || [];
-    arr.push(r);
-    amBuckets.set(key, arr);
-  }
-
-  // ─── Export handlers ─────────────────────────────────────────────
-  const buildExportRows = () => {
-    return cohortRows.map(r => {
-      const pillarStrings: string[] = [];
-      for (const [code, { fund, subs }] of r.byPillar) {
-        if (subs.length === 0) pillarStrings.push(`${code}${fund ? ` [${fund}]` : ''}`);
-        else for (const s of subs) pillarStrings.push(`${code}/${s.name}${s.fund ? ` [${s.fund}]` : (fund ? ` [${fund}]` : '')}`);
-      }
-      const dutchSubs: string[] = [];
-      const sidaSubs: string[] = [];
-      for (const [code, { fund, subs }] of r.byPillar) {
-        for (const s of subs) {
-          const eff = s.fund || fund;
-          const tag = `${code}/${s.name}`;
-          if (eff === '97060') dutchSubs.push(tag);
-          else if (eff === '91763') sidaSubs.push(tag);
-        }
-      }
-      return {
-        company_id: r.company.company_id,
-        company_name: r.company.company_name,
-        sector: r.company.sector,
-        city: r.company.city,
-        governorate: r.company.governorate,
-        status: r.m?.status || r.company.status,
-        account_manager: r.m?.profile_manager_email || r.company.profile_manager_email || '',
-        pillars: r.pillarCodes.join(', '),
-        interventions: pillarStrings.join(' | '),
-        dutch_interventions: dutchSubs.join(' | '),
-        sida_interventions: sidaSubs.join(' | '),
-        fund_codes: Array.from(r.funds).join(','),
-        intervention_count: r.assigns.length,
-      };
-    });
-  };
-
-  const handleCsvExport = () => {
-    const rows = buildExportRows();
-    downloadCsv(timestampedFilename('final-cohort'), rows as unknown as Record<string, unknown>[]);
-    toast.success('CSV downloaded', `${rows.length} compan${rows.length === 1 ? 'y' : 'ies'} exported.`);
-  };
-
-  const handleSheetExport = async () => {
-    if (!masterSheetId) {
-      toast.error('No workbook configured', 'VITE_SHEET_COMPANIES is not set.');
-      return;
-    }
-    setExporting(true);
-    try {
-      const rows = buildExportRows();
-      const result = await exportFinalCohortToSheet(masterSheetId, rows);
-      toast.success('Pushed to sheet', `${result.rowsWritten} rows written to "${result.tabName}".`);
-    } catch (e) {
-      toast.error('Export failed', (e as Error).message);
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      {/* ── Hero header ── */}
-      <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-emerald-50 to-teal-50 p-4 dark:border-navy-700 dark:from-emerald-950 dark:to-teal-950">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <Trophy className="h-6 w-6 text-emerald-700 dark:text-emerald-300" />
-              <h2 className="text-xl font-extrabold text-emerald-900 dark:text-emerald-100">
-                Cohort 3 · Final selection
-              </h2>
-            </div>
-            <p className="mt-1 text-sm text-emerald-800/80 dark:text-emerald-200/80">
-              {totalCompanies} compan{totalCompanies === 1 ? 'y' : 'ies'} · {totalAssignments} intervention{totalAssignments === 1 ? '' : 's'} · {dutchCount} Dutch + {sidaCount} SIDA
-              {dualFundCompanies > 0 && ` · ${dualFundCompanies} on both donors`}
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button variant="ghost" onClick={handleCsvExport}>
-              <Download className="h-4 w-4" /> CSV
-            </Button>
-            <Button onClick={handleSheetExport} disabled={exporting}>
-              <ExternalLink className="h-4 w-4" /> {exporting ? 'Pushing…' : 'Push to Sheet'}
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      {/* ── KPI strip ── */}
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
-        <KPI label="Companies" value={totalCompanies} tone="green" />
-        <KPI label="Interventions" value={totalAssignments} tone="teal" />
-        <KPI label="Dutch" value={dutchCount} hint="97060" tone="navy" />
-        <KPI label="SIDA" value={sidaCount} hint="91763" tone="amber" />
-        <KPI label="Avg / company" value={(totalAssignments / Math.max(1, totalCompanies)).toFixed(1)} tone="orange" />
-        {noFundCount > 0
-          ? <KPI label="No donor" value={noFundCount} hint="needs fix" tone="red" />
-          : <KPI label="Dual-donor cos" value={dualFundCompanies} tone="orange" />}
-      </div>
-
-      {/* ── Per-pillar + per-fund visualization ── */}
-      <div className="grid gap-3 md:grid-cols-2">
-        <Card>
-          <CardHeader title="Pillar coverage" subtitle="Distinct companies per pillar." />
-          <ul className="space-y-2">
-            {PILLARS.map(p => {
-              const count = pillarCompanySets.get(p.code)?.size || 0;
-              const pct = totalCompanies === 0 ? 0 : Math.round((count / totalCompanies) * 100);
-              return (
-                <li key={p.code}>
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-bold text-navy-500 dark:text-slate-100">{p.label}</span>
-                    <span className="font-mono">{count} <span className="text-[10px] text-slate-500">({pct}%)</span></span>
-                  </div>
-                  <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
-                    <div className="h-full bg-brand-teal" style={{ width: `${pct}%` }} />
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </Card>
-        <Card>
-          <CardHeader title="Sub-interventions allocated" subtitle="Count of intervention-rows per sub." />
-          {subCounts.size === 0 ? (
-            <p className="text-xs italic text-slate-500">No sub-interventions tagged yet.</p>
-          ) : (
-            <ul className="space-y-1.5">
-              {Array.from(subCounts.entries()).sort((a, b) => b[1] - a[1]).map(([sub, n]) => {
-                const max = Math.max(1, ...Array.from(subCounts.values()));
-                const pct = Math.round((n / max) * 100);
-                return (
-                  <li key={sub}>
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-bold text-navy-500 dark:text-slate-100">{sub}</span>
-                      <span className="font-mono">{n}</span>
-                    </div>
-                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-800">
-                      <div className="h-full bg-amber-500" style={{ width: `${pct}%` }} />
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </Card>
-      </div>
-
-      {/* ── Search + Group toggle ── */}
-      <div className="flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 dark:border-navy-700 dark:bg-navy-900">
-        <div className="relative min-w-[200px] flex-1">
-          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            value={search}
-            onChange={e => setSearch(e.currentTarget.value)}
-            placeholder="Search company, sector, city…"
-            className="w-full rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-xs dark:border-navy-700 dark:bg-navy-900 dark:text-slate-100"
-          />
-        </div>
-        <div className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1 py-0.5 dark:border-navy-700 dark:bg-navy-900">
-          <span className="px-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Group by:</span>
-          {(['am', 'pillar', 'fund'] as const).map(g => (
-            <button
-              key={g}
-              type="button"
-              onClick={() => setGroupBy(g)}
-              className={`rounded px-2 py-0.5 text-[11px] font-bold ${
-                groupBy === g
-                  ? 'bg-brand-teal text-white'
-                  : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-navy-800'
-              }`}
-            >
-              {g === 'am' ? 'Account Manager' : g === 'pillar' ? 'Pillar' : 'Donor'}
-            </button>
-          ))}
-        </div>
-        <span className="ml-auto text-[11px] text-slate-500">
-          Showing <span className="font-bold text-navy-500 dark:text-slate-100">{visibleRows.length}</span> of {cohortRows.length}
-        </span>
-      </div>
-
-      {/* ── Grouped sections ── */}
-      {groupBy === 'am' && <CohortByAm rows={visibleRows} amBuckets={amBuckets} />}
-      {groupBy === 'pillar' && <CohortByPillar rows={visibleRows} />}
-      {groupBy === 'fund' && <CohortByFund rows={visibleRows} />}
-    </div>
-  );
-}
-
-type CohortRow = {
-  company: ReviewableCompany;
-  m: Master | undefined;
-  assigns: Assignment[];
-  byPillar: Map<string, { fund: string; subs: Array<{ name: string; fund: string }> }>;
-  pillarCodes: string[];
-  funds: Set<string>;
-};
-
-function CompanyCard({ row }: { row: CohortRow }) {
-  const { company, m, byPillar } = row;
-  return (
-    <li className="rounded-md border border-slate-200 bg-white p-3 dark:border-navy-700 dark:bg-navy-900">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="font-bold text-navy-500 dark:text-slate-100">{company.company_name}</div>
-          <div className="text-[11px] text-slate-500">
-            {[company.sector, company.city, company.governorate].filter(Boolean).join(' · ') || '—'}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5 text-xs">
-          {m?.profile_manager_email && (
-            <Badge tone="teal">{displayName(m.profile_manager_email).split(' ')[0]}</Badge>
-          )}
-          {m?.status && <Badge tone={m.status === 'Selected' ? 'green' : m.status === 'Hold' ? 'amber' : 'orange'}>{m.status}</Badge>}
-          {row.funds.size > 1 && <Badge tone="orange">Dutch + SIDA</Badge>}
-        </div>
-      </div>
-      <div className="mt-2 flex flex-wrap gap-1">
-        {Array.from(byPillar.entries()).map(([code, { fund, subs }]) => (
-          <span
-            key={code}
-            className="inline-flex flex-wrap items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] dark:border-navy-700 dark:bg-navy-800"
-          >
-            <span className="font-bold text-navy-500 dark:text-slate-100">{code}</span>
-            {fund && (
-              <span className={`rounded px-1 py-0.5 text-[9px] font-bold ${fund === '97060' ? 'bg-teal-100 text-brand-teal' : 'bg-amber-100 text-amber-800'}`}>
-                {fund === '97060' ? 'Dutch' : 'SIDA'}
-              </span>
-            )}
-            {subs.length > 0 && (
-              <span className="text-[10px] text-slate-600 dark:text-slate-300">
-                · {subs.map(s => `${s.name}${s.fund && s.fund !== fund ? ` (${s.fund === '97060' ? 'D' : 'S'})` : ''}`).join(', ')}
-              </span>
-            )}
-          </span>
-        ))}
-      </div>
-    </li>
-  );
-}
-
-function CohortByAm({ rows, amBuckets }: { rows: CohortRow[]; amBuckets: Map<string, CohortRow[]> }) {
-  const visibleByAm = new Map<string, CohortRow[]>();
-  for (const r of rows) {
-    const k = r.m?.profile_manager_email || '';
-    const arr = visibleByAm.get(k) || [];
-    arr.push(r);
-    visibleByAm.set(k, arr);
-  }
-  const order = [
-    ...ACCOUNT_MANAGERS.map(a => a.email),
-    ...Array.from(amBuckets.keys()).filter(k => k && !ACCOUNT_MANAGERS.find(a => a.email === k)),
-    '',
-  ];
-  return (
-    <div className="space-y-3">
-      {order.map(amEmail => {
-        const bucket = visibleByAm.get(amEmail) || [];
-        if (bucket.length === 0) return null;
-        const am = ACCOUNT_MANAGERS.find(a => a.email === amEmail);
-        const amName = am?.name || (amEmail ? displayName(amEmail) : 'Unassigned AM');
-        const tone = amEmail ? 'teal' : 'amber';
-        return (
-          <Card key={amEmail || 'unassigned'} className={`border-l-4 ${tone === 'teal' ? 'border-l-brand-teal' : 'border-l-amber-500'}`}>
-            <CardHeader
-              title={
-                <span className="flex items-center gap-2">
-                  <Users className="h-4 w-4" />
-                  {amName} · {bucket.length}
-                </span>
-              }
-              subtitle={amEmail || 'Companies with locks but no AM yet'}
-            />
-            <ul className="space-y-2">
-              {bucket.map(r => <CompanyCard key={r.company.company_id} row={r} />)}
-            </ul>
-          </Card>
-        );
-      })}
-    </div>
-  );
-}
-
-function CohortByPillar({ rows }: { rows: CohortRow[] }) {
-  const byPillarBucket = new Map<string, CohortRow[]>();
-  for (const r of rows) {
-    for (const p of r.pillarCodes) {
-      const arr = byPillarBucket.get(p) || [];
-      arr.push(r);
-      byPillarBucket.set(p, arr);
-    }
-  }
-  return (
-    <div className="space-y-3">
-      {PILLARS.map(p => {
-        const bucket = byPillarBucket.get(p.code) || [];
-        if (bucket.length === 0) return null;
-        return (
-          <Card key={p.code} className="border-l-4 border-l-brand-teal">
-            <CardHeader title={`${p.label} · ${bucket.length}`} subtitle={p.description} />
-            <ul className="space-y-2">
-              {bucket.map(r => <CompanyCard key={r.company.company_id + p.code} row={r} />)}
-            </ul>
-          </Card>
-        );
-      })}
-    </div>
-  );
-}
-
-function CohortByFund({ rows }: { rows: CohortRow[] }) {
-  const dutch = rows.filter(r => r.funds.has('97060'));
-  const sida = rows.filter(r => r.funds.has('91763'));
-  const noFund = rows.filter(r => r.funds.size === 0);
-  return (
-    <div className="space-y-3">
-      {dutch.length > 0 && (
-        <Card className="border-l-4 border-l-brand-teal">
-          <CardHeader title={`Dutch · 97060 · ${dutch.length}`} subtitle="Companies carrying at least one Dutch-funded intervention." />
-          <ul className="space-y-2">{dutch.map(r => <CompanyCard key={'d' + r.company.company_id} row={r} />)}</ul>
-        </Card>
-      )}
-      {sida.length > 0 && (
-        <Card className="border-l-4 border-l-amber-500">
-          <CardHeader title={`SIDA · 91763 · ${sida.length}`} subtitle="Companies carrying at least one SIDA-funded intervention." />
-          <ul className="space-y-2">{sida.map(r => <CompanyCard key={'s' + r.company.company_id} row={r} />)}</ul>
-        </Card>
-      )}
-      {noFund.length > 0 && (
-        <Card className="border-l-4 border-l-red-500">
-          <CardHeader title={`No donor set · ${noFund.length}`} subtitle="These need a fund_code before exporting." />
-          <ul className="space-y-2">{noFund.map(r => <CompanyCard key={'n' + r.company.company_id} row={r} />)}</ul>
-        </Card>
-      )}
-    </div>
-  );
-}
-
-// ─── Push final cohort to a Sheet tab ───────────────────────────────
-
-async function exportFinalCohortToSheet(
-  sheetId: string,
-  rows: Array<Record<string, string | number>>,
-): Promise<{ tabName: string; rowsWritten: number }> {
-  const tabName = 'Final Cohort Export';
-  const headers = [
-    'company_id', 'company_name', 'sector', 'city', 'governorate',
-    'status', 'account_manager', 'pillars', 'interventions',
-    'dutch_interventions', 'sida_interventions', 'fund_codes', 'intervention_count',
-  ];
-  await ensureSchema(sheetId, tabName, headers);
-  // Clear existing rows below header by overwriting a wide range.
-  const data = rows.map(r => headers.map(h => String(r[h] ?? '')));
-  // Write under the header (row 2 onwards) using appendRows so we don't clobber a manually-edited header.
-  const { appendRows } = await import('../../lib/sheets/client');
-  // Simple strategy: append always — re-runs add a new "wave" of rows below the previous one.
-  // For idempotency the team can clear the tab manually before re-export, or we'd need to wipe first.
-  // For now this is simpler and the team understands "this is a snapshot".
-  // First add a separator marker row so re-runs are visually distinct.
-  const ts = new Date().toISOString();
-  const marker = [`--- snapshot ${ts} ---`, ...new Array(headers.length - 1).fill('')];
-  await appendRows(sheetId, `${tabName}!A1`, [marker, ...data]);
-  return { tabName, rowsWritten: data.length };
-}
 
 
 // ─── Activity ────────────────────────────────────────────────────────

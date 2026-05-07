@@ -47,15 +47,20 @@ export const PILLAR_BY_CODE = Object.fromEntries(PILLARS.map(p => [p.code, p] as
 // Flat list of every intervention type (pillar codes + sub-intervention codes).
 export const INTERVENTION_TYPES: string[] = PILLARS.flatMap(p => [p.code, ...p.subInterventions]);
 
-// Legacy-code → (pillar, sub) migration. Old data in Reviews / Intervention
-// Assignments / Pre-decision Recommendations may carry the obsolete
-// 7-pillar codes; this maps them so older rows still render correctly.
-const LEGACY: Record<string, { pillar: string; sub: string }> = {
+// Legacy-code → (pillar, sub, optional flavor) migration. Old data in
+// Reviews / Intervention Assignments / Pre-decision Recommendations may
+// carry the obsolete 7-pillar codes; this maps them so older rows still
+// render correctly. The optional `flavor` field captures cases where the
+// xlsx allocation distinguishes a sub-flavor inside a single canonical
+// sub-intervention (e.g. MA-Technical is a flavor of C-Suite, per Zaid).
+const LEGACY: Record<string, { pillar: string; sub: string; flavor?: string }> = {
   // Capacity Building children (formerly top-level pillars)
   'TTH': { pillar: 'CB', sub: 'Train To Hire' },
   'Train To Hire': { pillar: 'CB', sub: 'Train To Hire' },
   'Train-To-Hire': { pillar: 'CB', sub: 'Train To Hire' },
+  'CB-TTH': { pillar: 'CB', sub: 'Train To Hire' },
   'Upskilling': { pillar: 'CB', sub: 'Upskilling' },
+  'CB-Upskilling': { pillar: 'CB', sub: 'Upskilling' },
   // Marketing & Branding children — old taxonomy had MKG with no subs;
   // also some Israa CSV rows landed under MA-MKG Agency.
   'MA-MKG Agency': { pillar: 'MKG', sub: 'Marketing Agency' },
@@ -63,8 +68,15 @@ const LEGACY: Record<string, { pillar: string; sub: string }> = {
   // Market Access children (formerly top-level pillars)
   'C-Suite': { pillar: 'MA', sub: 'C-Suite' },
   'C-suite': { pillar: 'MA', sub: 'C-Suite' },
+  'MA-C-Suite': { pillar: 'MA', sub: 'C-Suite' },
+  // MA-Technical is a flavor of C-Suite per Zaid — same canonical sub,
+  // but the assignment row carries flavor='Technical' so views can
+  // separate it back out (e.g. the Stage 3 sub-intervention spread bar).
+  'MA-Technical': { pillar: 'MA', sub: 'C-Suite', flavor: 'Technical' },
   'ElevateBridge': { pillar: 'MA', sub: 'ElevateBridge' },
   'Bridge': { pillar: 'MA', sub: 'ElevateBridge' },
+  'MA- Bridge': { pillar: 'MA', sub: 'ElevateBridge' },  // xlsx had trailing space
+  'MA-Bridge': { pillar: 'MA', sub: 'ElevateBridge' },
   'Conferences': { pillar: 'MA', sub: 'Conferences' },
   'Conference': { pillar: 'MA', sub: 'Conferences' },
   'MA-Legal': { pillar: 'MA', sub: 'Legal Support' },
@@ -76,27 +88,33 @@ const LEGACY: Record<string, { pillar: string; sub: string }> = {
 // parent pillar. Returns undefined for genuinely unknown types.
 export function pillarFor(type: string): Pillar | undefined {
   if (!type) return undefined;
-  if (PILLAR_BY_CODE[type]) return PILLAR_BY_CODE[type];
-  for (const p of PILLARS) if (p.subInterventions.includes(type)) return p;
-  const legacy = LEGACY[type];
+  const trimmed = type.trim();
+  if (PILLAR_BY_CODE[trimmed]) return PILLAR_BY_CODE[trimmed];
+  for (const p of PILLARS) if (p.subInterventions.includes(trimmed)) return p;
+  const legacy = LEGACY[trimmed];
   if (legacy) return PILLAR_BY_CODE[legacy.pillar];
   console.warn(`[interventions] Unknown intervention type: "${type}"`);
   return undefined;
 }
 
 // Resolve a code (new sub, new pillar, OR legacy code) to a canonical
-// {pillar, sub} pair. Returns null if the code can't be mapped.
-export function resolveIntervention(code: string): { pillar: string; sub: string } | null {
+// {pillar, sub} pair, plus an optional `flavor` for cases like
+// MA-Technical where the xlsx distinguishes a sub-flavor of an existing
+// sub-intervention. Returns null if the code can't be mapped.
+export function resolveIntervention(
+  code: string,
+): { pillar: string; sub: string; flavor?: string } | null {
   if (!code) return null;
+  const trimmed = code.trim();
   // New top-level pillar code
-  if (PILLAR_BY_CODE[code]) return { pillar: code, sub: '' };
+  if (PILLAR_BY_CODE[trimmed]) return { pillar: trimmed, sub: '' };
   // New sub-intervention
   for (const p of PILLARS) {
-    if (p.subInterventions.includes(code)) return { pillar: p.code, sub: code };
+    if (p.subInterventions.includes(trimmed)) return { pillar: p.code, sub: trimmed };
   }
-  // Legacy code
-  const legacy = LEGACY[code];
-  if (legacy) return legacy;
+  // Legacy code (may carry a flavor field)
+  const legacy = LEGACY[trimmed];
+  if (legacy) return { pillar: legacy.pillar, sub: legacy.sub, flavor: legacy.flavor };
   return null;
 }
 
@@ -174,4 +192,29 @@ export const COHORT3_BUDGET_2026: Record<string, BudgetEntry> = {
 };
 
 export const COHORT3_BUDGET_TOTAL_USD = { dutch: 80800, sida: 165600, combined: 246400 };
+
+// ─── Per-sub-intervention "load" weights ─────────────────────────────
+//
+// Used by Stage 3's per-AM workload view. These reflect the *operational
+// effort* an Account Manager has to put in for one engagement of that
+// sub-intervention — NOT the budget. Train To Hire is the heaviest:
+// month-long candidate sourcing + hiring + first-90-days follow-up.
+// Conferences are lightest: a one-off booking / commitment letter.
+//
+// Tweak these as the team's experience evolves; the dashboard re-reads
+// from this config on every render. Anything not listed defaults to 1.
+export const SUB_INTERVENTION_LOAD_WEIGHT: Record<string, number> = {
+  'Train To Hire':       5,
+  'Upskilling':          3,
+  'Marketing Agency':    3,
+  'Marketing Resources': 2,
+  'C-Suite':             2,
+  'ElevateBridge':       2,
+  'Legal Support':       2,
+  'Conferences':         1,
+};
+
+export function loadWeightFor(sub: string): number {
+  return SUB_INTERVENTION_LOAD_WEIGHT[sub] ?? 1;
+}
 

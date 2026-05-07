@@ -25,7 +25,13 @@ export type ActivityAction =
   | 'auto_dedupe'
   | 'import_external'
   | 'pre_decision_added'
-  | 'presence';
+  | 'presence'
+  // Stage 3 distribution actions — cohort seeded from xlsx, AM
+  // reassigned, distribution locked / unlocked.
+  | 'cohort_seeded'
+  | 'distribution_reassigned'
+  | 'distribution_locked'
+  | 'distribution_unlocked';
 
 export type ActivityInput = {
   sheetId: string;

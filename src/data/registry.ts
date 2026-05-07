@@ -53,6 +53,8 @@ const ID_COLUMNS: Record<string, string> = {
   // Logframes workbook
   'logframes::dutch':              'ID',
   'logframes::sida':               'ID',
+  // Selection workbook (Stage 3 distribution mirror — synthetic id per row)
+  'selection::stage3Distribution': 'distribution_id',
 };
 
 export interface ResolvedRange {

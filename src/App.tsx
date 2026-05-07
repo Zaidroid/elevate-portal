@@ -4,8 +4,6 @@ import { Lock, Moon, RefreshCw, Rocket, ShieldCheck, Sun } from 'lucide-react';
 import { useAuth } from './services/auth';
 import { loadTeamRosterFromSheet } from './config/team';
 import { AppShell } from './components/AppShell';
-import { HomePage } from './pages/HomePage';
-import { BoardPage } from './pages/board/BoardPage';
 import { CompaniesPage } from './pages/companies/CompaniesPage';
 import { CompanyDetailPage } from './pages/companies/CompanyDetailPage';
 import { SelectionPage } from './pages/selection/SelectionPage';
@@ -21,6 +19,8 @@ import { AlertsPage } from './pages/alerts/AlertsPage';
 import { LookupsPage } from './pages/admin/LookupsPage';
 import { LogframesPage } from './pages/logframes/LogframesPage';
 import { BridgePage } from './pages/link/BridgePage';
+import { MyHubPage } from './pages/hub/MyHubPage';
+import { LandingRouter, RequireAdmin } from './components/guards';
 // Lazy: ImportPage pulls in xlsx (~350 KB), keep it out of the main bundle.
 const ImportPage = lazy(() => import('./pages/import/ImportPage').then(m => ({ default: m.ImportPage })));
 import { ToastProvider } from './lib/ui';
@@ -172,30 +172,32 @@ function AuthGate({
       <BrowserRouter>
         <Routes>
           <Route element={<AppShell isDarkMode={isDarkMode} toggleTheme={toggleTheme} />}>
-            <Route index element={<HomePage />} />
-            <Route path="/board" element={<BoardPage />} />
+            <Route index element={<LandingRouter />} />
+            <Route path="/my-hub" element={<MyHubPage />} />
             <Route path="/companies" element={<CompaniesPage />} />
             <Route path="/companies/:id" element={<CompanyDetailPage />} />
             <Route path="/selection" element={<SelectionPage />} />
             <Route path="/procurement" element={<ProcurementPage />} />
-            <Route path="/payments" element={<PaymentsPage />} />
+            <Route path="/payments" element={<RequireAdmin><PaymentsPage /></RequireAdmin>} />
             <Route path="/conferences" element={<ConferencesPage />} />
             <Route path="/docs" element={<DocsPage />} />
             <Route path="/elevatebridge" element={<FreelancersPage />} />
             <Route path="/freelancers" element={<Navigate to="/elevatebridge" replace />} />
             <Route path="/advisors" element={<AdvisorsPage />} />
             <Route path="/reports" element={<ReportsPage />} />
-            <Route path="/team" element={<TeamPage />} />
+            <Route path="/team" element={<RequireAdmin><TeamPage /></RequireAdmin>} />
             <Route path="/alerts" element={<AlertsPage />} />
-            <Route path="/admin/lookups" element={<LookupsPage />} />
+            <Route path="/admin/lookups" element={<RequireAdmin><LookupsPage /></RequireAdmin>} />
             <Route path="/logframes" element={<LogframesPage />} />
             <Route path="/link/:app" element={<BridgePage />} />
             <Route
               path="/import"
               element={
-                <Suspense fallback={<div className="p-8 text-sm text-slate-500">Loading import tools…</div>}>
-                  <ImportPage />
-                </Suspense>
+                <RequireAdmin>
+                  <Suspense fallback={<div className="p-8 text-sm text-slate-500">Loading import tools…</div>}>
+                    <ImportPage />
+                  </Suspense>
+                </RequireAdmin>
               }
             />
             <Route path="*" element={<Navigate to="/" replace />} />

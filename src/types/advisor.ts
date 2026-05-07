@@ -90,6 +90,8 @@ export type Advisor = {
   // Form response columns
   advisor_id: string;
   timestamp: string;
+  /** Mercy Corps safeguarding consent — usually "Yes" / "I agree". */
+  safeguarding_consent: string;
   full_name: string;
   gender: string;
   country: string;
@@ -117,6 +119,10 @@ export type Advisor = {
   support_via: string;
   tech_specs: string;
   newsletter: string;
+  /** Which markets/regions the advisor has professional experience in. */
+  markets_experience: string;
+  /** Free-text description of that market experience. */
+  markets_detail: string;
 
   // Tracker columns appended by builders/advisors.py
   pipeline_status: string;
@@ -138,6 +144,11 @@ export type Advisor = {
   stage1_pass: string;
   stage2_category: string;
   stage2_score: string;
+
+  // Outreach tracking — stamped by the Outreach Log writer when the user
+  // confirms they sent an email from the detail drawer or bulk-send modal.
+  last_outreach_at: string;
+  last_outreach_template: string;
 
   // Audit
   updated_at: string;

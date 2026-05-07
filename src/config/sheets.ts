@@ -161,6 +161,11 @@ export const SHEETS: Record<string, ModuleConfig> = {
       shortlists: 'Shortlists',
       finalCohort: 'Final Cohort',
       configuration: 'Configuration',
+      // Stage 3 distribution mirror tab — written by Stage3DistributionWriter
+      // every time AM reassignment or lock state changes. Doubles as the
+      // human-friendly view of the cohort allocation that the team can open
+      // directly in Sheets.
+      stage3Distribution: 'Stage3 Distribution',
     },
   },
   logframes: {

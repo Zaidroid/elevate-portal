@@ -23,8 +23,12 @@ interface AuthState {
   hasAccessToken: boolean;
   /** True when the token will expire in < 5 minutes */
   sessionExpiringSoon: boolean;
-  /** True when the token has already expired and refresh failed */
+  /** True when the token has already expired and refresh failed twice */
   sessionExpired: boolean;
+  /** True while a silent refresh attempt is in flight. */
+  refreshing: boolean;
+  /** Number of consecutive silent-refresh failures. Reset on success. */
+  refreshFailures: number;
 }
 
 class AuthService {
@@ -36,10 +40,16 @@ class AuthService {
     hasAccessToken: false,
     sessionExpiringSoon: false,
     sessionExpired: false,
+    refreshing: false,
+    refreshFailures: 0,
   };
 
   private listeners: Set<(state: AuthState) => void> = new Set();
   private tokenClient: any = null;
+  /** Single watchdog interval — cleared before re-creating to prevent stacking. */
+  private watchdogInterval: ReturnType<typeof setInterval> | null = null;
+  /** Set true when the in-flight tokenClient response is a silent refresh. */
+  private inflightSilent = false;
 
   constructor() {
     this.init();
@@ -92,41 +102,71 @@ class AuthService {
   }
 
   /**
-   * Background watchdog that checks token expiry every 30 s.
-   * - Warns the user 5 minutes before the token expires.
-   * - Attempts a silent refresh when the token has expired.
-   * - If silent refresh fails, marks `sessionExpired = true` so
-   *   the UI can show a re-login prompt.
+   * Background watchdog. Tick every 30s; only update FLAGS — never
+   * auto-call requestAccessToken. The previous attempt at proactive
+   * silent refresh popped a hidden Google popup on every tick because
+   * Chrome's Tracking Protection (third-party cookies blocked since
+   * 2024) makes `prompt: 'none'` fall back to a visible auth flow.
+   * The user sees a login window flash every minute. Removed.
+   *
+   * UX instead: at 5 min remaining, expose a soft "Session expires
+   * soon — Extend" pill in the header. The user clicks → that calls
+   * `requestAccessToken({ prompt: '' })` which is the same flow as
+   * sign-in (top-level popup, expected). At 0 min remaining, show the
+   * red "Session expired — Re-sign in" banner.
+   *
+   * Idempotent: re-calling clears the previous interval.
    */
   private startTokenWatchdog() {
-    const CHECK_MS = 30_000;   // check every 30 s
-    const WARN_MS  = 5 * 60_000; // warn 5 min before expiry
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval);
+      this.watchdogInterval = null;
+    }
+    const CHECK_MS = 30_000;
+    const WARN_AT_MS = 5 * 60_000;
 
     const tick = () => {
       const expiry = parseInt(localStorage.getItem('token_expiry') || '0');
       const remaining = expiry - Date.now();
-
-      if (remaining <= 0) {
-        // Token already expired — try silent refresh
-        if (!this.state.sessionExpired) {
-          console.warn('[auth] Token expired, attempting silent refresh…');
-          try {
-            this.tokenClient?.requestAccessToken({ prompt: '' });
-          } catch {
-            // Silent refresh failed — force re-login
-            this.state.sessionExpired = true;
-            this.state.sessionExpiringSoon = true;
-            this.notifyListeners();
-          }
+      if (remaining > 0 && remaining <= WARN_AT_MS) {
+        if (!this.state.sessionExpiringSoon || this.state.refreshing) {
+          this.state.sessionExpiringSoon = true;
+          this.state.refreshing = false;
+          this.notifyListeners();
         }
-      } else if (remaining <= WARN_MS && !this.state.sessionExpiringSoon) {
-        console.info(`[auth] Session expires in ${Math.round(remaining / 60_000)} min`);
-        this.state.sessionExpiringSoon = true;
-        this.notifyListeners();
+      } else if (remaining > WARN_AT_MS) {
+        if (this.state.sessionExpiringSoon) {
+          this.state.sessionExpiringSoon = false;
+          this.notifyListeners();
+        }
       }
+      // remaining <= 0 is left alone here. The session-expired flag is
+      // flipped by a real 401 from Google (sheets/client.ts) — that's
+      // the authoritative signal. Local clock can drift; we don't
+      // tear the user out of their work on local-clock alone.
     };
 
-    setInterval(tick, CHECK_MS);
+    this.watchdogInterval = setInterval(tick, CHECK_MS);
+  }
+
+  /**
+   * Triggered by the user clicking "Extend session" in the header
+   * banner. Pops the standard Google auth flow — same as sign-in,
+   * which the user expects.
+   */
+  public extendSession() {
+    if (!this.tokenClient) return;
+    this.state.refreshing = true;
+    this.notifyListeners();
+    try {
+      this.inflightSilent = false; // user-initiated
+      this.tokenClient.requestAccessToken({ prompt: '' });
+    } catch (err) {
+      this.state.refreshing = false;
+      this.state.error = 'Could not extend session — please re-sign in.';
+      this.notifyListeners();
+      console.warn('[auth] extendSession failed', err);
+    }
   }
 
   private loadGoogleScript(): Promise<void> {
@@ -161,8 +201,29 @@ class AuthService {
    * We get an access_token directly — then fetch user info from Google.
    */
   private async handleTokenResponse(response: { error?: string; access_token?: string; expires_in?: number }) {
+    const wasSilent = this.inflightSilent;
+    this.inflightSilent = false;
+
     if (response.error) {
-      console.error('OAuth error:', response.error);
+      console.warn('[auth] tokenClient error:', response.error, wasSilent ? '(silent path)' : '(interactive path)');
+      if (wasSilent) {
+        // Silent refresh failure. First failure → just note it; the
+        // user keeps working with the (still-valid-ish) old token. A
+        // permanent failure code (interaction_required, login_required,
+        // consent_required) means the user must reconsent — flip
+        // expired immediately. Generic transient errors get a second
+        // chance.
+        const permanent = ['interaction_required', 'login_required', 'consent_required'].includes(response.error);
+        this.state.refreshing = false;
+        this.state.refreshFailures += 1;
+        if (permanent || this.state.refreshFailures >= 2) {
+          this.state.sessionExpired = true;
+          this.state.sessionExpiringSoon = true;
+        }
+        this.notifyListeners();
+        return;
+      }
+      // Interactive path — show the error to the user.
       this.state.error = 'Sign-in was cancelled or failed. Please try again.';
       this.notifyListeners();
       return;
@@ -226,12 +287,19 @@ class AuthService {
       localStorage.setItem('user_role', role!);
       localStorage.setItem('user_picture', userInfo.picture || '');
 
-      // Reset watchdog flags on fresh token
+      // Reset watchdog flags on fresh token (covers both interactive
+      // sign-in and successful silent refresh).
       this.state.sessionExpiringSoon = false;
       this.state.sessionExpired = false;
+      this.state.refreshing = false;
+      this.state.refreshFailures = 0;
 
-      console.log('✅ Login successful:', email, 'role:', role);
-      console.log('✅ Access token expires in:', Math.floor(expiresIn / 60), 'minutes');
+      if (wasSilent) {
+        console.log('[auth] silent refresh succeeded · token now expires in', Math.floor(expiresIn / 60), 'min');
+      } else {
+        console.log('✅ Login successful:', email, 'role:', role);
+        console.log('✅ Access token expires in:', Math.floor(expiresIn / 60), 'minutes');
+      }
 
       this.notifyListeners();
       // Restart the watchdog now that we have a fresh token.
@@ -266,7 +334,15 @@ class AuthService {
       });
     }
     this.clearTokens();
-    this.state = { isAuthenticated: false, user: null, isLoading: false, error: null, hasAccessToken: false, sessionExpiringSoon: false, sessionExpired: false };
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval);
+      this.watchdogInterval = null;
+    }
+    this.inflightSilent = false;
+    this.state = {
+      isAuthenticated: false, user: null, isLoading: false, error: null, hasAccessToken: false,
+      sessionExpiringSoon: false, sessionExpired: false, refreshing: false, refreshFailures: 0,
+    };
     this.notifyListeners();
     console.log('Signed out');
   }
@@ -297,5 +373,6 @@ export function useAuth() {
     signOut: () => authService.signOut(),
     isAdmin: () => authService.isAdmin(),
     requestAccessToken: () => authService.requestAccessToken(),
+    extendSession: () => authService.extendSession(),
   };
 }

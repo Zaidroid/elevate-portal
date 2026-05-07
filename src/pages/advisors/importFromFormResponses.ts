@@ -15,8 +15,20 @@ const COHORT_3_START = '2026-01-01';
 
 // Mirror of HEADER_RULES in sheet-builders/migrators/non_technical_advisors.py.
 // Keep these two in sync when the form changes.
+//
+// Rule order matters: routeHeader returns the FIRST match per column, so
+// MORE-SPECIFIC rules must come before MORE-GENERIC ones.
+//
+// Tightened 2026-05-07 after a column collision was found: the form has
+// two questions starting "Which of the following…" — one for experience
+// areas (exp_areas) and one for engagement modes (opportunities). The
+// previous `['which of the following']` needle matched both, and because
+// they share a column index in the form, the second silently overwrote
+// the first. Both rules now require a discriminator substring.
 const HEADER_RULES: Array<[keyof Advisor, string[]]> = [
   ['timestamp', ['timestamp']],
+  // Mercy Corps safeguarding consent (form column 2, kept as a new field).
+  ['safeguarding_consent', ['safeguarding']],
   ['full_name', ['full name']],
   ['gender', ['gender']],
   ['country', ['country']],
@@ -30,8 +42,13 @@ const HEADER_RULES: Array<[keyof Advisor, string[]]> = [
   ['c_level', ['c-level managers']],
   ['c_level', ['c-level role']],
   ['c_level_detail', ['if yes, please share']],
-  ['exp_areas', ['which of the following']],
+  // exp_areas: must mention "experience in" so we don't false-match the
+  // "engaging with palestinian talent" column (routed below to opportunities).
+  ['exp_areas', ['which of the following', 'experience in']],
   ['exp_detail', ['if any of the above']],
+  // opportunities: distinct discriminator for the "engagement modes" column.
+  ['opportunities', ['engaging with palestinian']],
+  ['opportunities', ['opportunities related']],
   ['position', ['current position']],
   ['employer', ['current employer']],
   ['years', ['years of experience']],
@@ -46,10 +63,15 @@ const HEADER_RULES: Array<[keyof Advisor, string[]]> = [
   ['cv_link', ['cv link']],
   ['notes', ['anything else']],
   ['heard_from', ['how did you hear']],
-  ['opportunities', ['opportunities related']],
   ['support_in', ['like to support in']],
   ['support_via', ['supporting gsg through']],
+  // Form spells "News letter" with a space; older variants without.
+  ['newsletter', ['news letter']],
   ['newsletter', ['newsletter']],
+  // Markets / regions (added when the form gained these columns).
+  ['markets_experience', ['markets', 'experience working']],
+  ['markets_experience', ['markets/regions']],
+  ['markets_detail', ['briefly describe', 'markets']],
 ];
 
 function routeHeader(legacy: string): keyof Advisor | null {
@@ -91,6 +113,25 @@ function normalizeTimestamp(s: string): string {
   return s.trim();
 }
 
+/**
+ * Mint a deterministic advisor_id from email + timestamp.
+ *
+ * Format: `adv-<email-slug>-<YYYYMMDDHHMMSS>`. The same input always
+ * produces the same id, so re-running the import on the same form row
+ * yields a stable id that subsequent updates can write to.
+ *
+ * Exported so the dedupe / synthesise path in utils.ts uses the same
+ * algorithm — never two functions of truth.
+ */
+export function mintAdvisorId(email: string, timestamp: string): string {
+  const slug = (email || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40).replace(/^-|-$/g, '');
+  const ts = (timestamp || '').replace(/[^0-9]+/g, '').slice(0, 14);
+  if (!slug && !ts) return '';
+  if (!slug) return `adv-ts-${ts}`;
+  if (!ts)   return `adv-${slug}`;
+  return `adv-${slug}-${ts}`;
+}
+
 function dedupeKey(email: string, timestampIso: string): string {
   // Match on email + calendar date only. The original (email + full timestamp)
   // form was too brittle: the migrator wrote "2024-06-03 15:35:20" while
@@ -102,6 +143,16 @@ function dedupeKey(email: string, timestampIso: string): string {
   return `${email.toLowerCase().trim()}|${dateOnly}`;
 }
 
+export type RowDecision = {
+  rowIndex: number;          // 1-based, position in the form responses sheet
+  email: string;
+  timestampRaw: string;
+  timestampNormalized: string;
+  dedupeKey: string;
+  outcome: 'imported' | 'duplicate' | 'skipped-no-email' | 'archived-pre-2026';
+  reason?: string;
+};
+
 export type ImportResult = {
   fetched: number;
   alreadyKnown: number;
@@ -109,6 +160,23 @@ export type ImportResult = {
   archived: number;
   errors: string[];
   importedRows: Partial<Advisor>[];
+  /** Form-response columns the matcher could not route to any Advisor field.
+   *  Surface in the UI so the team sees "you renamed the form column;
+   *  update HEADER_RULES" without needing to open devtools. */
+  unmappedHeaders: string[];
+  /** All form-response columns we DID route, with their target field. */
+  mappedHeaders: { source: string; target: string }[];
+  /** Rows skipped because the email cell was blank or unparseable. */
+  skippedNoEmail: number;
+  /** Wall-clock time the import ran (ISO). */
+  ranAt: string;
+  /** Per-row decision for the last sync — what happened to each form row. */
+  decisions: RowDecision[];
+  /** Source / dest sheet metadata so the diagnostic UI can surface them. */
+  sourceSheetId: string;
+  sourceTabName: string;
+  destSheetId: string;
+  destTabName: string;
 };
 
 export async function importNewFormResponses(opts: {
@@ -127,7 +195,23 @@ export async function importNewFormResponses(opts: {
     archived: 0,
     errors: [],
     importedRows: [],
+    unmappedHeaders: [],
+    mappedHeaders: [],
+    skippedNoEmail: 0,
+    ranAt: new Date().toISOString(),
+    decisions: [],
+    sourceSheetId: opts.formSheetId,
+    sourceTabName: opts.formTabName,
+    destSheetId: opts.destSheetId,
+    destTabName: opts.destTabName,
   };
+
+  if (!opts.destHeaders || opts.destHeaders.length === 0) {
+    // Guard: if the destination tab hasn't loaded yet, refuse to write
+    // empty rows. The caller schedules a retry shortly.
+    result.errors.push('Destination headers not loaded yet — skipping this tick.');
+    return result;
+  }
 
   // 1. Fetch from form-responses sheet
   let raw: string[][] = [];
@@ -146,8 +230,21 @@ export async function importNewFormResponses(opts: {
   const rows = raw.slice(1);
   result.fetched = rows.length;
 
-  // 2. Map each source column to a canonical destination column
+  // 2. Map each source column to a canonical destination column.
+  //    Track headers that had a value somewhere but couldn't be routed
+  //    so the UI can show the team WHICH form columns drifted.
   const colRouting: Array<keyof Advisor | null> = headers.map(h => routeHeader(h));
+  for (let i = 0; i < headers.length; i++) {
+    const headerName = String(headers[i] ?? '').trim();
+    const target = colRouting[i];
+    if (target) {
+      if (headerName) result.mappedHeaders.push({ source: headerName, target: String(target) });
+      continue;
+    }
+    if (!headerName) continue;
+    const hasAny = rows.some(r => String(r[i] ?? '').trim() !== '');
+    if (hasAny) result.unmappedHeaders.push(headerName);
+  }
 
   // 3. Build an existing-key set to dedupe against
   const knownKeys = new Set<string>();
@@ -158,7 +255,9 @@ export async function importNewFormResponses(opts: {
 
   // 4. Walk rows; append unknowns to the destination
   const newRows: Partial<Advisor>[] = [];
-  for (const r of rows) {
+  for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+    const r = rows[rowIdx];
+    const sheetRowNumber = rowIdx + 2; // +1 for header, +1 for 1-based
     if (r.every(v => !v)) continue;
     const draft: Partial<Advisor> = {};
     for (let i = 0; i < headers.length && i < r.length; i++) {
@@ -166,33 +265,70 @@ export async function importNewFormResponses(opts: {
       if (!target) continue;
       draft[target] = String(r[i] ?? '').trim() as Advisor[typeof target];
     }
-    if (!draft.email) continue;
-    const tsIso = normalizeTimestamp(draft.timestamp || '');
+    const rawTs = String(draft.timestamp || '').trim();
+    if (!draft.email) {
+      result.skippedNoEmail += 1;
+      result.decisions.push({
+        rowIndex: sheetRowNumber,
+        email: '',
+        timestampRaw: rawTs,
+        timestampNormalized: normalizeTimestamp(rawTs),
+        dedupeKey: '',
+        outcome: 'skipped-no-email',
+        reason: 'email cell was blank or unparseable',
+      });
+      continue;
+    }
+    draft.email = String(draft.email).trim();
+    const tsIso = normalizeTimestamp(rawTs);
     draft.timestamp = tsIso;
     const key = dedupeKey(draft.email, tsIso);
     if (knownKeys.has(key)) {
       result.alreadyKnown += 1;
+      result.decisions.push({
+        rowIndex: sheetRowNumber,
+        email: draft.email,
+        timestampRaw: rawTs,
+        timestampNormalized: tsIso,
+        dedupeKey: key,
+        outcome: 'duplicate',
+        reason: 'matched an existing advisor by email + date',
+      });
       continue;
     }
     knownKeys.add(key);
 
-    // pipeline_status: Archived for pre-2026, New otherwise
-    const isPre2026 = tsIso && tsIso < COHORT_3_START;
+    const isPre2026 = !!tsIso && tsIso < COHORT_3_START;
     draft.pipeline_status = isPre2026 ? 'Archived' : 'New';
     if (isPre2026) result.archived += 1;
     draft.updated_at = new Date().toISOString().slice(0, 10);
     draft.updated_by = opts.userEmail || 'form-import';
     newRows.push(draft);
+    result.decisions.push({
+      rowIndex: sheetRowNumber,
+      email: draft.email,
+      timestampRaw: rawTs,
+      timestampNormalized: tsIso,
+      dedupeKey: key,
+      outcome: isPre2026 ? 'archived-pre-2026' : 'imported',
+    });
   }
 
   if (newRows.length === 0) return result;
 
-  // 5. Append in destination header order. The destination's first column
-  // (advisor_id) is a formula that auto-mints when full_name is set, so we
-  // leave it blank.
+  // 5. Append in destination header order.
+  // advisor_id MUST be minted client-side: the original design assumed
+  // a sheet formula in row 1 of the Advisors tab would auto-fill the id
+  // from email on insert. That formula doesn't fire reliably (and many
+  // workbooks were rebuilt without it). When advisor_id is blank, the
+  // page's dedupeAdvisorRows drops the row, so imports land in the sheet
+  // but never appear in the UI. Mint a stable id from email + timestamp
+  // so each submission has a unique, persistent key.
   const matrix: (string | number | boolean)[][] = newRows.map(draft => {
     return opts.destHeaders.map(h => {
-      if (h === 'advisor_id') return ''; // formula handles
+      if (h === 'advisor_id') {
+        return mintAdvisorId(draft.email || '', draft.timestamp || '');
+      }
       const v = (draft as Record<string, unknown>)[h];
       if (v === undefined || v === null) return '';
       return String(v);

@@ -140,21 +140,41 @@ export function detectDuplicateAdvisors(advisors: Advisor[]): DuplicateGroup[] {
 
 // Dedupe advisor rows by advisor_id. When duplicates exist, keep the row
 // with the most recent updated_at (or, lacking updated_at, the last one
-// in the list since the sheet returns rows in row-order). Rows with an
-// empty advisor_id are dropped entirely from the rendered list — they
-// cannot be acted on (updateRow needs a stable key) and the
-// detectDuplicateAdvisors banner will flag them so the team can clean
-// them up.
+// in the list since the sheet returns rows in row-order).
+//
+// Rows with an empty advisor_id used to be dropped entirely — but the
+// importer relied on a sheet formula to auto-mint the id, and that
+// formula isn't firing in production. Result: form responses landed in
+// the Advisors tab but were invisibly removed from the rendered list.
+//
+// We now SYNTHESIZE an id from email + timestamp for rows missing one.
+// The synthesized id matches mintAdvisorId() in importFromFormResponses,
+// so a row with email='x@y.com' and timestamp='2026-05-05 13:11:25' gets
+// id='adv-x-y-com-20260505131125' both at import time and at render time
+// — meaning if the team later runs the importer to backfill, the synth
+// row collapses into the same record without duplication.
 function dedupeAdvisorRows(advisors: Advisor[]): Advisor[] {
   const winners = new Map<string, Advisor>();
   for (const a of advisors) {
-    const id = (a.advisor_id || '').trim();
-    if (!id) continue;
+    let id = (a.advisor_id || '').trim();
+    let withId = a;
+    if (!id) {
+      const email = (a.email || '').trim().toLowerCase();
+      if (!email) continue; // truly empty row, nothing to render
+      const synthSlug = email.replace(/[^a-z0-9]+/g, '-').slice(0, 40).replace(/^-|-$/g, '');
+      const ts = (a.timestamp || '').replace(/[^0-9]+/g, '').slice(0, 14);
+      id = ts ? `adv-${synthSlug}-${ts}` : `adv-${synthSlug}`;
+      // Stamp the synthetic id so kanban cards / drawer / updateRow
+      // can find the row by .advisor_id. (Updates won't persist this id
+      // back to the sheet — see Advisors page banner that prompts the
+      // admin to run a one-time Backfill.)
+      withId = { ...a, advisor_id: id };
+    }
     const existing = winners.get(id);
-    if (!existing) { winners.set(id, a); continue; }
+    if (!existing) { winners.set(id, withId); continue; }
     const existingTs = existing.updated_at || '';
-    const newTs = a.updated_at || '';
-    if (newTs >= existingTs) winners.set(id, a);
+    const newTs = withId.updated_at || '';
+    if (newTs >= existingTs) winners.set(id, withId);
   }
   return Array.from(winners.values());
 }

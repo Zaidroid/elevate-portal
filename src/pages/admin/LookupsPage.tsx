@@ -8,13 +8,16 @@
 // inline. Writes go through the standard sheets client.
 
 import { useEffect, useMemo, useState } from 'react';
-import { Lock, Plus, RefreshCw, Save, Trash2, AlertTriangle } from 'lucide-react';
+import { Lock, Plus, RefreshCw, Save, Sparkles, Trash2, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { isAdmin } from '../../config/team';
 import { Badge, Button, Card, CardHeader, EmptyState, useToast } from '../../lib/ui';
 import { fetchRange, updateRange } from '../../lib/sheets/client';
-import { getSheetId } from '../../config/sheets';
+import { getSheetId, getTab } from '../../config/sheets';
 import type { ModuleKey } from '../../config/sheets';
+import { ensureHumanFriendlyTab } from '../../lib/sheets/output-formatting';
+import { AutoMergeCohortCard } from './AutoMergeCohortCard';
+import { RebuildDashboardsCard } from './RebuildDashboardsCard';
 
 type LookupCategory = {
   module: ModuleKey;
@@ -190,6 +193,10 @@ export function LookupsPage() {
         </Card>
       )}
 
+      <RebuildDashboardsCard />
+      <AutoMergeCohortCard />
+      <ReformatOutputTabsCard />
+
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         <Card>
           <CardHeader title="Categories" subtitle={`${categories.length} columns across ${TARGETS.length} workbooks`} />
@@ -290,5 +297,150 @@ export function LookupsPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ─── Output-tab formatting pass ──────────────────────────────────────
+//
+// Idempotent re-formatter for portal-owned output tabs. Applies the
+// shared ensureHumanFriendlyTab recipe (frozen header, banded rows,
+// hidden ID columns, status conditional formatting). Lets admins pick
+// up new formatting changes without a code redeploy.
+
+type ReformatTarget = {
+  module: ModuleKey;
+  tab: string;
+  title: string;
+  headers: string[];
+  hiddenColumnIndexes?: number[];
+  statusColumn?: number;
+  colWidths?: Record<number, number>;
+};
+
+const REFORMAT_TARGETS: ReformatTarget[] = [
+  {
+    module: 'companies',
+    tab: 'companies',
+    title: 'Companies — operational master',
+    headers: [
+      'company_id', 'company_name', 'legal_name', 'city', 'governorate', 'sector',
+      'employee_count', 'revenue_bracket', 'international_revenue_pct', 'readiness_score',
+      'fund_code', 'cohort', 'status', 'stage', 'profile_manager_email',
+      'selection_date', 'onboarding_date', 'drive_folder_url', 'notes',
+      'updated_at', 'updated_by',
+    ],
+    hiddenColumnIndexes: [0, 19, 20],
+    statusColumn: 12,
+    colWidths: { 1: 220, 14: 200, 17: 220 },
+  },
+  {
+    module: 'companies',
+    tab: 'assignments',
+    title: 'Intervention Assignments',
+    headers: [
+      'assignment_id', 'company_id', 'intervention_type', 'sub_intervention',
+      'fund_code', 'start_date', 'end_date', 'owner_email', 'status', 'budget_usd',
+      'lin_code', 'tier', 'notes', 'updated_at', 'updated_by',
+    ],
+    hiddenColumnIndexes: [0, 1, 13, 14],
+    statusColumn: 8,
+    colWidths: { 2: 110, 3: 180, 7: 200, 12: 220 },
+  },
+  {
+    module: 'payments',
+    tab: 'payments',
+    title: 'Payments',
+    headers: [
+      'payment_id', 'pr_id', 'company_id', 'assignment_id', 'payee_type', 'payee_name',
+      'intervention_type', 'fund_code', 'amount_usd', 'currency', 'payment_date',
+      'status', 'finance_contact', 'invoice_url', 'receipt_url', 'notes',
+      'updated_at', 'updated_by',
+    ],
+    hiddenColumnIndexes: [0, 1, 2, 3, 16, 17],
+    statusColumn: 11,
+    colWidths: { 5: 200, 6: 130, 13: 200, 14: 200 },
+  },
+  {
+    module: 'selection',
+    tab: 'stage3Distribution',
+    // The Stage 3 mirror tab is rewritten by Stage3DistributionWriter on
+    // every reassign — re-formatting it here is also safe.
+    title: 'Stage 3 · Distribution snapshot',
+    headers: [
+      'Company', 'City', 'Account Manager', 'Pillars', 'Sub-Interventions',
+      'Donor', 'Status', 'Budget (USD)', 'Reg Document', 'distribution_id', 'company_id',
+    ],
+    hiddenColumnIndexes: [9, 10],
+    statusColumn: 6,
+    colWidths: { 0: 200, 4: 260, 8: 200 },
+  },
+];
+
+function ReformatOutputTabsCard() {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const [results, setResults] = useState<{ ok: number; errors: string[] }>({ ok: 0, errors: [] });
+
+  const runReformat = async () => {
+    setBusy(true);
+    setResults({ ok: 0, errors: [] });
+    let ok = 0;
+    const errors: string[] = [];
+    for (const t of REFORMAT_TARGETS) {
+      const sheetId = getSheetId(t.module);
+      if (!sheetId) {
+        errors.push(`${t.module}/${t.tab}: missing sheetId`);
+        continue;
+      }
+      try {
+        await ensureHumanFriendlyTab(sheetId, getTab(t.module, t.tab), {
+          title: t.title,
+          headers: t.headers,
+          hiddenColumnIndexes: t.hiddenColumnIndexes,
+          statusColumn: t.statusColumn,
+          colWidths: t.colWidths,
+        });
+        ok += 1;
+      } catch (err) {
+        errors.push(`${t.module}/${t.tab}: ${(err as Error).message}`);
+      }
+      setResults({ ok, errors: [...errors] });
+    }
+    setBusy(false);
+    toast.success(`Reformatted ${ok} of ${REFORMAT_TARGETS.length} tabs`);
+  };
+
+  return (
+    <Card accent="teal">
+      <CardHeader
+        title="Reformat output tabs"
+        subtitle="Idempotent pass that re-applies the shared recipe (frozen header, banded rows, hidden ID columns, status colors) to every portal-owned output tab."
+        action={
+          <Button onClick={runReformat} disabled={busy}>
+            <Sparkles className="h-4 w-4" /> {busy ? 'Reformatting…' : 'Run formatting pass'}
+          </Button>
+        }
+      />
+      <p className="text-xs text-slate-500">
+        Targets: {REFORMAT_TARGETS.map(t => `${t.module}/${t.tab}`).join(' · ')}
+      </p>
+      {(results.ok > 0 || results.errors.length > 0) && (
+        <div className="mt-3 space-y-2 text-xs">
+          <div>
+            ✅ {results.ok} of {REFORMAT_TARGETS.length} tabs reformatted.
+          </div>
+          {results.errors.length > 0 && (
+            <details className="rounded-lg border border-red-200 bg-red-50 p-2 dark:border-red-900 dark:bg-red-950">
+              <summary className="cursor-pointer font-semibold text-red-700">
+                {results.errors.length} error{results.errors.length === 1 ? '' : 's'}
+              </summary>
+              <ul className="mt-2 list-disc space-y-0.5 pl-5 text-red-700">
+                {results.errors.map((e, i) => <li key={i}>{e}</li>)}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }

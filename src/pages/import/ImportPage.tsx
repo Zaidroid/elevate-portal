@@ -20,14 +20,19 @@ import {
   FileSpreadsheet,
   Lock,
   Upload,
+  Users,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { isAdmin } from '../../config/team';
-import { Button, Card, CardHeader, EmptyState } from '../../lib/ui';
+import { Badge, Button, Card, CardHeader, EmptyState } from '../../lib/ui';
 import { appendRows, getSpreadsheetMetaCached } from '../../lib/sheets/client';
 import { getSheetId, getTab } from '../../config/sheets';
 import { IMPORT_TARGETS, findTarget, type ImportTarget } from '../../lib/import/schemas';
 import { autoMatch, parseFile, type ParsedSheet, type ParsedWorkbook } from '../../lib/import/parse';
+import { useModuleData } from '../../data/useModuleData';
+import type { Company, Assignment } from '../../data/types';
+import { mapAllocationXlsx, validateHeaders, type AllocationPlan } from './cohortAllocationPreset';
+import { appendActivity } from '../companies/activityLog';
 
 type StepStatus = 'idle' | 'loading' | 'done' | 'error';
 
@@ -132,6 +137,8 @@ export function ImportPage() {
           Mirrors what the Python migrators in <code>sheet-builders/migrators/</code> do, but for non-engineers.
         </p>
       </header>
+
+      <CohortAllocationPanel userEmail={user?.email || ''} />
 
       <ol className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
         <Step active={!target} done={!!target} label="1. Target" />
@@ -538,6 +545,242 @@ function CommitPanel({
         <p className="mt-2 text-xs text-slate-500">
           No rows pass validation yet. Check that the source has data in the required columns.
         </p>
+      )}
+    </Card>
+  );
+}
+
+// ─── Cohort 3 allocation preset ─────────────────────────────────────
+//
+// Specialized seeder for the Elevate 2026 Budget Intervention Allocation
+// xlsx — populates Companies + Intervention Assignments in one pass with
+// mapping rules that the generic column-mapper can't express (POC name →
+// email, intervention code → canonical pillar+sub, MA-Technical flavor).
+// Idempotent — re-running against the same file is a no-op.
+
+type CohortStatus = 'idle' | 'parsing' | 'previewing' | 'committing' | 'done' | 'error';
+
+function CohortAllocationPanel({ userEmail }: { userEmail: string }) {
+  const master = useModuleData<Company>('companies', 'companies');
+  const assignments = useModuleData<Assignment>('companies', 'assignments');
+  const companiesSheetId = getSheetId('companies');
+  const activityTab = getTab('companies', 'activity');
+
+  const [status, setStatus] = useState<CohortStatus>('idle');
+  const [error, setError] = useState<string>('');
+  const [plan, setPlan] = useState<AllocationPlan | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number; failures: string[] }>({
+    done: 0,
+    total: 0,
+    failures: [],
+  });
+
+  const onPickFile = useCallback(async (f: File) => {
+    setStatus('parsing');
+    setError('');
+    setPlan(null);
+    try {
+      const wb = await parseFile(f);
+      const sheet = wb.sheets.find(s => s.name === 'Sheet1') ?? wb.sheets[0];
+      if (!sheet) throw new Error('No sheets found in the workbook.');
+      const headerErr = validateHeaders(sheet);
+      if (headerErr) throw new Error(headerErr);
+      const next = mapAllocationXlsx(sheet, master.rows ?? [], assignments.rows ?? []);
+      setPlan(next);
+      setStatus('previewing');
+    } catch (err) {
+      setStatus('error');
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [master.rows, assignments.rows]);
+
+  const onCommit = useCallback(async () => {
+    if (!plan) return;
+    setStatus('committing');
+    const totalSteps =
+      plan.newCompanies.length +
+      plan.updateCompanies.length +
+      plan.newAssignments.length +
+      plan.updateAssignments.length;
+    setProgress({ done: 0, total: totalSteps, failures: [] });
+    let done = 0;
+    const failures: string[] = [];
+
+    const bump = () => {
+      done += 1;
+      setProgress({ done, total: totalSteps, failures: [...failures] });
+    };
+
+    for (const c of plan.newCompanies) {
+      try {
+        await master.createRow(c as unknown as Record<string, string | undefined>);
+      } catch (err) {
+        failures.push(`Create company '${c.company_name}': ${(err as Error).message}`);
+      }
+      bump();
+    }
+    for (const u of plan.updateCompanies) {
+      try {
+        await master.updateRow(u.id, u.updates as Record<string, string | undefined>);
+      } catch (err) {
+        failures.push(`Update company '${u.id}': ${(err as Error).message}`);
+      }
+      bump();
+    }
+    for (const a of plan.newAssignments) {
+      try {
+        await assignments.createRow(a as unknown as Record<string, string | undefined>);
+      } catch (err) {
+        failures.push(`Create assignment '${a.assignment_id}': ${(err as Error).message}`);
+      }
+      bump();
+    }
+    for (const u of plan.updateAssignments) {
+      try {
+        await assignments.updateRow(u.id, u.updates as Record<string, string | undefined>);
+      } catch (err) {
+        failures.push(`Update assignment '${u.id}': ${(err as Error).message}`);
+      }
+      bump();
+    }
+
+    if (companiesSheetId) {
+      void appendActivity({
+        sheetId: companiesSheetId,
+        tabName: activityTab,
+        user_email: userEmail,
+        action: 'cohort_seeded',
+        details: `seeded ${plan.newCompanies.length} new companies, ${plan.newAssignments.length} new assignments, ${plan.updateCompanies.length + plan.updateAssignments.length} updates`,
+      });
+    }
+
+    setProgress({ done, total: totalSteps, failures });
+    setStatus(failures.length === totalSteps && totalSteps > 0 ? 'error' : 'done');
+  }, [plan, master, assignments, userEmail, companiesSheetId, activityTab]);
+
+  const planEmpty = plan
+    ? plan.newCompanies.length === 0 &&
+      plan.updateCompanies.length === 0 &&
+      plan.newAssignments.length === 0 &&
+      plan.updateAssignments.length === 0
+    : true;
+
+  return (
+    <Card accent="teal">
+      <CardHeader
+        title="Cohort 3 allocation seed"
+        subtitle="One-time ingest of the Elevate 2026 Budget Intervention Allocation xlsx → Companies + Intervention Assignments. Idempotent — re-running is safe."
+      />
+
+      <label
+        className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-6 text-center transition-colors hover:border-brand-teal hover:bg-brand-teal/5 dark:border-navy-700 dark:bg-navy-700/50"
+        onDragOver={e => { e.preventDefault(); e.stopPropagation(); }}
+        onDrop={e => {
+          e.preventDefault();
+          e.stopPropagation();
+          const f = e.dataTransfer.files?.[0];
+          if (f) void onPickFile(f);
+        }}
+      >
+        <Users className="h-6 w-6 text-brand-teal" />
+        <div className="text-sm font-semibold text-navy-500 dark:text-white">
+          Drop the Cohort 3 allocation .xlsx
+        </div>
+        <div className="text-xs text-slate-500">
+          Expected columns: Company · City · Intervention · Intervention2 · Intervention3 · Donor · LIN Code · POC · Total Estimated Budget · Reg Document
+        </div>
+        <input
+          type="file"
+          accept=".xlsx,.xls"
+          className="hidden"
+          onChange={e => {
+            const f = e.target.files?.[0];
+            if (f) void onPickFile(f);
+          }}
+        />
+      </label>
+
+      {status === 'parsing' && (
+        <p className="mt-3 text-xs text-slate-500">Parsing and matching against current Companies + Assignments…</p>
+      )}
+
+      {status === 'error' && error && (
+        <p className="mt-3 inline-flex items-center gap-1 text-xs text-red-600">
+          <AlertTriangle className="h-3.5 w-3.5" /> {error}
+        </p>
+      )}
+
+      {plan && status !== 'parsing' && (
+        <div className="mt-4 space-y-3">
+          <div className="flex flex-wrap gap-2">
+            <Badge tone="teal">{plan.newCompanies.length} new companies</Badge>
+            <Badge tone="amber">{plan.updateCompanies.length} company updates</Badge>
+            <Badge tone="teal">{plan.newAssignments.length} new assignments</Badge>
+            <Badge tone="amber">{plan.updateAssignments.length} assignment updates</Badge>
+            {plan.warnings.length > 0 && <Badge tone="red">{plan.warnings.length} warnings</Badge>}
+            {planEmpty && <Badge tone="neutral">Already in sync</Badge>}
+          </div>
+
+          {plan.warnings.length > 0 && (
+            <details className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+              <summary className="cursor-pointer font-semibold">Review {plan.warnings.length} warning{plan.warnings.length === 1 ? '' : 's'}</summary>
+              <ul className="mt-2 list-disc space-y-1 pl-5">
+                {plan.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            </details>
+          )}
+
+          {status === 'committing' && (
+            <div>
+              <div className="mb-1 flex items-center justify-between text-xs text-slate-500">
+                <span>Seeding portal-owned tabs…</span>
+                <span>{progress.done} / {progress.total}</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-navy-700">
+                <div
+                  className="h-full rounded-full bg-brand-teal transition-all"
+                  style={{ width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {status === 'done' && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">
+              <CheckCircle2 className="mr-1 inline h-4 w-4" />
+              Seed complete: {progress.done} of {progress.total} steps committed.
+              {progress.failures.length > 0 && ` ${progress.failures.length} failure(s).`}
+            </div>
+          )}
+
+          {progress.failures.length > 0 && (
+            <details className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+              <summary className="cursor-pointer font-semibold">{progress.failures.length} failure{progress.failures.length === 1 ? '' : 's'}</summary>
+              <ul className="mt-2 list-disc space-y-1 pl-5">
+                {progress.failures.map((f, i) => <li key={i}>{f}</li>)}
+              </ul>
+            </details>
+          )}
+
+          <div className="flex items-center gap-3">
+            <Button
+              onClick={onCommit}
+              disabled={status === 'committing' || planEmpty}
+              variant="primary"
+            >
+              {status === 'committing' ? 'Committing…' : (
+                <>
+                  <ArrowRight className="h-4 w-4" /> Commit seed
+                </>
+              )}
+            </Button>
+            {(status === 'done' || status === 'error') && (
+              <Button variant="ghost" onClick={() => { setStatus('idle'); setPlan(null); setError(''); setProgress({ done: 0, total: 0, failures: [] }); }}>
+                Reset
+              </Button>
+            )}
+          </div>
+        </div>
       )}
     </Card>
   );
