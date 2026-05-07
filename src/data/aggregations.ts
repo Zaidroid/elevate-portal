@@ -23,6 +23,36 @@ import {
 import { ACCOUNT_MANAGERS, displayName } from '../config/team';
 import { cohortEntryFor } from '../config/cohort3Aliases';
 
+// Stage 3 writes assignments with intervention_type as the pillar code
+// ('CB' / 'MA' / 'MKG') and sub_intervention as the actual sub. Older
+// rows (and Reviews) sometimes pack the sub into intervention_type.
+// This helper picks the right field so downstream rollups don't drop
+// rows whose intervention_type is just a pillar code.
+function resolveAssignmentSub(a: Assignment): { pillar: string; sub: string } | null {
+  // Prefer the explicit sub_intervention field when set (Stage 3 path).
+  const subRaw = (a.sub_intervention || '').trim();
+  if (subRaw) {
+    const r = resolveIntervention(subRaw);
+    if (r && r.sub) return { pillar: r.pillar, sub: r.sub };
+  }
+  // Fall back to intervention_type — for legacy rows that packed the
+  // sub into that single column.
+  const it = (a.intervention_type || '').trim();
+  if (it) {
+    const r = resolveIntervention(it);
+    if (r && r.sub) return { pillar: r.pillar, sub: r.sub };
+  }
+  return null;
+}
+
+function resolvePaymentSub(p: Payment): { pillar: string; sub: string } | null {
+  const it = (p.intervention_type || '').trim();
+  if (!it) return null;
+  const r = resolveIntervention(it);
+  if (r && r.sub) return { pillar: r.pillar, sub: r.sub };
+  return null;
+}
+
 // ─── shared helpers ──────────────────────────────────────────────────
 
 function parseUsd(v: string | undefined): number {
@@ -257,8 +287,8 @@ export function aggregateByDonor(
     if (!cohortIds.has(a.company_id)) continue;
     const donor = fundDonor(a.fund_code);
     if (!donor) continue;
-    const r = resolveIntervention(a.intervention_type);
-    if (!r || !r.sub) continue;
+    const r = resolveAssignmentSub(a);
+    if (!r) continue;
     const usd = parseUsd(a.budget_usd);
     totals[donor].companies.add(a.company_id);
     totals[donor].plannedUsd += usd;
@@ -274,8 +304,8 @@ export function aggregateByDonor(
     if (!donor) continue;
     const usd = parseUsd(p.amount_usd);
     totals[donor].paidUsd += usd;
-    const r = resolveIntervention(p.intervention_type);
-    if (r && r.sub) ensure(donor, r.sub, r.pillar).paidUsd += usd;
+    const r = resolvePaymentSub(p);
+    if (r) ensure(donor, r.sub, r.pillar).paidUsd += usd;
   }
 
   const subSlotsCapFor = (donor: 'Dutch' | 'SIDA', sub: string) =>
@@ -395,8 +425,8 @@ export function aggregateBySub(
 
   for (const a of assignments) {
     if (!cohortIds.has(a.company_id)) continue;
-    const r = resolveIntervention(a.intervention_type);
-    if (!r || !r.sub) continue;
+    const r = resolveAssignmentSub(a);
+    if (!r) continue;
     const b = seed(r.sub, r.pillar);
     b.companies.add(a.company_id);
     b.assignmentsTotal += 1;
@@ -411,8 +441,8 @@ export function aggregateBySub(
   for (const p of payments) {
     if (!cohortIds.has(p.company_id)) continue;
     if (!isPaid(p)) continue;
-    const r = resolveIntervention(p.intervention_type);
-    if (!r || !r.sub) continue;
+    const r = resolvePaymentSub(p);
+    if (!r) continue;
     seed(r.sub, r.pillar).paidUsd += parseUsd(p.amount_usd);
   }
 
