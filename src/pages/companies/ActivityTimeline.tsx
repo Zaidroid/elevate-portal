@@ -96,12 +96,16 @@ export function ActivityTimeline({
 
   return (
     <ol className="space-y-2">
-      {filtered.map(r => {
+      {filtered.map((r, i) => {
         const tone = ACTION_TONE[r.action] || 'slate';
         const label = ACTION_LABEL[r.action] || r.action;
+        // Compose a key that survives ID collisions in the source data
+        // (e.g. two presence pings landing in the same millisecond gave
+        // identical activity_ids and React was warning every render).
+        const key = `${r.activity_id || 'noid'}::${i}`;
         return (
           <li
-            key={r.activity_id}
+            key={key}
             className="rounded-md border border-slate-200 bg-white p-2 text-xs dark:border-navy-700 dark:bg-navy-900"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">

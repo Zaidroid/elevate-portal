@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -183,20 +183,28 @@ export function AppShell({
   // ────────────────────────────────────────────────────────────────────────
 
   // ── Autopilot: silent maintenance on admin login ──────────────────────
-  // Once per session, after the cohort + assignments + conference tracker
-  // have loaded, scan for drift and write the fixes:
-  //   - MKG-only assignments → set sub_intervention to the canonical default
-  //   - Conference Tracker decisions (Committed/Attended) → matching
-  //     Conferences sub-intervention rows in Companies Assignments
-  // No-op when there's nothing to do. Toast surface so the team can see
-  // when the pipeline ran (and how many rows landed). Non-fatal on
-  // errors — the manual cards on /admin/lookups remain as the safety net.
+  // Once per browser tab session, after the cohort + assignments + tracker
+  // have loaded, scan for drift and write the fixes. Strictly one-shot:
+  // a useRef guard latches the moment we kick off and never resets, so
+  // even if the dep array would otherwise re-fire (the useModuleData
+  // hooks return fresh array references on every poll), the body
+  // returns immediately. Without this guard the writes triggered the
+  // provider's optimistic state update, which re-rendered AppShell,
+  // which re-fired the effect, which wrote again — a 429-spamming
+  // infinite loop.
   const masterHook     = useModuleData<Company>('companies', 'companies');
   const assignmentHook = useModuleData<Assignment>('companies', 'assignments');
   const trackerHook    = useModuleData<ConferenceTrackerRow>('conferences', 'tracker');
   const [autopilotMsg, setAutopilotMsg] = useState<string | null>(null);
+  const autopilotStartedRef = useRef(false);
+  // Latest hook accessor — read inside the effect via ref so we don't
+  // capture a stale closure when the effect kicks off, but we also
+  // don't add the hook to the dep array.
+  const assignmentHookRef = useRef(assignmentHook);
+  assignmentHookRef.current = assignmentHook;
   useEffect(() => {
     if (!admin) return;
+    if (autopilotStartedRef.current) return;
     if (masterHook.loading || assignmentHook.loading || trackerHook.loading) return;
     if (masterHook.rows.length === 0 || assignmentHook.rows.length === 0) return;
     const plan = computeAutopilotPlan({
@@ -206,20 +214,19 @@ export function AppShell({
       trackerHeaders: trackerHook.headers,
     });
     if (!shouldRun(plan)) return;
-    let cancelled = false;
+    // Latch FIRST so re-fires while we're awaiting writes return immediately.
+    autopilotStartedRef.current = true;
     (async () => {
       let mkg = 0, conf = 0;
       try {
         for (const fix of plan.mkgFixes) {
-          // assignment_id is encoded in the fix.detail prefix
           const id = fix.detail.split(':')[0].trim();
           if (!id) continue;
-          await assignmentHook.updateRow(id, { sub_intervention: 'Marketing Agency' });
+          await assignmentHookRef.current.updateRow(id, { sub_intervention: 'Marketing Agency' });
           mkg += 1;
-          if (cancelled) return;
         }
         for (const add of plan.confAdds) {
-          await assignmentHook.createRow({
+          await assignmentHookRef.current.createRow({
             assignment_id: mintConferenceAssignmentId(add.company_id),
             company_id: add.company_id,
             intervention_type: 'MA',
@@ -233,7 +240,6 @@ export function AppShell({
             notes: `Auto-synced from Conference Tracker (${add.conference_name}, ${add.decision})`,
           });
           conf += 1;
-          if (cancelled) return;
         }
         markRan(plan);
         if (mkg > 0 || conf > 0) {
@@ -241,17 +247,20 @@ export function AppShell({
           window.setTimeout(() => setAutopilotMsg(null), 8000);
         }
       } catch (err) {
+        // Don't reset the latch — better to leave the manual /admin/lookups
+        // tools as the recovery path than risk a retry loop on a real
+        // sheet error (like a 403 or quota).
         console.warn('[autopilot] failed; admin can run /admin/lookups manually', err);
       }
     })();
-    return () => { cancelled = true; };
+    // Deps are intentionally minimal: only the loaded-state booleans
+    // and admin. The data reads inside the effect body see the latest
+    // values via closure; the latch ref ensures we never re-enter.
   }, [
     admin,
-    masterHook.loading, masterHook.rows,
-    assignmentHook.loading, assignmentHook.rows,
-    trackerHook.loading, trackerHook.rows, trackerHook.headers,
-    assignmentHook,
-  ]);
+    masterHook.loading, assignmentHook.loading, trackerHook.loading,
+    masterHook.rows.length, assignmentHook.rows.length, trackerHook.rows.length,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
   // ────────────────────────────────────────────────────────────────────────
 
   const [collapsed, setCollapsed] = useState<boolean>(() => {

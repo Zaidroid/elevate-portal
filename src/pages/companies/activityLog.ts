@@ -45,8 +45,14 @@ export type ActivityInput = {
   details?: string;
 };
 
+// Counter so two activity rows minted in the same millisecond still get
+// distinct ids. Without this, presence pings (companyId='' → 'global')
+// fired by concurrent components produced identical ids and React's
+// reconciler emitted a warning per render.
+let activityIdSeq = 0;
 function activityIdFor(timestamp: string, action: string, companyId: string): string {
-  const slug = `${action}-${companyId}-${timestamp}`
+  activityIdSeq = (activityIdSeq + 1) % 1_000_000;
+  const slug = `${action}-${companyId}-${timestamp}-${activityIdSeq.toString(36)}`
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .slice(0, 100);
