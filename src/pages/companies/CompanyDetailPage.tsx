@@ -25,6 +25,7 @@ import { getSheetId } from '../../config/sheets';
 import type { Company, Contact, Assignment, PR, Payment, ConferenceTrackerRow as ConferenceRow, Agreement as Doc, SelectionRow } from '../../data/types';
 import type { Advisor } from '../../types/advisor';
 import { keepCompaniesSection } from '../../lib/sheets/sections';
+import { canonicalCohortName } from '../../config/cohort3Aliases';
 import { getProfileManagers, displayName } from '../../config/team';
 import { derivePRFields } from '../../lib/procurement/compute';
 import { INTERVENTION_TYPES, CORE_PILLARS, pillarFor } from '../../config/interventions';
@@ -124,21 +125,36 @@ export function CompanyDetailPage() {
   const discussion = useModuleData<SelectionRow>('selection', 'interviewDiscussion');
   const ebAssess   = useModuleData<SelectionRow>('selection', 'ebAssessments');
 
-  // Find applicant from Source Data by numeric id (the route param for applicants).
-  const applicant = useMemo(
-    () => sourceData.rows.find(r => r.id === id),
-    [sourceData.rows, id]
-  );
-  const applicantName = applicant?.name || applicant?.companyName || '';
-
-  // Find Master row by numeric company_id match OR by normalized name match against applicant.
+  // Find Master row first — by route id, then by canonical name match
+  // against the route id (in case the URL came from an external link
+  // using the canonical name).
   const masterRow = useMemo(() => {
     const byId = companies.rows.find(r => r.company_id === id);
     if (byId) return byId;
-    if (!applicantName) return undefined;
-    const key = norm(applicantName);
-    return companies.rows.find(r => norm(r.company_name) === key);
-  }, [companies.rows, id, applicantName]);
+    return undefined;
+  }, [companies.rows, id]);
+
+  // Find applicant data: first by numeric route id (legacy applicant
+  // links), then by canonical-cohort match against the master row's
+  // name. The cohort allocation seed creates master rows whose
+  // company_name resolves to a Cohort 3 canonical, but the applicant
+  // row lives under that same canonical (or one of its aliases) in
+  // Source Data — by id alone we miss it, leaving the Overview tab
+  // empty even though Source Data has sector / employees / revenue.
+  const applicant = useMemo(() => {
+    const byId = sourceData.rows.find(r => r.id === id);
+    if (byId) return byId;
+    const masterCanon = canonicalCohortName(masterRow?.company_name || '');
+    if (!masterCanon) return undefined;
+    return sourceData.rows.find(r => {
+      const name = r.name || r.companyName || r.company_name || '';
+      const canon = canonicalCohortName(name);
+      return canon === masterCanon;
+    });
+  }, [sourceData.rows, id, masterRow?.company_name]);
+  const applicantName = applicant?.name || applicant?.companyName || masterRow?.company_name || '';
+  // suppress unused-var warning when applicantName isn't used downstream
+  void applicantName;
 
   // Merge: applicant is the identity backbone, Master overlays operational fields.
   const company = useMemo<Company | undefined>(() => {
@@ -773,7 +789,7 @@ function OverviewTab({
           {editing ? (
             <ProfileForm draft={draft} onDraftChange={onDraftChange} />
           ) : (
-            <ProfileFacts company={company} needs={needs} />
+            <ProfileFacts company={company} needs={needs} applicant={applicant} />
           )}
         </Card>
 
@@ -870,15 +886,31 @@ function OverviewTab({
   );
 }
 
-function ProfileFacts({ company, needs }: { company: Company; needs?: SelectionRow }) {
-  const groups: { title: string; items: { label: string; value?: string }[] }[] = [
+function ProfileFacts({ company, needs, applicant }: { company: Company; needs?: SelectionRow; applicant?: SelectionRow }) {
+  // Pull from applicant (Selection Source Data) when master is blank.
+  // Applicant has sector / employees / revenue / etc. that the cohort
+  // allocation seed didn't carry over.
+  const apv = (k: string): string => (applicant?.[k] as string | undefined) ?? '';
+  const sector = company.sector || apv('businessType') || apv('sector') || apv('Sector') || '';
+  const employees = company.employee_count || apv('totalEmployees') || apv('numEmployees') || apv('employee_count') || '';
+  const revenueBracket = company.revenue_bracket || apv('revenueBracket') || apv('revenue_bracket') || '';
+  const intlRevenue = company.international_revenue_pct || apv('revenueInternational') || apv('international_revenue_pct') || '';
+  const readiness = company.readiness_score || apv('readinessScore') || (needs?.['Readiness Score'] ?? '') || '';
+  const legalName = company.legal_name || apv('legalName') || apv('legal_name') || '';
+  const fund = company.fund_code === '97060' ? 'Dutch (97060)'
+             : company.fund_code === '91763' ? 'SIDA (91763)'
+             : company.fund_code || '';
+
+  // Build groups, then drop any empty items so the layout doesn't fill
+  // with em-dashes when the underlying field hasn't been populated.
+  const allGroups: { title: string; items: { label: string; value?: string }[] }[] = [
     {
       title: 'Identity',
       items: [
-        { label: 'Legal Name', value: company.legal_name },
-        { label: 'Sector', value: company.sector },
+        { label: 'Legal Name', value: legalName },
+        { label: 'Sector', value: sector },
         { label: 'Cohort', value: company.cohort },
-        { label: 'Fund', value: company.fund_code === '97060' ? 'Dutch (97060)' : company.fund_code === '91763' ? 'SIDA (91763)' : company.fund_code },
+        { label: 'Fund', value: fund },
       ],
     },
     {
@@ -891,10 +923,10 @@ function ProfileFacts({ company, needs }: { company: Company; needs?: SelectionR
     {
       title: 'Size & Market',
       items: [
-        { label: 'Employees', value: company.employee_count },
-        { label: 'Revenue Bracket', value: company.revenue_bracket },
-        { label: 'International Revenue', value: company.international_revenue_pct ? `${company.international_revenue_pct}%` : undefined },
-        { label: 'Readiness', value: company.readiness_score || needs?.['Readiness Score'] },
+        { label: 'Employees', value: employees },
+        { label: 'Revenue Bracket', value: revenueBracket },
+        { label: 'International Revenue', value: intlRevenue ? `${intlRevenue}%` : '' },
+        { label: 'Readiness', value: readiness },
       ],
     },
     {
@@ -907,6 +939,23 @@ function ProfileFacts({ company, needs }: { company: Company; needs?: SelectionR
       ],
     },
   ];
+
+  // Filter out empty values per group; drop groups that end up with no
+  // populated items.
+  const groups = allGroups
+    .map(g => ({
+      title: g.title,
+      items: g.items.filter(it => it.value && String(it.value).trim() && String(it.value).trim() !== '0'),
+    }))
+    .filter(g => g.items.length > 0);
+
+  if (groups.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-slate-300 p-4 text-center text-xs text-slate-500 dark:border-navy-700">
+        No profile data yet. Run the cohort backfill on <code>/admin/lookups</code> or fill the fields by clicking <strong>Edit</strong> above.
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">
@@ -927,11 +976,10 @@ function ProfileFacts({ company, needs }: { company: Company; needs?: SelectionR
 }
 
 function Fact({ label, value }: { label: string; value?: string }) {
-  const v = value && value !== '0' ? value : '—';
   return (
     <div>
       <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">{label}</div>
-      <div className="mt-0.5 text-sm font-semibold text-navy-500 dark:text-white">{v}</div>
+      <div className="mt-0.5 text-sm font-semibold text-navy-500 dark:text-white">{value || '—'}</div>
     </div>
   );
 }
