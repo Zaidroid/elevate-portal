@@ -19,7 +19,7 @@
 // overwrites a value the team has set explicitly.
 
 import { useMemo, useState } from 'react';
-import { Sparkles, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Sparkles, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
 import { Button, Card, CardHeader, useToast, Badge } from '../../lib/ui';
 import { useModuleData } from '../../data/useModuleData';
 import { useAuth } from '../../services/auth';
@@ -32,6 +32,20 @@ const ACTIVE_STATUS = 'Active';
 const PRE_ACTIVE_STATUSES = new Set([
   '', 'Applicant', 'Shortlisted', 'Interviewed', 'Reviewing', 'Recommended', 'Selected',
 ]);
+
+type CanonicalSnapshot = {
+  canonical: string;
+  rows: Array<{
+    company_id: string;
+    company_name: string;
+    city: string;
+    am: string;
+    donor: string;
+    cohort: string;
+    status: string;
+    needsFill: string[];   // names of fields the backfill would touch
+  }>;
+};
 
 type Plan = {
   /** Per-cohort-row updates we'll apply. */
@@ -46,6 +60,15 @@ type Plan = {
   /** Cohort canonicals that resolve to MULTIPLE master rows — duplicates
    *  the AutoMergeCohort tool should consolidate. */
   duplicates: { canonical: string; rows: number }[];
+  /** Per-canonical snapshot of the master: lets the admin see the
+   *  literal current state of each cohort row vs what the alias map
+   *  expects. The diagnostic below uses this to help debug "Backfill
+   *  says 0 changes but the page is empty" cases. */
+  snapshot: CanonicalSnapshot[];
+  /** Total master rows + how many resolve to a cohort canonical (the
+   *  rest are pre-cohort applicants or other-team rows). */
+  totalMasterRows: number;
+  matchedRows: number;
 };
 
 export function BackfillCohortFieldsCard() {
@@ -67,36 +90,52 @@ export function BackfillCohortFieldsCard() {
     const updates: Plan['updates'] = [];
     const missing: string[] = [];
     const rowsByCanonical = new Map<string, Company[]>();
+    let matchedRows = 0;
     for (const c of master.rows) {
       const canon = canonicalCohortName(c.company_name || '');
       if (!canon) continue;
+      matchedRows += 1;
       const arr = rowsByCanonical.get(canon) ?? [];
       arr.push(c);
       rowsByCanonical.set(canon, arr);
     }
     const duplicates: Plan['duplicates'] = [];
+    const snapshot: CanonicalSnapshot[] = [];
     for (const entry of COHORT3_ALIASES) {
       const rows = rowsByCanonical.get(entry.canonical) ?? [];
       if (rows.length === 0) {
         missing.push(entry.canonical);
+        snapshot.push({ canonical: entry.canonical, rows: [] });
         continue;
       }
       if (rows.length > 1) {
         duplicates.push({ canonical: entry.canonical, rows: rows.length });
       }
-      // Fix every matching row, not just the first.
+      const snapRows: CanonicalSnapshot['rows'] = [];
       for (const row of rows) {
         const changes: Partial<Company> = {};
-        if (!row.city && entry.city) changes.city = entry.city;
-        if (!row.profile_manager_email && entry.am) changes.profile_manager_email = entry.am;
-        if (!row.fund_code && entry.donor) changes.fund_code = entry.donor;
-        if (!row.drive_folder_url && entry.regDocUrl) changes.drive_folder_url = entry.regDocUrl;
-        if (!row.cohort) changes.cohort = '3';
+        const needsFill: string[] = [];
+        if (!row.city && entry.city) { changes.city = entry.city; needsFill.push('city'); }
+        if (!row.profile_manager_email && entry.am) { changes.profile_manager_email = entry.am; needsFill.push('AM'); }
+        if (!row.fund_code && entry.donor) { changes.fund_code = entry.donor; needsFill.push('donor'); }
+        if (!row.drive_folder_url && entry.regDocUrl) { changes.drive_folder_url = entry.regDocUrl; needsFill.push('regdoc'); }
+        if (!row.cohort) { changes.cohort = '3'; needsFill.push('cohort'); }
         const status = (row.status || '').trim();
-        if (PRE_ACTIVE_STATUSES.has(status)) changes.status = ACTIVE_STATUS;
+        if (PRE_ACTIVE_STATUSES.has(status)) { changes.status = ACTIVE_STATUS; needsFill.push('status→Active'); }
         if ((row.company_name || '').trim() !== entry.canonical) {
           changes.company_name = entry.canonical;
+          needsFill.push('rename');
         }
+        snapRows.push({
+          company_id: row.company_id,
+          company_name: row.company_name || '',
+          city: row.city || '',
+          am: row.profile_manager_email || '',
+          donor: row.fund_code || '',
+          cohort: row.cohort || '',
+          status,
+          needsFill,
+        });
         if (Object.keys(changes).length > 0) {
           updates.push({
             company_id: row.company_id,
@@ -106,8 +145,13 @@ export function BackfillCohortFieldsCard() {
           });
         }
       }
+      snapshot.push({ canonical: entry.canonical, rows: snapRows });
     }
-    return { updates, missing, duplicates };
+    return {
+      updates, missing, duplicates, snapshot,
+      totalMasterRows: master.rows.length,
+      matchedRows,
+    };
   }, [master.rows]);
 
   const run = async () => {
@@ -166,17 +210,23 @@ export function BackfillCohortFieldsCard() {
         title="Backfill cohort 3 fields"
         subtitle="Restores city / AM / donor / reg-document / cohort + normalises status to Active for the 41 cohort 3 master rows. Idempotent — uses COHORT3_ALIASES as the source of truth. Never overwrites team-edited values."
         action={
-          <Button onClick={run} disabled={busy || plan.updates.length === 0}>
-            <Sparkles className="h-4 w-4" /> {busy ? 'Backfilling…' : `Backfill ${plan.updates.length} row${plan.updates.length === 1 ? '' : 's'}`}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={() => master.refresh()} title="Re-fetch master rows from the sheet">
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button onClick={run} disabled={busy || plan.updates.length === 0}>
+              <Sparkles className="h-4 w-4" /> {busy ? 'Backfilling…' : `Backfill ${plan.updates.length} row${plan.updates.length === 1 ? '' : 's'}`}
+            </Button>
+          </div>
         }
       />
 
       <div className="flex flex-wrap gap-2">
-        <Badge tone="teal">{plan.updates.length} rows to update</Badge>
-        {plan.duplicates.length > 0 && <Badge tone="red">{plan.duplicates.length} canonical{plan.duplicates.length === 1 ? '' : 's'} with duplicates in master</Badge>}
+        <Badge tone="neutral">{plan.totalMasterRows} master rows total</Badge>
+        <Badge tone="teal">{plan.matchedRows} resolve to a cohort canonical</Badge>
+        <Badge tone={plan.updates.length > 0 ? 'amber' : 'green'}>{plan.updates.length} need a fill</Badge>
+        {plan.duplicates.length > 0 && <Badge tone="red">{plan.duplicates.length} canonical{plan.duplicates.length === 1 ? '' : 's'} with duplicates</Badge>}
         {plan.missing.length > 0 && <Badge tone="amber">{plan.missing.length} canonical{plan.missing.length === 1 ? '' : 's'} not in master</Badge>}
-        {plan.updates.length === 0 && plan.missing.length === 0 && plan.duplicates.length === 0 && <Badge tone="green">Cohort is already in sync</Badge>}
       </div>
 
       {plan.duplicates.length > 0 && (
@@ -236,6 +286,60 @@ export function BackfillCohortFieldsCard() {
           </ul>
         </div>
       )}
+
+      {/* Per-canonical diagnostic — open by default so the empty state
+          is visible on first load. Shows the literal current values
+          for each cohort row in master, so debugging "why is the
+          backfill button greyed out but the page is empty" becomes
+          a 5-second visual scan instead of digging through the sheet. */}
+      <details className="mt-3 rounded-lg border border-slate-200 p-2 text-xs dark:border-navy-700" open>
+        <summary className="cursor-pointer font-semibold">
+          Cohort 3 diagnostic · current master state for each canonical
+        </summary>
+        <div className="mt-2 max-h-[480px] overflow-auto">
+          <table className="w-full text-left">
+            <thead className="sticky top-0 bg-white text-2xs uppercase tracking-wider text-slate-500 dark:bg-navy-900">
+              <tr>
+                <th className="py-1 pr-2">Canonical</th>
+                <th className="py-1 pr-2">Master row(s)</th>
+                <th className="py-1 pr-2">City</th>
+                <th className="py-1 pr-2">AM</th>
+                <th className="py-1 pr-2">Donor</th>
+                <th className="py-1 pr-2">Cohort</th>
+                <th className="py-1 pr-2">Status</th>
+                <th className="py-1 pr-2">Will fill</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono text-2xs">
+              {plan.snapshot.map(snap => (
+                snap.rows.length === 0 ? (
+                  <tr key={snap.canonical} className="border-t border-slate-100 dark:border-navy-700">
+                    <td className="py-1 pr-2 font-bold text-amber-700 dark:text-amber-300">{snap.canonical}</td>
+                    <td className="py-1 pr-2 italic text-amber-700 dark:text-amber-300">missing — re-seed via /import</td>
+                    <td colSpan={6} />
+                  </tr>
+                ) : (
+                  snap.rows.map((r, idx) => (
+                    <tr key={`${snap.canonical}-${idx}`} className="border-t border-slate-100 dark:border-navy-700">
+                      <td className="py-1 pr-2 font-bold">{idx === 0 ? snap.canonical : ''}{snap.rows.length > 1 ? ` #${idx + 1}` : ''}</td>
+                      <td className="py-1 pr-2 truncate max-w-[160px]" title={r.company_id}>{r.company_id}</td>
+                      <td className={`py-1 pr-2 ${!r.city ? 'text-red-600' : ''}`}>{r.city || '—'}</td>
+                      <td className={`py-1 pr-2 ${!r.am ? 'text-red-600' : ''}`}>{r.am ? r.am.split('@')[0] : '—'}</td>
+                      <td className={`py-1 pr-2 ${!r.donor ? 'text-slate-400' : ''}`}>{r.donor || '—'}</td>
+                      <td className={`py-1 pr-2 ${!r.cohort ? 'text-red-600' : ''}`}>{r.cohort || '—'}</td>
+                      <td className={`py-1 pr-2 ${!r.status ? 'text-slate-400' : ''}`}>{r.status || '—'}</td>
+                      <td className="py-1 pr-2 text-amber-700 dark:text-amber-300">{r.needsFill.join(' · ') || '—'}</td>
+                    </tr>
+                  ))
+                )
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="mt-2 text-2xs text-slate-500">
+          Red cells = blank in the master, the backfill will populate them. Multiple rows per canonical = duplicates that should be merged via Auto-merge.
+        </div>
+      </details>
     </Card>
   );
 }
