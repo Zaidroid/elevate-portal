@@ -44,8 +44,13 @@ export function RebuildDashboardsCard() {
   const confTracker   = useModuleData<ConferenceTrackerRow>('conferences', 'tracker');
 
   type Target = 'companies' | 'procurement' | 'payments' | 'conferences';
-  const [busy, setBusy] = useState<Target | null>(null);
+  const [busy, setBusy] = useState<Target | 'all' | null>(null);
   const [result, setResult] = useState<{ target: Target; ok: boolean; rowsWritten: number; error?: string } | null>(null);
+  // For the master "Rebuild all" run — per-target status while the
+  // sequential rebuild is in flight, then summary when done.
+  const [allRun, setAllRun] = useState<Record<Target, 'pending' | 'running' | 'done' | 'failed'>>({
+    companies: 'pending', procurement: 'pending', payments: 'pending', conferences: 'pending',
+  });
 
   const tabExists = !!SHEETS.companies && !!SHEETS.companies.tabs;
 
@@ -240,6 +245,37 @@ export function RebuildDashboardsCard() {
     }
   };
 
+  // Run all four rebuilders sequentially. We chain rather than parallelise
+  // so we don't hammer the Sheets quota — each rebuild does ~50–200
+  // batchUpdate ops and they're rate-limited per workbook independently.
+  const runAll = async () => {
+    setBusy('all');
+    setResult(null);
+    setAllRun({ companies: 'pending', procurement: 'pending', payments: 'pending', conferences: 'pending' });
+    const targets: Array<{ key: Target; run: () => Promise<void> }> = [
+      { key: 'companies',   run: runCompanies },
+      { key: 'procurement', run: runProcurement },
+      { key: 'payments',    run: runPayments },
+      { key: 'conferences', run: runConferences },
+    ];
+    let okCount = 0;
+    for (const t of targets) {
+      setAllRun(prev => ({ ...prev, [t.key]: 'running' }));
+      try {
+        // Each runX flips busy itself; we restore 'all' afterwards so
+        // the master button stays in its busy state until the chain ends.
+        await t.run();
+        setAllRun(prev => ({ ...prev, [t.key]: 'done' }));
+        okCount += 1;
+      } catch {
+        setAllRun(prev => ({ ...prev, [t.key]: 'failed' }));
+      }
+      setBusy('all');
+    }
+    setBusy(null);
+    toast.success(`Rebuild all: ${okCount} of ${targets.length} dashboards rewritten.`);
+  };
+
   const sheetUrlFor = (mod: 'companies' | 'procurement' | 'payments' | 'conferences') => {
     const id = getSheetId(mod);
     if (!id) return null;
@@ -251,7 +287,32 @@ export function RebuildDashboardsCard() {
       <CardHeader
         title="Rebuild master dashboards"
         subtitle="Overwrites each workbook's Dashboard tab with values computed by the portal — same numbers you see in the UI, scoped to cohort 3, with overrides applied. Replaces brittle Sheets formulas that broke whenever fund codes or intervention taxonomy changed."
+        action={
+          <Button onClick={runAll} disabled={busy !== null}>
+            <Sparkles className="h-4 w-4" /> {busy === 'all' ? 'Rebuilding all…' : 'Rebuild all dashboards'}
+          </Button>
+        }
       />
+
+      {/* Master-run progress strip — only renders while a run-all is in
+          flight or just finished. Each pill shows pending → running → done
+          / failed. Hidden when no run-all has been triggered yet. */}
+      {(busy === 'all' || Object.values(allRun).some(s => s !== 'pending')) && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-2xs dark:border-navy-700 dark:bg-navy-700/40">
+          {(['companies', 'procurement', 'payments', 'conferences'] as const).map(t => {
+            const s = allRun[t];
+            const tone = s === 'done' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200'
+              : s === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200'
+              : s === 'running' ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200'
+              : 'bg-slate-200 text-slate-600 dark:bg-navy-700 dark:text-slate-400';
+            return (
+              <span key={t} className={`rounded-full px-2 py-0.5 font-semibold uppercase tracking-wider ${tone}`}>
+                {t} · {s}
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {/* Companies */}
@@ -262,7 +323,7 @@ export function RebuildDashboardsCard() {
               {companies.rows.length} co · {assignments.rows.length} int
             </span>
           </div>
-          <Button onClick={runCompanies} disabled={busy === 'companies' || companies.rows.length === 0}>
+          <Button onClick={runCompanies} disabled={busy !== null || companies.rows.length === 0}>
             <Sparkles className="h-4 w-4" /> {busy === 'companies' ? 'Rebuilding…' : 'Rebuild'}
           </Button>
         </div>
@@ -277,7 +338,7 @@ export function RebuildDashboardsCard() {
           </div>
           <Button
             onClick={runProcurement}
-            disabled={busy === 'procurement' || (q1.rows.length + q2.rows.length + q3.rows.length + q4.rows.length) === 0}
+            disabled={busy !== null || (q1.rows.length + q2.rows.length + q3.rows.length + q4.rows.length) === 0}
           >
             <Sparkles className="h-4 w-4" /> {busy === 'procurement' ? 'Rebuilding…' : 'Rebuild'}
           </Button>
@@ -293,7 +354,7 @@ export function RebuildDashboardsCard() {
           </div>
           <Button
             onClick={runPayments}
-            disabled={busy === 'payments' || payments.rows.length === 0}
+            disabled={busy !== null || payments.rows.length === 0}
           >
             <Sparkles className="h-4 w-4" /> {busy === 'payments' ? 'Rebuilding…' : 'Rebuild'}
           </Button>
@@ -309,7 +370,7 @@ export function RebuildDashboardsCard() {
           </div>
           <Button
             onClick={runConferences}
-            disabled={busy === 'conferences' || (confCatalogue.rows.length + confTracker.rows.length) === 0}
+            disabled={busy !== null || (confCatalogue.rows.length + confTracker.rows.length) === 0}
           >
             <Sparkles className="h-4 w-4" /> {busy === 'conferences' ? 'Rebuilding…' : 'Rebuild'}
           </Button>
