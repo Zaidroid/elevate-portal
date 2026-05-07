@@ -43,6 +43,9 @@ type Plan = {
   }>;
   /** Cohort canonicals not in master (so the team can re-seed). */
   missing: string[];
+  /** Cohort canonicals that resolve to MULTIPLE master rows — duplicates
+   *  the AutoMergeCohort tool should consolidate. */
+  duplicates: { canonical: string; rows: number }[];
 };
 
 export function BackfillCohortFieldsCard() {
@@ -54,52 +57,57 @@ export function BackfillCohortFieldsCard() {
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<{ ok: number; failed: string[] } | null>(null);
 
-  // Compute the plan: walk each canonical, find the master row, diff
-  // against the canonical metadata, build a partial-update payload.
+  // Compute the plan: walk EVERY cohort-3-resolving master row (not
+  // just the first per canonical) and diff against the canonical
+  // metadata. If duplicates remain in master, this fixes blanks on
+  // each of them — so users still see correct data on whichever
+  // duplicate the URL resolves to. The AutoMergeCohort tool is the
+  // way to actually delete duplicates; this card focuses on data.
   const plan = useMemo<Plan>(() => {
     const updates: Plan['updates'] = [];
     const missing: string[] = [];
-    const masterByCanonical = new Map<string, Company>();
+    const rowsByCanonical = new Map<string, Company[]>();
     for (const c of master.rows) {
       const canon = canonicalCohortName(c.company_name || '');
       if (!canon) continue;
-      // First-write-wins; AutoMergeCohortCard collapses dupes so this
-      // map has at most one row per canonical after merge.
-      if (!masterByCanonical.has(canon)) masterByCanonical.set(canon, c);
+      const arr = rowsByCanonical.get(canon) ?? [];
+      arr.push(c);
+      rowsByCanonical.set(canon, arr);
     }
+    const duplicates: Plan['duplicates'] = [];
     for (const entry of COHORT3_ALIASES) {
-      const row = masterByCanonical.get(entry.canonical);
-      if (!row) {
+      const rows = rowsByCanonical.get(entry.canonical) ?? [];
+      if (rows.length === 0) {
         missing.push(entry.canonical);
         continue;
       }
-      const changes: Partial<Company> = {};
-      // Only fill blanks; never overwrite team edits.
-      if (!row.city && entry.city) changes.city = entry.city;
-      if (!row.profile_manager_email && entry.am) changes.profile_manager_email = entry.am;
-      if (!row.fund_code && entry.donor) changes.fund_code = entry.donor;
-      if (!row.drive_folder_url && entry.regDocUrl) changes.drive_folder_url = entry.regDocUrl;
-      if (!row.cohort) changes.cohort = '3';
-      // Status: normalise pre-Active labels to Active. The 41 cohort
-      // companies are all in delivery in parallel.
-      const status = (row.status || '').trim();
-      if (PRE_ACTIVE_STATUSES.has(status)) changes.status = ACTIVE_STATUS;
-      // Also normalise the company_name to the canonical form when
-      // they differ (catches old short-names like "AI Pilot" left by
-      // the seed before auto-merge ran).
-      if ((row.company_name || '').trim() !== entry.canonical) {
-        changes.company_name = entry.canonical;
+      if (rows.length > 1) {
+        duplicates.push({ canonical: entry.canonical, rows: rows.length });
       }
-      if (Object.keys(changes).length > 0) {
-        updates.push({
-          company_id: row.company_id,
-          company_name: row.company_name,
-          canonical: entry.canonical,
-          changes,
-        });
+      // Fix every matching row, not just the first.
+      for (const row of rows) {
+        const changes: Partial<Company> = {};
+        if (!row.city && entry.city) changes.city = entry.city;
+        if (!row.profile_manager_email && entry.am) changes.profile_manager_email = entry.am;
+        if (!row.fund_code && entry.donor) changes.fund_code = entry.donor;
+        if (!row.drive_folder_url && entry.regDocUrl) changes.drive_folder_url = entry.regDocUrl;
+        if (!row.cohort) changes.cohort = '3';
+        const status = (row.status || '').trim();
+        if (PRE_ACTIVE_STATUSES.has(status)) changes.status = ACTIVE_STATUS;
+        if ((row.company_name || '').trim() !== entry.canonical) {
+          changes.company_name = entry.canonical;
+        }
+        if (Object.keys(changes).length > 0) {
+          updates.push({
+            company_id: row.company_id,
+            company_name: row.company_name,
+            canonical: entry.canonical,
+            changes,
+          });
+        }
       }
     }
-    return { updates, missing };
+    return { updates, missing, duplicates };
   }, [master.rows]);
 
   const run = async () => {
@@ -166,9 +174,26 @@ export function BackfillCohortFieldsCard() {
 
       <div className="flex flex-wrap gap-2">
         <Badge tone="teal">{plan.updates.length} rows to update</Badge>
+        {plan.duplicates.length > 0 && <Badge tone="red">{plan.duplicates.length} canonical{plan.duplicates.length === 1 ? '' : 's'} with duplicates in master</Badge>}
         {plan.missing.length > 0 && <Badge tone="amber">{plan.missing.length} canonical{plan.missing.length === 1 ? '' : 's'} not in master</Badge>}
-        {plan.updates.length === 0 && plan.missing.length === 0 && <Badge tone="green">Cohort is already in sync</Badge>}
+        {plan.updates.length === 0 && plan.missing.length === 0 && plan.duplicates.length === 0 && <Badge tone="green">Cohort is already in sync</Badge>}
       </div>
+
+      {plan.duplicates.length > 0 && (
+        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs dark:border-red-900 dark:bg-red-950">
+          <div className="font-bold text-red-800 dark:text-red-200">⚠ Duplicate cohort 3 rows still in the master</div>
+          <p className="mt-1 text-red-700 dark:text-red-300">
+            These canonicals have multiple rows in the Companies master — that's why some company detail pages are showing empty data even though the alias map has the values. Backfill below will fill blanks on every duplicate, but to actually consolidate them into one row use <strong>Auto-merge Cohort 3 duplicates</strong> directly below.
+          </p>
+          <ul className="mt-2 list-disc space-y-0.5 pl-5 font-mono text-red-800 dark:text-red-200">
+            {plan.duplicates.map(d => (
+              <li key={d.canonical}>
+                <span className="font-bold">{d.canonical}</span>: {d.rows} rows
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {plan.updates.length > 0 && (
         <details className="mt-3 rounded-lg border border-slate-200 p-2 text-xs dark:border-navy-700">

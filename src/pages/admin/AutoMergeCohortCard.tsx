@@ -119,9 +119,35 @@ export function AutoMergeCohortCard() {
       const dups = rows.filter(r => r.company_id !== canonical.company_id);
 
       try {
-        // Rename canonical row to the official name if it differs.
+        // Inherit any company-level data from duplicates that's missing
+        // on the canonical, BEFORE deleting them. Fields the canonical
+        // already has stay untouched. Without this step we lose data
+        // when the canonical was picked for assignment count but had
+        // blank city / sector / etc., while the duplicates had the
+        // values from the original interview / xlsx seed.
+        const inheritFields = [
+          'company_name', 'legal_name', 'city', 'governorate', 'sector',
+          'employee_count', 'revenue_bracket', 'international_revenue_pct',
+          'readiness_score', 'fund_code', 'cohort', 'status', 'stage',
+          'profile_manager_email', 'selection_date', 'onboarding_date',
+          'drive_folder_url', 'notes',
+        ] as const;
+        const inheritUpdates: Partial<Company> = {};
+        for (const f of inheritFields) {
+          const canonVal = (canonical[f] || '').toString().trim();
+          if (canonVal) continue;          // keep canonical's value when set
+          for (const d of dups) {
+            const dVal = (d[f] || '').toString().trim();
+            if (dVal) { inheritUpdates[f] = dVal; break; }
+          }
+        }
+        // Always force company_name to the canonical name from the
+        // alias map, regardless of what the picked row had.
         if ((canonical.company_name || '') !== canon) {
-          await master.updateRow(canonical.company_id, { company_name: canon });
+          inheritUpdates.company_name = canon;
+        }
+        if (Object.keys(inheritUpdates).length > 0) {
+          await master.updateRow(canonical.company_id, inheritUpdates);
         }
 
         // Repoint assignments.
