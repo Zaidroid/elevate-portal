@@ -28,6 +28,21 @@ import { cohortEntryFor } from '../config/cohort3Aliases';
 // rows (and Reviews) sometimes pack the sub into intervention_type.
 // This helper picks the right field so downstream rollups don't drop
 // rows whose intervention_type is just a pillar code.
+//
+// When we can identify a pillar but not a sub (e.g. MKG::MKG seen in
+// the wild — both fields are the pillar code), we route the row to a
+// synthetic "<pillar> (unallocated)" sub so it remains visible. Better
+// to surface 9 unallocated MKG rows in their own bucket than to drop
+// them silently.
+const UNALLOCATED_LABEL: Record<string, string> = {
+  CB:  'Capacity Building (unallocated)',
+  MKG: 'Marketing & Branding (unallocated)',
+  MA:  'Market Access (unallocated)',
+};
+function unallocatedSub(pillarCode: string): string | null {
+  return UNALLOCATED_LABEL[pillarCode] ?? null;
+}
+
 function resolveAssignmentSub(a: Assignment): { pillar: string; sub: string } | null {
   // Prefer the explicit sub_intervention field when set (Stage 3 path).
   const subRaw = (a.sub_intervention || '').trim();
@@ -41,6 +56,13 @@ function resolveAssignmentSub(a: Assignment): { pillar: string; sub: string } | 
   if (it) {
     const r = resolveIntervention(it);
     if (r && r.sub) return { pillar: r.pillar, sub: r.sub };
+    // Pillar-only row (e.g. intervention_type='MKG', sub_intervention=''
+    // or sub_intervention='MKG'). Bucket into the pillar's "unallocated"
+    // slot so the UI can show how many such rows exist.
+    if (r && !r.sub) {
+      const u = unallocatedSub(r.pillar);
+      if (u) return { pillar: r.pillar, sub: u };
+    }
   }
   return null;
 }
@@ -50,6 +72,10 @@ function resolvePaymentSub(p: Payment): { pillar: string; sub: string } | null {
   if (!it) return null;
   const r = resolveIntervention(it);
   if (r && r.sub) return { pillar: r.pillar, sub: r.sub };
+  if (r && !r.sub) {
+    const u = unallocatedSub(r.pillar);
+    if (u) return { pillar: r.pillar, sub: u };
+  }
   return null;
 }
 
@@ -446,11 +472,16 @@ export function aggregateBySub(
     seed(r.sub, r.pillar).paidUsd += parseUsd(p.amount_usd);
   }
 
-  // Emit in canonical pillar/sub order.
+  // Emit in canonical pillar/sub order. Append the per-pillar
+  // "unallocated" bucket immediately after each pillar's canonical subs
+  // when it has any rows — keeps the visual grouping intact while making
+  // the under-specified rows visible.
+  const seen = new Set<string>();
   const out: SubAggregation[] = [];
   for (const p of PILLARS) {
     for (const sub of p.subInterventions) {
       const b = bySub.get(sub)!;
+      seen.add(sub);
       out.push({
         pillar: p.code,
         pillarLabel: p.label,
@@ -463,6 +494,44 @@ export function aggregateBySub(
         paidUsd: b.paidUsd,
       });
     }
+    const unallocated = unallocatedSub(p.code);
+    if (unallocated) {
+      const b = bySub.get(unallocated);
+      if (b && b.assignmentsTotal > 0) {
+        seen.add(unallocated);
+        out.push({
+          pillar: p.code,
+          pillarLabel: p.label,
+          pillarColor: p.color,
+          sub: b.sub,
+          companies: b.companies.size,
+          assignmentsTotal: b.assignmentsTotal,
+          status: b.status,
+          plannedUsd: b.plannedUsd,
+          paidUsd: b.paidUsd,
+        });
+      }
+    }
+  }
+  // Anything still in bySub that we didn't emit (rogue legacy codes
+  // that resolveIntervention couldn't slot into a known pillar) — fall
+  // through with their best-effort pillar metadata. Empty seed buckets
+  // (assignmentsTotal === 0) stay hidden so we don't pad the table.
+  for (const [sub, b] of bySub) {
+    if (seen.has(sub)) continue;
+    if (b.assignmentsTotal === 0) continue;
+    const p = pillarFor(b.pillar);
+    out.push({
+      pillar: b.pillar,
+      pillarLabel: p?.label ?? b.pillar,
+      pillarColor: p?.color ?? 'navy',
+      sub: b.sub,
+      companies: b.companies.size,
+      assignmentsTotal: b.assignmentsTotal,
+      status: b.status,
+      plannedUsd: b.plannedUsd,
+      paidUsd: b.paidUsd,
+    });
   }
   return out;
 }
