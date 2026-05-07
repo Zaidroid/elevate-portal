@@ -135,6 +135,24 @@ export async function ensureHumanFriendlyTab(
 
   const requests: unknown[] = [];
 
+  // Step 0: clear stale formatting in the data area first. Without this,
+  // a previous (buggy) reformat run can leave the entire sheet painted
+  // navy or with phantom merges that prevent the new title row from
+  // rendering correctly. Idempotent — clearing a clean tab is a no-op.
+  // The wipe is scoped to the column range we actually format below
+  // (so columns the team has added past the canonical headers stay
+  // untouched).
+  requests.push({
+    unmergeCells: { range: rangeRef(tabId, 0, totalRowsZero, 0, totalCols) },
+  });
+  requests.push({
+    repeatCell: {
+      range: rangeRef(tabId, 0, totalRowsZero, 0, totalCols),
+      cell: { userEnteredFormat: { backgroundColor: WHITE } },
+      fields: 'userEnteredFormat.backgroundColor',
+    },
+  });
+
   // Title row — navy bg, white bold, merged across all columns.
   requests.push({
     repeatCell: {

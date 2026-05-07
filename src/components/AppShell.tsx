@@ -32,6 +32,9 @@ import { useAuth } from '../services/auth';
 import { getTier, isAdmin } from '../config/team';
 import { sessionEvents } from '../lib/sheets/client';
 import { PersonalGreeting } from '../lib/greeting';
+import { useModuleData } from '../data/useModuleData';
+import type { Company, Assignment, ConferenceTrackerRow } from '../data/types';
+import { computeAutopilotPlan, shouldRun, markRan, mintConferenceAssignmentId } from '../lib/maintenance/autopilot';
 
 type NavItem = {
   to: string;
@@ -177,6 +180,78 @@ export function AppShell({
     sessionEvents.addEventListener('session-expired', onExpired);
     return () => sessionEvents.removeEventListener('session-expired', onExpired);
   }, []);
+  // ────────────────────────────────────────────────────────────────────────
+
+  // ── Autopilot: silent maintenance on admin login ──────────────────────
+  // Once per session, after the cohort + assignments + conference tracker
+  // have loaded, scan for drift and write the fixes:
+  //   - MKG-only assignments → set sub_intervention to the canonical default
+  //   - Conference Tracker decisions (Committed/Attended) → matching
+  //     Conferences sub-intervention rows in Companies Assignments
+  // No-op when there's nothing to do. Toast surface so the team can see
+  // when the pipeline ran (and how many rows landed). Non-fatal on
+  // errors — the manual cards on /admin/lookups remain as the safety net.
+  const masterHook     = useModuleData<Company>('companies', 'companies');
+  const assignmentHook = useModuleData<Assignment>('companies', 'assignments');
+  const trackerHook    = useModuleData<ConferenceTrackerRow>('conferences', 'tracker');
+  const [autopilotMsg, setAutopilotMsg] = useState<string | null>(null);
+  useEffect(() => {
+    if (!admin) return;
+    if (masterHook.loading || assignmentHook.loading || trackerHook.loading) return;
+    if (masterHook.rows.length === 0 || assignmentHook.rows.length === 0) return;
+    const plan = computeAutopilotPlan({
+      companies: masterHook.rows,
+      assignments: assignmentHook.rows,
+      trackerRows: trackerHook.rows,
+      trackerHeaders: trackerHook.headers,
+    });
+    if (!shouldRun(plan)) return;
+    let cancelled = false;
+    (async () => {
+      let mkg = 0, conf = 0;
+      try {
+        for (const fix of plan.mkgFixes) {
+          // assignment_id is encoded in the fix.detail prefix
+          const id = fix.detail.split(':')[0].trim();
+          if (!id) continue;
+          await assignmentHook.updateRow(id, { sub_intervention: 'Marketing Agency' });
+          mkg += 1;
+          if (cancelled) return;
+        }
+        for (const add of plan.confAdds) {
+          await assignmentHook.createRow({
+            assignment_id: mintConferenceAssignmentId(add.company_id),
+            company_id: add.company_id,
+            intervention_type: 'MA',
+            sub_intervention: 'Conferences',
+            fund_code: '',
+            start_date: '',
+            end_date: '',
+            owner_email: '',
+            status: add.decision.toLowerCase() === 'attended' ? 'Completed' : 'In Progress',
+            budget_usd: '',
+            notes: `Auto-synced from Conference Tracker (${add.conference_name}, ${add.decision})`,
+          });
+          conf += 1;
+          if (cancelled) return;
+        }
+        markRan(plan);
+        if (mkg > 0 || conf > 0) {
+          setAutopilotMsg(`Autopilot synced ${mkg} Marketing row${mkg === 1 ? '' : 's'} + created ${conf} Conferences row${conf === 1 ? '' : 's'}.`);
+          window.setTimeout(() => setAutopilotMsg(null), 8000);
+        }
+      } catch (err) {
+        console.warn('[autopilot] failed; admin can run /admin/lookups manually', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [
+    admin,
+    masterHook.loading, masterHook.rows,
+    assignmentHook.loading, assignmentHook.rows,
+    trackerHook.loading, trackerHook.rows, trackerHook.headers,
+    assignmentHook,
+  ]);
   // ────────────────────────────────────────────────────────────────────────
 
   const [collapsed, setCollapsed] = useState<boolean>(() => {
@@ -505,6 +580,12 @@ export function AppShell({
             <div className="mb-4 flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-600 dark:border-navy-700 dark:bg-navy-700/50 dark:text-slate-300">
               <RefreshCw className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
               <span>Extending your session — finish in the popup if it appears.</span>
+            </div>
+          )}
+          {autopilotMsg && (
+            <div className="mb-4 flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200">
+              <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
+              <span>{autopilotMsg}</span>
             </div>
           )}
           {sessionWarning === 'expired' && (
