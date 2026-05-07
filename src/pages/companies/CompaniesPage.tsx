@@ -11,10 +11,10 @@
 // field on the master row.
 
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   Building2, MapPin, ClipboardList, MessageCircle,
-  Search, RefreshCw, Filter as FilterIcon,
+  Search, RefreshCw, Filter as FilterIcon, X,
 } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
@@ -23,7 +23,7 @@ import type { Company, Assignment } from '../../data/types';
 import type { ActivityRow, CompanyComment } from './reviewTypes';
 import { displayName, ACCOUNT_MANAGERS } from '../../config/team';
 import { canonicalCohortName, COHORT3_ALIASES } from '../../config/cohort3Aliases';
-import { pillarFor, CORE_PILLARS } from '../../config/interventions';
+import { pillarFor, resolveIntervention, CORE_PILLARS } from '../../config/interventions';
 import {
   Badge, Button, Card, EmptyState, PageHeader, statusTone,
 } from '../../lib/ui';
@@ -81,6 +81,17 @@ export function CompaniesPage() {
   const [filterPillar, setFilterPillar] = useState<string>('');
   const [filterFund, setFilterFund] = useState<string>('');
 
+  // Deep-link filters from /admin home cards: ?city=Ramallah, ?sub=C-Suite.
+  // Read via search params so removing the chip can clear the URL too.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filterCity = searchParams.get('city') || '';
+  const filterSub = searchParams.get('sub') || '';
+  const clearDeepLink = (key: 'city' | 'sub') => {
+    const next = new URLSearchParams(searchParams);
+    next.delete(key);
+    setSearchParams(next, { replace: true });
+  };
+
   // AM scoping (gold standard from MyHub).
   const view = useScopedView<Company>(cohort, c => c.profile_manager_email, me);
 
@@ -119,6 +130,7 @@ export function CompaniesPage() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
+    const cityNorm = filterCity.trim().toLowerCase();
     return view.scoped.filter(c => {
       const cAsg = asgByCompany.get(c.company_id) ?? [];
       const text = `${c.company_name} ${c.city} ${c.governorate} ${c.sector}`.toLowerCase();
@@ -132,9 +144,15 @@ export function CompaniesPage() {
         const pillars = new Set(cAsg.map(a => pillarFor(a.intervention_type)?.code).filter(Boolean) as string[]);
         if (!pillars.has(filterPillar)) return false;
       }
+      // Deep-link filters from HomePage / MyHub insight cards:
+      if (cityNorm && (c.city || '').trim().toLowerCase() !== cityNorm) return false;
+      if (filterSub) {
+        const subs = new Set(cAsg.map(a => resolveIntervention(a.intervention_type)?.sub).filter(Boolean) as string[]);
+        if (!subs.has(filterSub)) return false;
+      }
       return true;
     });
-  }, [view.scoped, asgByCompany, query, filterAm, filterStatus, filterFund, filterPillar]);
+  }, [view.scoped, asgByCompany, query, filterAm, filterStatus, filterFund, filterPillar, filterCity, filterSub]);
 
   const sorted = useMemo(
     () => [...filtered].sort((a, b) => (a.company_name || '').localeCompare(b.company_name || '')),
@@ -165,7 +183,7 @@ export function CompaniesPage() {
     activity.refresh();
   };
 
-  const hasActiveFilter = !!(query || filterAm || filterStatus || filterPillar || filterFund);
+  const hasActiveFilter = !!(query || filterAm || filterStatus || filterPillar || filterFund || filterCity || filterSub);
   const cohortSize = COHORT3_ALIASES.length;
   const cohortInterventions = useMemo(
     () => assignments.rows.filter(a => view.scoped.some(c => c.company_id === a.company_id)).length,
@@ -236,6 +254,33 @@ export function CompaniesPage() {
             </Button>
           )}
         </div>
+        {(filterCity || filterSub) && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="text-2xs font-bold uppercase tracking-wider text-slate-400">From Home:</span>
+            {filterCity && (
+              <button
+                type="button"
+                onClick={() => clearDeepLink('city')}
+                className="inline-flex items-center gap-1 rounded-full border border-brand-teal/30 bg-brand-teal/10 px-2 py-0.5 text-2xs font-semibold text-brand-teal hover:bg-brand-teal/20"
+                title="Remove city filter"
+              >
+                <MapPin className="h-3 w-3" /> {filterCity}
+                <X className="h-3 w-3 opacity-70" />
+              </button>
+            )}
+            {filterSub && (
+              <button
+                type="button"
+                onClick={() => clearDeepLink('sub')}
+                className="inline-flex items-center gap-1 rounded-full border border-brand-red/30 bg-brand-red/10 px-2 py-0.5 text-2xs font-semibold text-brand-red hover:bg-brand-red/20"
+                title="Remove sub-intervention filter"
+              >
+                {filterSub}
+                <X className="h-3 w-3 opacity-70" />
+              </button>
+            )}
+          </div>
+        )}
       </Card>
 
       {sorted.length === 0 ? (

@@ -28,10 +28,11 @@ import { Badge, Card, CardHeader, EmptyState, statusTone } from '../lib/ui';
 import type { Tone } from '../lib/ui';
 import { useModuleData } from '../data/useModuleData';
 import type { Company, Assignment, PR, Payment, Agreement } from '../data/types';
-import { ACCOUNT_MANAGERS, displayName } from '../config/team';
 import { PersonalGreeting } from '../lib/greeting';
 import { canonicalCohortName, COHORT3_ALIASES } from '../config/cohort3Aliases';
-import { COHORT3_BUDGET_TOTAL_USD, pillarFor } from '../config/interventions';
+import { COHORT3_BUDGET_TOTAL_USD } from '../config/interventions';
+import { aggregateByAm, aggregateByCity, aggregateByDonor, aggregateBySub } from '../data/aggregations';
+import type { AmAggregation, CityAggregation, DonorAggregation, SubAggregation } from '../data/aggregations';
 import { INTERVIEWED_NAMES, isInterviewed } from './companies/interviewedSource';
 import { computeAlerts, type Alert } from '../lib/alerts/index';
 import { keepCompaniesSection } from '../lib/sheets/sections';
@@ -133,96 +134,26 @@ export function HomePage() {
   const withdrawnCount = statusCount['Withdrawn'] ?? 0;
   const activeCount = cohortSize - withdrawnCount;
 
-  // Per-AM rollup.
-  const amRollup = useMemo(() => {
-    const byAm = new Map<string, { companies: Set<string>; assignments: Assignment[]; budget: number }>();
-    const seed = (email: string) => {
-      if (!byAm.has(email)) byAm.set(email, { companies: new Set(), assignments: [], budget: 0 });
-    };
-    for (const am of ACCOUNT_MANAGERS) seed(am.email.toLowerCase());
-    seed(''); // unassigned
-
-    for (const c of cohort) {
-      const e = (c.profile_manager_email || '').toLowerCase();
-      seed(e);
-      byAm.get(e)!.companies.add(c.company_id);
-    }
-    for (const a of assignments.rows) {
-      if (!cohortIds.has(a.company_id)) continue;
-      const e = (a.owner_email || '').toLowerCase();
-      seed(e);
-      byAm.get(e)!.assignments.push(a);
-      const v = parseFloat(String(a.budget_usd || '').replace(/[^0-9.\-]/g, ''));
-      if (Number.isFinite(v)) byAm.get(e)!.budget += v;
-    }
-    return Array.from(byAm.entries())
-      .filter(([, r]) => r.companies.size > 0 || r.assignments.length > 0)
-      .map(([email, r]) => ({
-        email,
-        label: email
-          ? (ACCOUNT_MANAGERS.find(a => a.email.toLowerCase() === email)
-              ? displayName(ACCOUNT_MANAGERS.find(a => a.email.toLowerCase() === email)!.email)
-              : displayName(email))
-          : '(unassigned)',
-        companies: r.companies.size,
-        assignments: r.assignments.length,
-        budget: r.budget,
-      }))
-      .sort((a, b) => b.companies - a.companies);
-  }, [cohort, assignments.rows, cohortIds]);
-
-  // Pillar + sub-intervention spread for cohort 3.
-  const pillarSpread = useMemo(() => {
-    const m: Record<string, number> = { 'Market Access': 0, 'Capacity Building': 0, 'Marketing & Branding': 0 };
-    for (const a of assignments.rows) {
-      if (!cohortIds.has(a.company_id)) continue;
-      const p = pillarFor(a.intervention_type);
-      if (p) m[p.label] = (m[p.label] ?? 0) + 1;
-    }
-    return m;
-  }, [assignments.rows, cohortIds]);
+  // Centralised cohort 3 rollups — same helpers used by MyHubPage and the
+  // dashboard rebuilder so a number can never appear differently in two
+  // places. See src/data/aggregations.ts.
+  const amRollup: AmAggregation[]    = useMemo(() => aggregateByAm(cohort, assignments.rows, payments.rows, allPRs),
+                                                [cohort, assignments.rows, payments.rows, allPRs]);
+  const cityRollup: CityAggregation[] = useMemo(() => aggregateByCity(cohort, assignments.rows, payments.rows),
+                                                [cohort, assignments.rows, payments.rows]);
+  const subRollup: SubAggregation[]   = useMemo(() => aggregateBySub(cohort, assignments.rows, payments.rows),
+                                                [cohort, assignments.rows, payments.rows]);
+  const donorRollup: DonorAggregation[] = useMemo(() => aggregateByDonor(cohort, assignments.rows, payments.rows),
+                                                  [cohort, assignments.rows, payments.rows]);
 
   const totalAssignments = useMemo(
     () => assignments.rows.filter(a => cohortIds.has(a.company_id)).length,
     [assignments.rows, cohortIds],
   );
-  const totalCommitted = useMemo(() => {
-    let n = 0;
-    for (const a of assignments.rows) {
-      if (!cohortIds.has(a.company_id)) continue;
-      const v = parseFloat(String(a.budget_usd || '').replace(/[^0-9.\-]/g, ''));
-      if (Number.isFinite(v)) n += v;
-    }
-    return n;
-  }, [assignments.rows, cohortIds]);
-
-  // Donor budget burn (cohort 3 scoped).
-  const fundCommitted = useMemo(() => {
-    let dutch = 0, sida = 0;
-    for (const a of assignments.rows) {
-      if (!cohortIds.has(a.company_id)) continue;
-      const v = parseFloat(String(a.budget_usd || '').replace(/[^0-9.\-]/g, ''));
-      if (!Number.isFinite(v)) continue;
-      const f = (a.fund_code || '').trim();
-      if (/dutch/i.test(f) || f === '97060') dutch += v;
-      else if (/sida/i.test(f) || f === '91763') sida += v;
-    }
-    return { dutch, sida };
-  }, [assignments.rows, cohortIds]);
-
-  const fundPaid = useMemo(() => {
-    let dutch = 0, sida = 0;
-    for (const p of payments.rows) {
-      if (!cohortIds.has(p.company_id)) continue;
-      if ((p.status || '').toLowerCase() !== 'paid') continue;
-      const v = parseFloat(String(p.amount_usd || '').replace(/[^0-9.\-]/g, ''));
-      if (!Number.isFinite(v)) continue;
-      const f = (p.fund_code || '').trim();
-      if (/dutch/i.test(f) || f === '97060') dutch += v;
-      else if (/sida/i.test(f) || f === '91763') sida += v;
-    }
-    return { dutch, sida };
-  }, [payments.rows, cohortIds]);
+  const totalCommitted = useMemo(
+    () => amRollup.reduce((s, am) => s + am.plannedUsd, 0),
+    [amRollup],
+  );
 
   // Alerts scoped to cohort 3.
   const alerts: Alert[] = useMemo(() => {
@@ -271,9 +202,6 @@ export function HomePage() {
   const totalDays = COHORT_LENGTH_WEEKS * 7;
   const daysRemaining = Math.max(0, totalDays - daysIn);
   // Personal greeting renders inline JSX (English line + Arabic nickname span).
-
-  const maxLoad = Math.max(1, ...amRollup.map(a => a.companies));
-  const maxPillar = Math.max(1, ...Object.values(pillarSpread));
   const dutchCap = COHORT3_BUDGET_TOTAL_USD.dutch;
   const sidaCap = COHORT3_BUDGET_TOTAL_USD.sida;
 
@@ -313,60 +241,17 @@ export function HomePage() {
         </div>
       </Card>
 
+      {/* Row 1: by AM (left, full insight), by city (right) */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* AM workload */}
-        <Card>
-          <CardHeader title="Account Manager workload" subtitle={`${cohort.length} companies, ${totalAssignments} interventions, ${fmtUsd(totalCommitted)} committed.`} />
-          {amRollup.length === 0 ? (
-            <EmptyState title="No AM data yet" />
-          ) : (
-            <ul className="space-y-3">
-              {amRollup.map(am => (
-                <li key={am.email || 'unassigned'}>
-                  <div className="flex items-center justify-between text-sm">
-                    <Link to={`/my-hub?as=${encodeURIComponent(am.email)}`} className="font-bold text-navy-500 hover:text-brand-teal hover:underline dark:text-white">
-                      {am.label}
-                    </Link>
-                    <span className="text-xs text-slate-500">
-                      <span className="font-mono">{am.companies}</span> co · <span className="font-mono">{am.assignments}</span> int · <span className="font-mono">{fmtUsd(am.budget)}</span>
-                    </span>
-                  </div>
-                  <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
-                    <div className="h-full rounded-full bg-brand-teal" style={{ width: `${pct(am.companies, maxLoad)}%` }} />
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-
-        {/* Pillar spread */}
-        <Card>
-          <CardHeader title="Intervention spread" subtitle={`${totalAssignments} interventions across the 3 pillars.`} />
-          <ul className="space-y-2 text-sm">
-            {Object.entries(pillarSpread).map(([label, count]) => (
-              <li key={label}>
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-navy-500 dark:text-white">{label}</span>
-                  <span className="font-mono text-xs text-slate-500">{count}</span>
-                </div>
-                <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
-                  <div className="h-full rounded-full bg-brand-red" style={{ width: `${pct(count, maxPillar)}%` }} />
-                </div>
-              </li>
-            ))}
-          </ul>
-        </Card>
+        <AmInsightCard rows={amRollup} />
+        <CityInsightCard rows={cityRollup} />
       </div>
 
-      {/* Donor budget */}
-      <Card>
-        <CardHeader title="Donor budget" subtitle="Committed (assignments) and paid (settled payments) against the 2026 cap." />
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <DonorBar label="Dutch" committed={fundCommitted.dutch} paid={fundPaid.dutch} cap={dutchCap} tone="orange" />
-          <DonorBar label="SIDA" committed={fundCommitted.sida} paid={fundPaid.sida} cap={sidaCap} tone="teal" />
-        </div>
-      </Card>
+      {/* Row 2: by sub-intervention (full width — the cohort-design view) */}
+      <SubInsightCard rows={subRollup} />
+
+      {/* Row 3: donor budget burn with sub drilldown */}
+      <DonorInsightCard rows={donorRollup} dutchCap={dutchCap} sidaCap={sidaCap} />
 
       {/* Things needing attention */}
       <Card>
@@ -451,28 +336,209 @@ function KpiTile({ label, value, tone, hint }: { label: string; value: number | 
   );
 }
 
-function DonorBar({ label, committed, paid, cap, tone }: { label: string; committed: number; paid: number; cap: number; tone: 'orange' | 'teal' }) {
-  const committedPct = pct(committed, cap);
-  const paidPct = pct(paid, cap);
-  const fill = tone === 'orange' ? 'bg-brand-orange' : 'bg-brand-teal';
+// AM_RAIL: thin coloured bar per Account Manager — same colour pattern
+// the Companies cards use, so admins can scan rows and recognise who's
+// who at a glance.
+const AM_RAIL: Record<string, string> = {
+  'ayesh@gazaskygeeks.com': 'bg-brand-red',
+  'doaa@gazaskygeeks.com':  'bg-brand-teal',
+  'muna@gazaskygeeks.com':  'bg-brand-orange',
+};
+
+function AmInsightCard({ rows }: { rows: AmAggregation[] }) {
+  const maxPlanned = Math.max(1, ...rows.map(r => r.plannedUsd));
   return (
-    <div>
-      <div className="flex items-center justify-between text-sm">
-        <span className="font-bold text-navy-500 dark:text-white">{label}</span>
-        <span className="text-xs text-slate-500">{fmtUsd(committed)} of {fmtUsd(cap)} <span className="ml-1 font-mono">({committedPct}%)</span></span>
+    <Card>
+      <CardHeader title="By Account Manager" subtitle="Companies, interventions, money committed and paid, open PRs per AM. Click a row to open that AM's hub." />
+      {rows.length === 0 ? (
+        <EmptyState title="No AM data yet" />
+      ) : (
+        <ul className="divide-y divide-slate-100 dark:divide-navy-700">
+          {rows.map(am => {
+            const rail = AM_RAIL[am.email] ?? 'bg-slate-300 dark:bg-slate-600';
+            const burn = am.plannedUsd > 0 ? Math.round((am.paidUsd / am.plannedUsd) * 100) : 0;
+            return (
+              <li key={am.email || 'unassigned'} className="flex items-stretch gap-3 py-2.5">
+                <span className={`w-1 flex-shrink-0 rounded-full ${rail}`} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                    <Link
+                      to={am.email ? `/my-hub?as=${encodeURIComponent(am.email)}` : '/my-hub'}
+                      className="truncate text-[13px] font-bold text-navy-500 hover:text-brand-teal hover:underline dark:text-white"
+                    >
+                      {am.name}
+                    </Link>
+                    <span className="text-2xs text-slate-500">
+                      <span className="font-mono">{am.companies}</span> companies · <span className="font-mono">{am.interventions}</span> interventions · <span className="font-mono">{am.openPrs}</span> open PR{am.openPrs === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
+                    <div className="relative h-full">
+                      <div className={`absolute left-0 top-0 h-full ${rail} opacity-50`} style={{ width: `${pct(am.plannedUsd, maxPlanned)}%` }} />
+                      <div className={`absolute left-0 top-0 h-full ${rail}`} style={{ width: `${pct(am.paidUsd, maxPlanned)}%` }} />
+                    </div>
+                  </div>
+                  <div className="mt-0.5 flex items-center justify-between text-2xs text-slate-500">
+                    <span><span className="font-mono">{fmtUsd(am.paidUsd)}</span> paid · <span className="font-mono">{fmtUsd(am.plannedUsd)}</span> committed</span>
+                    <span className="font-mono">{burn}%</span>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+function CityInsightCard({ rows }: { rows: CityAggregation[] }) {
+  const maxCo = Math.max(1, ...rows.map(r => r.companies));
+  return (
+    <Card>
+      <CardHeader title="By City" subtitle="Where the cohort is geographically distributed. Click a row to filter the Companies grid." />
+      {rows.length === 0 ? (
+        <EmptyState title="No city data yet" />
+      ) : (
+        <ul className="space-y-2 text-sm">
+          {rows.map(c => (
+            <li key={c.city}>
+              <div className="flex items-center justify-between">
+                <Link
+                  to={`/companies?city=${encodeURIComponent(c.city)}`}
+                  className="font-semibold text-navy-500 hover:text-brand-teal hover:underline dark:text-white"
+                >
+                  {c.city}
+                </Link>
+                <span className="text-2xs text-slate-500">
+                  <span className="font-mono">{c.companies}</span> companies · <span className="font-mono">{c.interventions}</span> int · <span className="font-mono">{fmtUsd(c.paidUsd)}</span> paid
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
+                <div className="h-full rounded-full bg-brand-teal" style={{ width: `${pct(c.companies, maxCo)}%` }} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+const PILLAR_BAR_TONE: Record<string, string> = {
+  red: 'bg-brand-red',
+  teal: 'bg-brand-teal',
+  navy: 'bg-navy-500 dark:bg-navy-400',
+};
+
+function SubInsightCard({ rows }: { rows: SubAggregation[] }) {
+  const maxCo = Math.max(1, ...rows.map(r => r.companies));
+  // Group rows visually under their pillar label without losing the
+  // single-table density (one row per sub).
+  let lastPillar = '';
+  return (
+    <Card>
+      <CardHeader title="By Sub-intervention" subtitle="The 8 cohort sub-interventions, each with companies covered, status mix, planned vs paid spend." />
+      <ul className="divide-y divide-slate-100 text-sm dark:divide-navy-700">
+        {rows.map(s => {
+          const showPillar = s.pillarLabel !== lastPillar;
+          lastPillar = s.pillarLabel;
+          const bar = PILLAR_BAR_TONE[s.pillarColor] ?? 'bg-slate-300';
+          return (
+            <li key={`${s.pillar}::${s.sub}`} className="py-2">
+              {showPillar && (
+                <div className="mb-1 text-2xs font-bold uppercase tracking-[0.1em] text-slate-400 dark:text-slate-500">
+                  {s.pillarLabel}
+                </div>
+              )}
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                <Link
+                  to={`/companies?sub=${encodeURIComponent(s.sub)}`}
+                  className="font-semibold text-navy-500 hover:text-brand-teal hover:underline dark:text-white"
+                >
+                  {s.sub}
+                </Link>
+                <span className="flex items-center gap-3 text-2xs text-slate-500">
+                  <span><span className="font-mono">{s.companies}</span> co</span>
+                  <span><span className="font-mono">{s.assignmentsTotal}</span> assigned</span>
+                  <span><span className="font-mono">{fmtUsd(s.plannedUsd)}</span> planned</span>
+                  <span><span className="font-mono">{fmtUsd(s.paidUsd)}</span> paid</span>
+                </span>
+              </div>
+              <div className="mt-1 flex items-center gap-3">
+                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
+                  <div className={`h-full ${bar}`} style={{ width: `${pct(s.companies, maxCo)}%` }} />
+                </div>
+                <div className="flex items-center gap-1.5 text-2xs">
+                  <span className="inline-flex items-center gap-1" title="Planned">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-slate-400" />
+                    <span className="font-mono">{s.status.planned}</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1" title="In progress">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
+                    <span className="font-mono">{s.status.in_progress}</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1" title="Completed">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                    <span className="font-mono">{s.status.completed}</span>
+                  </span>
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
+  );
+}
+
+function DonorInsightCard({ rows, dutchCap, sidaCap }: { rows: DonorAggregation[]; dutchCap: number; sidaCap: number }) {
+  void dutchCap; void sidaCap; // caps already on each row.capUsd; preserved for future use
+  return (
+    <Card>
+      <CardHeader title="By Donor" subtitle="2026 cap by donor, with sub-intervention drilldown showing slots filled and budget burn." />
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+        {rows.map(d => {
+          const fill = d.donor === 'Dutch' ? 'bg-brand-orange' : 'bg-brand-teal';
+          const committedPct = pct(d.plannedUsd, d.capUsd);
+          const paidPct = pct(d.paidUsd, d.capUsd);
+          return (
+            <div key={d.donor}>
+              <div className="flex items-baseline justify-between text-sm">
+                <span className="font-bold text-navy-500 dark:text-white">{d.donor}</span>
+                <span className="text-xs text-slate-500">
+                  <span className="font-mono">{fmtUsd(d.paidUsd)}</span> / <span className="font-mono">{fmtUsd(d.capUsd)}</span> <span className="ml-1 font-mono">({Math.round(d.burnPct)}%)</span>
+                </span>
+              </div>
+              <div className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
+                <div className="relative h-full">
+                  <div className={`absolute left-0 top-0 h-full ${fill} opacity-50`} style={{ width: `${committedPct}%` }} />
+                  <div className={`absolute left-0 top-0 h-full ${fill}`} style={{ width: `${paidPct}%` }} />
+                </div>
+              </div>
+              <div className="mt-0.5 text-2xs uppercase tracking-wider text-slate-500">
+                <span className="font-mono">{d.companies}</span> companies · <span className="font-mono">{fmtUsd(d.plannedUsd)}</span> committed
+              </div>
+              {/* Sub drilldown — only shows subs with a non-zero cap or some
+                  activity. Helps the team see where the donor budget went. */}
+              <ul className="mt-2 space-y-1 border-t border-slate-100 pt-2 text-2xs dark:border-navy-700">
+                {d.subs.filter(s => s.capUsd > 0 || s.plannedUsd > 0 || s.paidUsd > 0).map(s => (
+                  <li key={s.sub} className="flex items-baseline justify-between gap-2">
+                    <span className="truncate font-semibold text-navy-500 dark:text-slate-200">
+                      {s.sub}
+                    </span>
+                    <span className="flex-shrink-0 font-mono text-slate-500">
+                      {s.slotsCap > 0 ? `${s.slotsFilled}/${s.slotsCap} slots · ` : ''}
+                      {fmtUsd(s.paidUsd)} / {fmtUsd(s.capUsd)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        })}
       </div>
-      <div className="mt-1.5 h-3 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-navy-700">
-        {/* paid bar (darker) */}
-        <div className="relative h-full">
-          <div className={`absolute left-0 top-0 h-full rounded-full opacity-60 ${fill}`} style={{ width: `${committedPct}%` }} />
-          <div className={`absolute left-0 top-0 h-full rounded-full ${fill}`} style={{ width: `${paidPct}%` }} />
-        </div>
-      </div>
-      <div className="mt-1 flex items-center gap-3 text-2xs uppercase tracking-wider text-slate-500">
-        <span>● Paid {fmtUsd(paid)}</span>
-        <span className="opacity-60">● Committed {fmtUsd(committed)}</span>
-      </div>
-    </div>
+    </Card>
   );
 }
 
