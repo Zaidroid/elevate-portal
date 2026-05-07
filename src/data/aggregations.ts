@@ -156,12 +156,18 @@ export function aggregateByAm(
 
   // Always seed the canonical 3 AMs so they appear even with zero load.
   for (const am of ACCOUNT_MANAGERS) seed(am.email);
-  seed(''); // unassigned bucket
 
-  // Companies → bucket by profile_manager_email
+  // Companies → bucket by AM. The master row's profile_manager_email is
+  // unreliable (gets blanked during dedupe / merge); the alias map is
+  // the authoritative source for cohort companies. Prefer alias.am,
+  // fall back to master.profile_manager_email, fall back to ''. The
+  // unassigned bucket only seeds if at least one cohort company really
+  // has no AM in either source.
   const companyToAm = new Map<string, string>();
   for (const c of cohort) {
-    const pm = (c.profile_manager_email || '').toLowerCase();
+    const fromAlias = (cohortEntryFor(c.company_name)?.am || '').toLowerCase();
+    const fromMaster = (c.profile_manager_email || '').toLowerCase();
+    const pm = fromAlias || fromMaster || '';
     seed(pm).companies.add(c.company_id);
     companyToAm.set(c.company_id, pm);
   }
@@ -230,11 +236,13 @@ export function aggregateByCity(
     return byCity.get(k)!;
   };
 
-  // Master row.city wins; fall back to cohortEntryFor when blank
-  // (the alias map carries authoritative city per the xlsx).
+  // Alias map wins for cohort companies — the master tab has typos
+  // that produce ghost buckets like "Nables" alongside "Nablus". The
+  // xlsx-sourced alias map is the canonical spelling. Master.city
+  // is only used when the alias map has no city for that canonical.
   const companyCity = new Map<string, string>();
   for (const c of cohort) {
-    const city = (c.city || '').trim() || cohortEntryFor(c.company_name)?.city || '';
+    const city = cohortEntryFor(c.company_name)?.city || (c.city || '').trim() || '';
     seed(city).companies.add(c.company_id);
     companyCity.set(c.company_id, city);
   }

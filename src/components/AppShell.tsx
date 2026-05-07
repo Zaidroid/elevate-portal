@@ -217,15 +217,27 @@ export function AppShell({
     // Latch FIRST so re-fires while we're awaiting writes return immediately.
     autopilotStartedRef.current = true;
     (async () => {
-      let mkg = 0, conf = 0;
-      try {
-        for (const fix of plan.mkgFixes) {
-          const id = fix.detail.split(':')[0].trim();
-          if (!id) continue;
+      // Per-write try/catch — a single 429 or transient Sheets error
+      // mustn't abort the rest of the loop (last cycle, the catch around
+      // the full loop dropped 2 of 4 Conferences rows when one write
+      // 429'd). Track success vs failure counts so we know whether to
+      // markRan (skips next cycle) or leave the next reload to retry.
+      let mkgOk = 0, mkgFail = 0;
+      let confOk = 0, confFail = 0;
+      const errors: string[] = [];
+      for (const fix of plan.mkgFixes) {
+        const id = fix.detail.split(':')[0].trim();
+        if (!id) continue;
+        try {
           await assignmentHookRef.current.updateRow(id, { sub_intervention: 'Marketing Agency' });
-          mkg += 1;
+          mkgOk += 1;
+        } catch (err) {
+          mkgFail += 1;
+          errors.push((err as Error).message || String(err));
         }
-        for (const add of plan.confAdds) {
+      }
+      for (const add of plan.confAdds) {
+        try {
           await assignmentHookRef.current.createRow({
             assignment_id: mintConferenceAssignmentId(add.company_id),
             company_id: add.company_id,
@@ -239,18 +251,36 @@ export function AppShell({
             budget_usd: '',
             notes: `Auto-synced from Conference Tracker (${add.conference_name}, ${add.decision})`,
           });
-          conf += 1;
+          confOk += 1;
+        } catch (err) {
+          confFail += 1;
+          errors.push((err as Error).message || String(err));
         }
+      }
+
+      // Only persist the "ran successfully" mark when EVERY row landed.
+      // Partial failures leave the session-storage key unset so a
+      // refresh tries again from a fresh state. If everything failed,
+      // also clear the in-memory latch so a reload can retry.
+      const allOk = mkgFail === 0 && confFail === 0;
+      const noProgress = mkgOk === 0 && confOk === 0;
+      if (allOk) {
         markRan(plan);
-        if (mkg > 0 || conf > 0) {
-          setAutopilotMsg(`Autopilot synced ${mkg} Marketing row${mkg === 1 ? '' : 's'} + created ${conf} Conferences row${conf === 1 ? '' : 's'}.`);
-          window.setTimeout(() => setAutopilotMsg(null), 8000);
-        }
-      } catch (err) {
-        // Don't reset the latch — better to leave the manual /admin/lookups
-        // tools as the recovery path than risk a retry loop on a real
-        // sheet error (like a 403 or quota).
-        console.warn('[autopilot] failed; admin can run /admin/lookups manually', err);
+      } else if (noProgress) {
+        autopilotStartedRef.current = false;
+      }
+
+      const total = mkgOk + confOk;
+      const failed = mkgFail + confFail;
+      if (total > 0 || failed > 0) {
+        const parts: string[] = [];
+        if (mkgOk > 0) parts.push(`${mkgOk} Marketing`);
+        if (confOk > 0) parts.push(`${confOk} Conferences`);
+        const ok = parts.length > 0 ? `synced ${parts.join(' + ')}` : 'no rows synced';
+        const tail = failed > 0 ? ` · ${failed} failed (refresh to retry)` : '';
+        setAutopilotMsg(`Autopilot ${ok}${tail}.`);
+        window.setTimeout(() => setAutopilotMsg(null), failed > 0 ? 14000 : 8000);
+        if (failed > 0) console.warn('[autopilot] partial failures:', errors);
       }
     })();
     // Deps are intentionally minimal: only the loaded-state booleans
