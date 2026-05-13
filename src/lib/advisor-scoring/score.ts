@@ -16,7 +16,58 @@ import type {
   Stage1Score,
   Stage2Score,
 } from '../../types/advisor';
-import { DEFAULT_SCORING_CONFIG } from './config';
+import { DEFAULT_SCORING_CONFIG, DEFAULT_YEARS_MULTIPLIERS } from './config';
+
+// Canonical years bucket resolver. Source data has many natural-language
+// variants ("more than 10 years", "5 to 10 years", "around 7 years",
+// "7+", "decade+", etc.) — this normalises them onto the three canonical
+// buckets the multiplier map uses. Exported so the importer can also
+// canonicalise at write time, eliminating the need for a runtime
+// substring fallback in every scoring call.
+export function normalizeYearsBucket(
+  raw: string | undefined,
+  buckets: Record<string, number> = DEFAULT_YEARS_MULTIPLIERS,
+): string {
+  if (!raw) return '';
+  const v = raw.toLowerCase().trim();
+  if (!v) return '';
+  // 1. Exact match against canonical buckets.
+  if (v in buckets) return v;
+  // 2. Numeric extraction — a single number or a range.
+  // Captures: "10", "10 years", "more than 10", "10+", "decade" (=10).
+  const numMatch = v.match(/(\d+)\s*[-–to]+\s*(\d+)|(\d+)/);
+  let lo = 0;
+  let hi = 0;
+  if (numMatch) {
+    if (numMatch[1] && numMatch[2]) {
+      lo = Number(numMatch[1]);
+      hi = Number(numMatch[2]);
+    } else if (numMatch[3]) {
+      lo = hi = Number(numMatch[3]);
+      // "more than X" / "X+" / "over X" pushes upper bound.
+      if (/more than|over|plus|\+/.test(v)) hi = lo + 1;
+      // "less than X" / "under X" pushes lower bound.
+      if (/less than|under|below/.test(v)) lo = 0;
+    }
+  }
+  // "decade" / "decades" → 10+
+  if (/decade/.test(v) && lo === 0 && hi === 0) {
+    lo = 10;
+    hi = 11;
+  }
+  // 3. Map numeric ranges onto canonical buckets.
+  //    less than 5 → 0..4
+  //    5-10        → 5..10
+  //    more than 10 → 11+
+  if (hi >= 11 || (hi === 0 && lo >= 11)) return 'more than 10';
+  if (hi >= 5 || lo >= 5) return '5-10';
+  if (hi > 0 || lo > 0) return 'less than 5';
+  // 4. Last-resort substring match.
+  for (const k of Object.keys(buckets)) {
+    if (v.includes(k)) return k;
+  }
+  return '';
+}
 
 export function computeStage1(
   adv: Partial<Advisor>,
@@ -35,17 +86,11 @@ export function computeStage1(
   // 3. C-level Y/N
   const clevelScore = /yes/i.test(adv.c_level || '') ? w.clevel : 0;
 
-  // 4. Years bucket — lookup with substring fallback so "more than 10 years"
-  // still maps to "more than 10".
-  const yearsBucket = (adv.years || '').toLowerCase().trim();
-  const yearsMult =
-    config.years_multipliers[yearsBucket] ??
-    config.years_multipliers[
-      Object.keys(config.years_multipliers).find(k =>
-        yearsBucket.includes(k.toLowerCase())
-      ) || ''
-    ] ??
-    0;
+  // 4. Years bucket — canonicalise once via the shared normalizer so all
+  // natural-language variants ("more than 10 years", "5 to 10", "decade+",
+  // "7-8 years") resolve cleanly. See normalizeYearsBucket above.
+  const yearsBucket = normalizeYearsBucket(adv.years, config.years_multipliers);
+  const yearsMult = yearsBucket ? (config.years_multipliers[yearsBucket] ?? 0) : 0;
   const yearsScore = yearsMult * w.years;
 
   // 5. Experience areas + detail

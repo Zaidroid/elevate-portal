@@ -3,7 +3,7 @@ import { Plus, Search, Download } from 'lucide-react';
 import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
 import { AUTHORIZED_USERS, isAdmin } from '../../config/team';
-import { Badge, Button, Card, DataTable, Drawer, downloadCsv, timestampedFilename } from '../../lib/ui';
+import { Badge, Button, Card, DataTable, Drawer, downloadCsv, timestampedFilename, useToast } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 
 const TIER_LABEL: Record<string, string> = {
@@ -46,6 +46,7 @@ export function TeamPage() {
   const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<TeamRow>(
     'teamRoster', 'roster'
   );
+  const toast = useToast();
 
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<TeamRow | null>(null);
@@ -154,8 +155,13 @@ export function TeamPage() {
           onClose={() => setSelected(null)}
           onSave={async updates => {
             if (!selected) return;
-            await updateRow(selected.email, updates);
-            setSelected(null);
+            try {
+              await updateRow(selected.email, updates);
+              toast.success('Team member saved');
+              setSelected(null);
+            } catch (err) {
+              toast.error('Save failed', (err as Error).message);
+            }
           }}
         />
       )}
@@ -165,8 +171,13 @@ export function TeamPage() {
           open={creating}
           onClose={() => setCreating(false)}
           onCreate={async row => {
-            await createRow(row);
-            setCreating(false);
+            try {
+              await createRow(row);
+              toast.success('Team member added');
+              setCreating(false);
+            } catch (err) {
+              toast.error('Create failed', (err as Error).message);
+            }
           }}
         />
       )}

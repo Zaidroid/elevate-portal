@@ -3,7 +3,7 @@ import { Search, Plus, ExternalLink, Download } from 'lucide-react';
 
 import { useModuleData } from '../../data/useModuleData';
 import type { Conference, ConferenceTrackerRow as TrackerRow, Company } from '../../data/types';
-import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
+import { Badge, Button, Card, CardHeader, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename, useToast } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { keepCompaniesSection } from '../../lib/sheets/sections';
 import { canonicalCohortName, cohortEntryFor } from '../../config/cohort3Aliases';
@@ -77,6 +77,7 @@ function Catalogue() {
 
   const hook = useModuleData<Conference>('conferences', 'catalogue');
   const { loading, error, refresh, updateRow, createRow } = hook;
+  const toast = useToast();
   // Section-aware: Catalogue tab is team-grouped (Companies / Vendors /
   // Marketing) — without keepCompaniesSection, we read separator rows
   // and unrelated team blocks. Catalogue itself isn't cohort-scoped
@@ -132,12 +133,29 @@ function Catalogue() {
       <DataTable columns={columns} rows={filtered} loading={loading} onRowClick={r => setSelected(r)} />
 
       <ConferenceDrawer conference={selected} onClose={() => setSelected(null)}
-        onSave={async u => { if (!selected) return; await updateRow(selected.conference_id, u); setSelected(null); }} />
+        onSave={async u => {
+          if (!selected) return;
+          try {
+            await updateRow(selected.conference_id, u);
+            toast.success('Conference saved');
+            setSelected(null);
+          } catch (err) {
+            toast.error('Save failed', (err as Error).message);
+          }
+        }} />
 
       <CreateConferenceDrawer
         open={creating}
         onClose={() => setCreating(false)}
-        onCreate={async r => { await createRow(r); setCreating(false); }}
+        onCreate={async r => {
+          try {
+            await createRow(r);
+            toast.success('Conference added');
+            setCreating(false);
+          } catch (err) {
+            toast.error('Create failed', (err as Error).message);
+          }
+        }}
       />
     </div>
   );
@@ -148,6 +166,7 @@ function Tracker() {
   const hook = useModuleData<TrackerRow>('conferences', 'tracker');
   const masterHook = useModuleData<Company>('companies', 'companies');
   const { loading, error, refresh, updateRow } = hook;
+  const toast = useToast();
 
   // Section-aware AND cohort-scoped. Tracker rows for non-cohort
   // companies (e.g. previous cohorts the team hasn't deleted yet, or
@@ -242,7 +261,16 @@ function Tracker() {
       <DataTable columns={columns} rows={filtered} loading={loading} onRowClick={r => setSelected(r)} />
 
       <TrackerDrawer row={selected} onClose={() => setSelected(null)}
-        onSave={async u => { if (!selected) return; await updateRow(selected.tracker_id, u); setSelected(null); }} />
+        onSave={async u => {
+          if (!selected) return;
+          try {
+            await updateRow(selected.tracker_id, u);
+            toast.success('Tracker row saved');
+            setSelected(null);
+          } catch (err) {
+            toast.error('Save failed', (err as Error).message);
+          }
+        }} />
     </div>
   );
 }

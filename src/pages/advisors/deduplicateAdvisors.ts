@@ -37,8 +37,8 @@ export async function deduplicateAdvisors(
     removed: [],
   };
 
-  // Reconstruct sheet row numbers from the order useSheetDoc returns rows.
-  // useSheetDoc reads A:ZZ minus the header, so index 0 → row 2, etc.
+  // Reconstruct sheet row numbers from the order useModuleData returns rows.
+  // The data hook reads A:ZZ minus the header, so index 0 → row 2, etc.
   const rowsWithIndex: RowWithIndex[] = advisors.map((a, i) => ({
     advisor: a,
     rowNumber: i + 2,

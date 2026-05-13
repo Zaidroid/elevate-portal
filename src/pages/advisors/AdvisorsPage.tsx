@@ -1,8 +1,8 @@
 // /advisors — native module replacing the standalone Advisors app.
 //
 // Tabs: Pipeline (kanban), Roster (table), Follow-ups, Activity, Dashboard.
-// Bound to the E3 - Non-Technical Advisors workbook via four useSheetDoc
-// instances (advisors, followups, activity, comments). Joining is done
+// Bound to the E3 - Non-Technical Advisors workbook via four useModuleData
+// hooks (advisors, followups, activity, comments). Joining is done
 // client-side in `enrichAdvisors`.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -72,6 +72,7 @@ import { appendOutreachEntry, appendOutreachBatch, stampLastOutreach } from './o
 import { writeAdvisorPipelineSnapshot } from './snapshotWriter';
 import { ALL_TEMPLATE_KEYS, renderTemplate, templateMailto, TEMPLATE_LABELS, type TemplateKey } from './emailTemplates';
 import { deduplicateAdvisors } from './deduplicateAdvisors';
+import { recordRun } from '../../lib/observability/last-run';
 
 // Best-effort year extractor. Handles ISO ('2026-01-15...'), US-locale
 // ('1/15/2026'), and 'Jan 15, 2026'-ish forms. Returns 0 when nothing
@@ -589,6 +590,15 @@ export function AdvisorsPage() {
       // failures are visible in the UI (FormIntakeDiagnostics card).
       setLastFormImport(result);
       const summary = `[advisors] form-poll · fetched=${result.fetched} imported=${result.imported} dupes=${result.alreadyKnown} archived=${result.archived} skippedNoEmail=${result.skippedNoEmail} unmapped=[${result.unmappedHeaders.join(', ')}] errors=[${result.errors.join(' | ')}] at ${result.ranAt}`;
+      if (silent) {
+        recordRun('Advisor form import', {
+          outcome: result.errors.length > 0 ? (result.imported > 0 ? 'partial' : 'fail') : 'ok',
+          ok: result.imported,
+          fail: result.errors.length,
+          message: `fetched=${result.fetched} imported=${result.imported} dupes=${result.alreadyKnown}`,
+          error: result.errors[0],
+        });
+      }
       if (result.errors.length > 0) {
         console.warn(summary);
         if (!silent) toast.error(`Import error: ${result.errors[0]}`);
@@ -616,7 +626,15 @@ export function AdvisorsPage() {
       }
     } catch (err) {
       if (!silent) toast.error(`Import failed: ${(err as Error).message}`);
-      else console.warn('[advisors] auto-import failed', err);
+      else {
+        console.warn('[advisors] auto-import failed', err);
+        recordRun('Advisor form import', {
+          outcome: 'fail',
+          ok: 0,
+          fail: 1,
+          error: (err as Error).message || String(err),
+        });
+      }
     } finally {
       if (!silent) setImporting(false);
     }
@@ -658,9 +676,28 @@ export function AdvisorsPage() {
       if (result.errors.length > 0) {
         toast.error(`Some deletes failed: ${result.errors[0]}`);
       }
+      if (silent) {
+        recordRun('Advisor dedupe', {
+          outcome: result.errors.length > 0 ? (result.rowsRemoved > 0 ? 'partial' : 'fail') : 'ok',
+          ok: result.rowsRemoved,
+          fail: result.errors.length,
+          message: result.rowsRemoved > 0
+            ? `removed ${result.rowsRemoved} dupe${result.rowsRemoved === 1 ? '' : 's'}`
+            : `scanned ${result.scanned}, none to remove`,
+          error: result.errors[0],
+        });
+      }
     } catch (err) {
       if (!silent) toast.error(`Dedupe failed: ${(err as Error).message}`);
-      else console.warn('[advisors] auto-dedupe failed', err);
+      else {
+        console.warn('[advisors] auto-dedupe failed', err);
+        recordRun('Advisor dedupe', {
+          outcome: 'fail',
+          ok: 0,
+          fail: 1,
+          error: (err as Error).message || String(err),
+        });
+      }
     } finally {
       setDedupRunning(false);
     }
@@ -717,7 +754,13 @@ export function AdvisorsPage() {
           console.warn('[advisors] bulk move skipped', id, err);
         }
       }
-      toast.success(`Bulk moved ${ok} of ${ids.length} to ${targetLabel}`);
+      // Surface failures explicitly: toast.error if any row failed, else success.
+      const failed = ids.length - ok;
+      if (failed > 0) {
+        toast.error(`Bulk move: ${ok} of ${ids.length} moved`, `${failed} failed - see console`);
+      } else if (ok > 0) {
+        toast.success(`Bulk moved ${ok} to ${targetLabel}`);
+      }
       await actHook.refresh();
       setSelectedIds(new Set());
     } finally {
@@ -751,7 +794,12 @@ export function AdvisorsPage() {
           console.warn('[advisors] bulk assign skipped', id, err);
         }
       }
-      toast.success(`Assigned ${ok} of ${ids.length} to ${assignee}`);
+      const failed = ids.length - ok;
+      if (failed > 0) {
+        toast.error(`Bulk assign: ${ok} of ${ids.length} assigned`, `${failed} failed - see console`);
+      } else if (ok > 0) {
+        toast.success(`Assigned ${ok} to ${assignee}`);
+      }
       await actHook.refresh();
       setSelectedIds(new Set());
     } finally {

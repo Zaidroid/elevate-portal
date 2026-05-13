@@ -82,10 +82,10 @@ export interface ScoringConfig {
 }
 
 // Raw advisor row as it lands from the sheet. All fields are strings because
-// useSheetDoc returns string columns; the scoring engine parses on demand.
+// useModuleData returns string columns; the scoring engine parses on demand.
 //
 // `type` (not interface) so the shape is structurally compatible with
-// Record<string, unknown> — that's what DataTable / useSheetDoc require.
+// Record<string, unknown> — that's what DataTable / useModuleData require.
 export type Advisor = {
   // Form response columns
   advisor_id: string;
@@ -194,6 +194,11 @@ export type AdvisorComment = {
   advisor_id: string;
   author_email: string;
   body: string;
+  // Visibility marker: 'Team' (everyone in the portal) or 'Admins'
+  // (leadership only). The canonical sheet schema has this column;
+  // missing it from the TS type caused readers to treat every comment
+  // as public — potential data leak.
+  visibility: string;
   created_at: string;
   updated_at: string;
   updated_by: string;

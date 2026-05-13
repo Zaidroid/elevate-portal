@@ -5,13 +5,13 @@ import { useAuth } from '../../services/auth';
 import { useModuleData } from '../../data/useModuleData';
 import type { PR, Company, Payment } from '../../data/types';
 import { keepCompaniesSection } from '../../lib/sheets/sections';
-import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
+import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename, useToast } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 import { SourceComparisonView } from './SourceComparisonView';
 import { SourceAnalysisView } from './SourceAnalysisView';
-import { canonicalCohortName, cohortEntryFor } from '../../config/cohort3Aliases';
+import { canonicalCohortName } from '../../config/cohort3Aliases';
 import { COHORT3_BUDGET_TOTAL_USD } from '../../config/interventions';
-import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
+import { buildCompanyLookup } from '../../data/companyLookup';
 
 type Quarter = 'q1' | 'q2' | 'q3' | 'q4';
 
@@ -53,6 +53,7 @@ type ViewMode = Quarter | 'source' | 'analysis';
 
 export function ProcurementPage() {
   const { user } = useAuth();
+  const toast = useToast();
   const [view, setView] = useState<ViewMode>('q1');
   const isQuarter = view !== 'source' && view !== 'analysis';
 
@@ -100,31 +101,8 @@ export function ProcurementPage() {
   // company_id → derived view (canonical name, AM, donor, budget cap).
   // The cap from cohort3Aliases.ts is authoritative — PRs whose company
   // matches are budgeted; rows for non-cohort companies show plain text.
-  type CompanyLookup = {
-    companyId: string;
-    name: string;
-    amName: string;
-    donor: string;
-    budgetCap: number;
-  };
-  const companyLookup = useMemo(() => {
-    const m = new Map<string, CompanyLookup>();
-    for (const c of masterHook.rows) {
-      if (!c.company_id) continue;
-      const entry = cohortEntryFor(c.company_name || '');
-      const am = (c.profile_manager_email || entry?.am || '').toLowerCase();
-      const amName = ACCOUNT_MANAGERS.find(a => a.email.toLowerCase() === am)?.name
-        || (am ? displayName(am) : '');
-      m.set(c.company_id, {
-        companyId: c.company_id,
-        name: entry?.canonical || c.company_name || c.company_id,
-        amName,
-        donor: entry?.donor || c.fund_code || '',
-        budgetCap: entry?.budgetUsd || 0,
-      });
-    }
-    return m;
-  }, [masterHook.rows]);
+  // Builder lives in src/data/companyLookup so Payments shares the shape.
+  const companyLookup = useMemo(() => buildCompanyLookup(masterHook.rows), [masterHook.rows]);
 
   // company_id → planned (sum of PR.total_cost_usd across all 4 quarters)
   // and paid (sum of Payment.amount_usd where status === Paid). Used both
@@ -366,8 +344,13 @@ export function ProcurementPage() {
         onClose={() => setSelected(null)}
         onSave={async updates => {
           if (!selected) return;
-          await updateRow(selected.pr_id, updates);
-          setSelected(null);
+          try {
+            await updateRow(selected.pr_id, updates);
+            toast.success('PR saved');
+            setSelected(null);
+          } catch (err) {
+            toast.error('Save failed', (err as Error).message);
+          }
         }}
       />
 
@@ -384,8 +367,13 @@ export function ProcurementPage() {
             : targetQuarter === 'q2' ? q2Hook
             : targetQuarter === 'q3' ? q3Hook
             : q4Hook;
-          await targetHook.createRow(row);
-          setCreating(false);
+          try {
+            await targetHook.createRow(row);
+            toast.success(`PR created in ${targetQuarter.toUpperCase()}`);
+            setCreating(false);
+          } catch (err) {
+            toast.error('Create failed', (err as Error).message);
+          }
         }}
       />
     </div>

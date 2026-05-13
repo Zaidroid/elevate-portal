@@ -3,7 +3,7 @@ import { Search, Plus, ExternalLink, Download } from 'lucide-react';
 
 import { useModuleData } from '../../data/useModuleData';
 import type { Agreement } from '../../data/types';
-import { Badge, Button, Card, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
+import { Badge, Button, Card, DataTable, Drawer, statusTone, downloadCsv, timestampedFilename, useToast } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
 
 
@@ -20,6 +20,7 @@ export function DocsPage() {
   const { rows, loading, error, refresh, updateRow, createRow } = useModuleData<Agreement>(
     'docs', 'agreements'
   );
+  const toast = useToast();
 
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Agreement | null>(null);
@@ -116,8 +117,13 @@ export function DocsPage() {
         onClose={() => setSelected(null)}
         onSave={async updates => {
           if (!selected) return;
-          await updateRow(selected.agreement_id, updates);
-          setSelected(null);
+          try {
+            await updateRow(selected.agreement_id, updates);
+            toast.success('Agreement saved');
+            setSelected(null);
+          } catch (err) {
+            toast.error('Save failed', (err as Error).message);
+          }
         }}
       />
 
@@ -125,8 +131,13 @@ export function DocsPage() {
         open={creating}
         onClose={() => setCreating(false)}
         onCreate={async row => {
-          await createRow(row);
-          setCreating(false);
+          try {
+            await createRow(row);
+            toast.success('Agreement created');
+            setCreating(false);
+          } catch (err) {
+            toast.error('Create failed', (err as Error).message);
+          }
         }}
       />
     </div>
