@@ -108,6 +108,34 @@ export const SHEETS: Record<string, ModuleConfig> = {
       lookups: 'Lookups',
     },
   },
+  // The full ElevateBridge programme workbook — selection funnel
+  // (S1 → S2 → S3), scoring rubrics, interview scores, final decisions,
+  // mentors, training sessions, attendance, and top performers. Sourced
+  // by importing the four xlsx files in /Elevate 3.0/ElevateBridge/ into
+  // a single Drive workbook ("Elevate Bridge — Portal"). The Matching tab
+  // still reads from the `freelancers` module above; this module owns
+  // everything from intake to admission.
+  elevateBridge: {
+    label: 'E3 - Elevate Bridge Programme',
+    sheetId: env('VITE_SHEET_ELEVATE_BRIDGE'),
+    tabs: {
+      applicants:    'Applicants',
+      responses:     'Form Responses',
+      stage1:        'S1 Killing Factor',
+      stage2:        'S2 Tracks Sorting',
+      stage3Ssi:     'S3 SSI',
+      stage3Resp:    'S3 Response Scoring',
+      interviews:    'Interview Scoring',
+      decisions:     'Final Decisions',
+      rubrics:       'Scoring Rubrics',
+      mentors:       'Mentors',
+      sessions:      'Training Sessions',
+      attendance:    'Session Attendance',
+      topPerformers: 'Top Performers',
+      matches:       'Matches',
+      activity:      'ActivityLog',
+    },
+  },
   // Live Google Form responses sheet for ElevateBridge applicants — same
   // pattern as advisorsFormResponses. The portal auto-pulls new rows from
   // here every 5 minutes and appends them to the Freelancers tab as
@@ -229,4 +257,84 @@ export function getSheetId(module: ModuleKey): string {
 
 export function getTab(module: ModuleKey, tab: string): string {
   return SHEETS[module].tabs[tab] || tab;
+}
+
+// ─── Boot-time env validation ─────────────────────────────────────────
+//
+// Modules the portal cannot operate without. New environments
+// (Netlify, staging, local dev) silently render empty pages when an
+// env var is missing — this helper surfaces the gap up-front via an
+// admin banner so we don't keep diagnosing it page-by-page.
+//
+// "Required" = a module whose absence breaks the primary user flow
+// (company profile + interventions). Optional modules (form-response
+// auto-syncs, donor reports, ElevateBridge programme workbook) live
+// in OPTIONAL_MODULES and get warned but not flagged red.
+
+const REQUIRED_MODULES: ModuleKey[] = [
+  'companies',
+  'payments',
+  'procurement',
+  'conferences',
+  'docs',
+  'advisors',
+  'freelancers',
+  'teamRoster',
+  'selection',
+  'logframes',
+];
+
+const OPTIONAL_MODULES: ModuleKey[] = [
+  'elevateBridge',
+  'freelancersFormResponses',
+  'advisorsFormResponses',
+  'procurementSource',
+  'paymentsSource',
+  'companiesInterviewed',
+  'donorReports',
+];
+
+export type EnvReport = {
+  ok: boolean;
+  missingRequired: Array<{ module: string; envVar: string; label: string }>;
+  missingOptional: Array<{ module: string; envVar: string; label: string }>;
+};
+
+function envVarFor(module: ModuleKey): string {
+  // Mirrors the convention used inside SHEETS — `VITE_SHEET_<MODULE>`,
+  // with the camelCase module key UPPERCASED. The actual code passed
+  // to `env()` is hardcoded per module above, so we approximate via the
+  // module key. Special cases are spelt out so the banner shows the
+  // EXACT env var the developer needs to set.
+  const SPECIAL: Partial<Record<ModuleKey, string>> = {
+    elevateBridge: 'VITE_SHEET_ELEVATE_BRIDGE',
+    teamRoster: 'VITE_SHEET_TEAM_ROSTER',
+    freelancersFormResponses: 'VITE_SHEET_FREELANCERS_FORM_RESPONSES',
+    advisorsFormResponses: 'VITE_SHEET_ADVISORS_FORM_RESPONSES',
+    procurementSource: 'VITE_SHEET_PROCUREMENT_SOURCE',
+    paymentsSource: 'VITE_SHEET_PAYMENTS_SOURCE',
+    companiesInterviewed: 'VITE_SHEET_COMPANIES_INTERVIEWED',
+    donorReports: 'VITE_SHEET_DONOR_REPORTS',
+  };
+  return SPECIAL[module] || `VITE_SHEET_${module.toUpperCase()}`;
+}
+
+export function validateEnv(): EnvReport {
+  const missingRequired: EnvReport['missingRequired'] = [];
+  const missingOptional: EnvReport['missingOptional'] = [];
+  for (const m of REQUIRED_MODULES) {
+    if (!SHEETS[m].sheetId) {
+      missingRequired.push({ module: m, envVar: envVarFor(m), label: SHEETS[m].label });
+    }
+  }
+  for (const m of OPTIONAL_MODULES) {
+    if (!SHEETS[m].sheetId) {
+      missingOptional.push({ module: m, envVar: envVarFor(m), label: SHEETS[m].label });
+    }
+  }
+  return {
+    ok: missingRequired.length === 0,
+    missingRequired,
+    missingOptional,
+  };
 }

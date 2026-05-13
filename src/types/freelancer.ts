@@ -15,7 +15,7 @@ export type FreelancerStatus =
   | 'Archived';
 
 // `type` (not interface) so the shape is structurally compatible with
-// Record<string, unknown> — DataTable / useSheetDoc require it.
+// Record<string, unknown> — DataTable / useModuleData require it.
 export type Freelancer = {
   freelancer_id: string;
   full_name: string;

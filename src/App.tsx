@@ -12,11 +12,12 @@ import { ProcurementPage } from './pages/procurement/ProcurementPage';
 import { PaymentsPage } from './pages/payments/PaymentsPage';
 import { ConferencesPage } from './pages/conferences/ConferencesPage';
 import { ReportsPage } from './pages/reports/ReportsPage';
-import { FreelancersPage } from './pages/freelancers/FreelancersPage';
+import { ElevateBridgePage } from './pages/elevatebridge/ElevateBridgePage';
 import { AdvisorsPage } from './pages/advisors/AdvisorsPage';
 import { TeamPage } from './pages/team/TeamPage';
 import { AlertsPage } from './pages/alerts/AlertsPage';
 import { LookupsPage } from './pages/admin/LookupsPage';
+import { SchemaDoctorPage } from './pages/admin/SchemaDoctorPage';
 import { LogframesPage } from './pages/logframes/LogframesPage';
 import { BridgePage } from './pages/link/BridgePage';
 import { MyHubPage } from './pages/hub/MyHubPage';
@@ -200,13 +201,14 @@ function AuthGate({
             <Route path="/payments" element={<RequireAdmin><PaymentsPage /></RequireAdmin>} />
             <Route path="/conferences" element={<ConferencesPage />} />
             <Route path="/docs" element={<DocsPage />} />
-            <Route path="/elevatebridge" element={<FreelancersPage />} />
+            <Route path="/elevatebridge" element={<ElevateBridgePage />} />
             <Route path="/freelancers" element={<Navigate to="/elevatebridge" replace />} />
             <Route path="/advisors" element={<AdvisorsPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/team" element={<RequireAdmin><TeamPage /></RequireAdmin>} />
             <Route path="/alerts" element={<AlertsPage />} />
             <Route path="/admin/lookups" element={<RequireAdmin><LookupsPage /></RequireAdmin>} />
+            <Route path="/admin/schema" element={<RequireAdmin><SchemaDoctorPage /></RequireAdmin>} />
             <Route path="/logframes" element={<LogframesPage />} />
             <Route path="/link/:app" element={<BridgePage />} />
             <Route

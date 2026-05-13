@@ -26,7 +26,7 @@ export async function deduplicateFreelancers(
     removed: [],
   };
 
-  // useSheetDoc returns rows in sheet order, header at row 1, so index 0 maps
+  // useModuleData returns rows in sheet order, header at row 1, so index 0 maps
   // to row 2.
   const rowsWithIndex = freelancers.map((fl, i) => ({ fl, rowNumber: i + 2 }));
 

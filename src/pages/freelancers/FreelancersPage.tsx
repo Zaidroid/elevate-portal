@@ -335,7 +335,12 @@ export function FreelancersPage() {
           console.warn('[freelancers] bulk move skipped', id, err);
         }
       }
-      toast.success(`Bulk moved ${ok} of ${ids.length} to ${targetLabel}`);
+      const failed = ids.length - ok;
+      if (failed > 0) {
+        toast.error(`Bulk move: ${ok} of ${ids.length} moved`, `${failed} failed - see console`);
+      } else if (ok > 0) {
+        toast.success(`Bulk moved ${ok} to ${targetLabel}`);
+      }
       await actHook.refresh();
       setSelectedIds(new Set());
     } finally {
@@ -359,7 +364,12 @@ export function FreelancersPage() {
           console.warn('[freelancers] bulk assign skipped', id, err);
         }
       }
-      toast.success(`Assigned ${ok} of ${ids.length} to ${assignee}`);
+      const failed = ids.length - ok;
+      if (failed > 0) {
+        toast.error(`Bulk assign: ${ok} of ${ids.length} assigned`, `${failed} failed - see console`);
+      } else if (ok > 0) {
+        toast.success(`Assigned ${ok} to ${assignee}`);
+      }
       setSelectedIds(new Set());
     } finally {
       setBulkRunning(false);
@@ -367,8 +377,12 @@ export function FreelancersPage() {
   };
 
   // Auto-poll form responses every 5 minutes (silent unless new entries land).
+  // Track consecutive failures so persistent silent breakage surfaces a
+  // toast after the 3rd retry instead of rotting in console.
   const importStateRef = useRef({ sheetId: sheetId || '', headers: flHook.headers, existing: flHook.rows, userEmail });
   importStateRef.current = { sheetId: sheetId || '', headers: flHook.headers, existing: flHook.rows, userEmail };
+  const consecutiveFailRef = useRef(0);
+  const failSurfacedRef = useRef(false);
 
   const runFormImport = useCallback(async (silent: boolean) => {
     const s = importStateRef.current;
@@ -391,9 +405,23 @@ export function FreelancersPage() {
         userEmail: s.userEmail,
       });
       if (result.errors.length > 0) {
-        if (!silent) toast.error(`Import error: ${result.errors[0]}`);
-        else console.warn('[freelancers] auto-import error:', result.errors[0]);
+        if (!silent) {
+          toast.error(`Import error: ${result.errors[0]}`);
+        } else {
+          console.warn('[freelancers] auto-import error:', result.errors[0]);
+          consecutiveFailRef.current += 1;
+          if (consecutiveFailRef.current >= 3 && !failSurfacedRef.current) {
+            toast.error('Freelancer form auto-sync is failing', result.errors[0]);
+            failSurfacedRef.current = true;
+          }
+        }
         return;
+      }
+      // Success — reset the failure counter and clear any surfaced banner.
+      consecutiveFailRef.current = 0;
+      if (failSurfacedRef.current) {
+        toast.success('Freelancer form auto-sync recovered');
+        failSurfacedRef.current = false;
       }
       if (result.imported > 0) {
         toast.success(`${result.imported} new freelancer${result.imported === 1 ? '' : 's'} imported (joined the Available pool)`);
@@ -411,8 +439,16 @@ export function FreelancersPage() {
         toast.success(`Form has ${result.fetched} entries · all ${result.alreadyKnown} already in pool`);
       }
     } catch (err) {
-      if (!silent) toast.error(`Import failed: ${(err as Error).message}`);
-      else console.warn('[freelancers] auto-import failed', err);
+      if (!silent) {
+        toast.error(`Import failed: ${(err as Error).message}`);
+      } else {
+        console.warn('[freelancers] auto-import failed', err);
+        consecutiveFailRef.current += 1;
+        if (consecutiveFailRef.current >= 3 && !failSurfacedRef.current) {
+          toast.error('Freelancer form auto-sync is failing', (err as Error).message);
+          failSurfacedRef.current = true;
+        }
+      }
     } finally {
       if (!silent) setImporting(false);
     }
