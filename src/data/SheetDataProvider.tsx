@@ -330,11 +330,35 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
       const keyIdx = headers.indexOf(idColumn);
       if (keyIdx < 0) throw new Error(`ID column '${idColumn}' not found in ${tab}`);
 
+      // Tolerant lookup: try exact match first, then trimmed +
+      // case-insensitive. Some imports leave whitespace; some legacy
+      // workbooks store IDs in different case than the cache. The
+      // strict equality lookup was responsible for "Row not found"
+      // errors that resolved on page refresh — that means the row IS
+      // in the sheet, we just weren't normalising the compare.
       let targetRow = -1;
+      const normId = String(id).trim().toLowerCase();
       for (let i = 1; i < data.length; i++) {
-        if ((data[i][keyIdx] ?? '') === id) { targetRow = i + 1; break; }
+        const cell = (data[i][keyIdx] ?? '');
+        if (cell === id) { targetRow = i + 1; break; }
       }
-      if (targetRow < 0) throw new Error(`Row with ${idColumn}=${id} not found`);
+      if (targetRow < 0) {
+        for (let i = 1; i < data.length; i++) {
+          const cell = String(data[i][keyIdx] ?? '').trim().toLowerCase();
+          if (cell && cell === normId) { targetRow = i + 1; break; }
+        }
+      }
+      if (targetRow < 0) {
+        // Helpful error: dump a few nearby ID values so the developer
+        // can spot whether the sheet has them under a slightly
+        // different shape, AND tell the user what to do.
+        const sample = data.slice(1, 6).map(r => r[keyIdx] ?? '').filter(Boolean).slice(0, 3);
+        throw new Error(
+          `Row with ${idColumn}=${id} not found in ${tab}. ` +
+          (sample.length > 0 ? `Sample row IDs in the sheet: ${sample.join(', ')}. ` : '') +
+          `If the row was recently imported, refresh the page and retry.`,
+        );
+      }
 
       // Build the updated row values.
       const existingRow: Row = {};
@@ -404,10 +428,24 @@ export function SheetDataProvider({ children }: { children: ReactNode }) {
       if (keyIdx < 0) throw new Error(`ID column '${idColumn}' not found in ${tab}`);
 
       let targetRow = -1;
+      const normId = String(id).trim().toLowerCase();
       for (let i = 1; i < data.length; i++) {
         if ((data[i][keyIdx] ?? '') === id) { targetRow = i + 1; break; }
       }
-      if (targetRow < 0) throw new Error(`Row with ${idColumn}=${id} not found`);
+      if (targetRow < 0) {
+        for (let i = 1; i < data.length; i++) {
+          const cell = String(data[i][keyIdx] ?? '').trim().toLowerCase();
+          if (cell && cell === normId) { targetRow = i + 1; break; }
+        }
+      }
+      if (targetRow < 0) {
+        const sample = data.slice(1, 6).map(r => r[keyIdx] ?? '').filter(Boolean).slice(0, 3);
+        throw new Error(
+          `Row with ${idColumn}=${id} not found in ${tab}. ` +
+          (sample.length > 0 ? `Sample row IDs in the sheet: ${sample.join(', ')}. ` : '') +
+          `If the row was recently imported or merged, refresh and retry.`,
+        );
+      }
 
       await deleteSheetRow(sheetId, tab, targetRow);
       invalidate(key);

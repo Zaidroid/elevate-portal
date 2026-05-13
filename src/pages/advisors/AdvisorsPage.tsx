@@ -484,6 +484,35 @@ export function AdvisorsPage() {
     }
   };
 
+  // Resolve an advisor's CURRENT row by email. Used as a fallback when
+  // the cached advisor_id no longer matches the live sheet — this
+  // happens when the importer / dedupe re-keys a row between polls,
+  // leaving the UI holding a stale ID. Email is the most stable
+  // identifier on advisor rows (the form requires it).
+  const findCurrentAdvisorId = async (advisor: EnrichedAdvisor): Promise<string> => {
+    if (!advisor.email) return advisor.advisor_id;
+    await advHook.refresh();
+    const fresh = advHook.rows.find(r =>
+      (r.email || '').toLowerCase().trim() === advisor.email.toLowerCase().trim()
+    );
+    return fresh?.advisor_id || advisor.advisor_id;
+  };
+
+  // Wrap updateRow with one auto-retry on "Row not found". The provider
+  // already does tolerant lookup (trim + case-insensitive); this layer
+  // handles the genuinely-stale-ID case by re-fetching and looking up
+  // by email.
+  const updateAdvisorWithRetry = async (advisor: EnrichedAdvisor, updates: Partial<Advisor>) => {
+    try {
+      await advHook.updateRow(advisor.advisor_id, updates);
+    } catch (err) {
+      if (!/Row with .* not found/i.test((err as Error).message || '')) throw err;
+      const liveId = await findCurrentAdvisorId(advisor);
+      if (liveId === advisor.advisor_id) throw err; // refresh didn't help — give up
+      await advHook.updateRow(liveId, updates);
+    }
+  };
+
   // Inbox approve: advance pipeline_status through New → Acknowledged →
   // Allocated in one write, set assignee_email, stamp scoring fields,
   // log activity, optionally fire welcome-email mailto. Per Cohort 3
@@ -499,7 +528,7 @@ export function AdvisorsPage() {
       received_ack: today,
       decision_date: today,
     };
-    await advHook.updateRow(advisor.advisor_id, updates);
+    await updateAdvisorWithRetry(advisor, updates);
     if (sheetId) {
       await appendActivity(sheetId, tabActivity, {
         user_email: userEmail,
@@ -526,7 +555,7 @@ export function AdvisorsPage() {
       decision_date: today,
       tracker_notes: trackerNotes,
     };
-    await advHook.updateRow(advisor.advisor_id, updates);
+    await updateAdvisorWithRetry(advisor, updates);
     if (sheetId) {
       await appendActivity(sheetId, tabActivity, {
         user_email: userEmail,
