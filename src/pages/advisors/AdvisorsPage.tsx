@@ -17,6 +17,7 @@ import {
   CloudDownload,
   Download,
   ExternalLink,
+  Inbox as InboxIcon,
   Kanban as KanbanIcon,
   RefreshCw,
   Search,
@@ -67,6 +68,8 @@ import { AdvisorFollowUpsTab } from './AdvisorFollowUpsTab';
 import { AdvisorActivityTab } from './AdvisorActivityTab';
 import { AdvisorDetailDrawer } from './AdvisorDetailDrawer';
 import { AdvisorDashboard } from './AdvisorDashboard';
+import { AdvisorInboxTab } from './AdvisorInboxTab';
+import { AdvisorMatchingTab, buildAssignmentRowForMatch } from './AdvisorMatchingTab';
 import { importNewFormResponses, type ImportResult } from './importFromFormResponses';
 import { appendOutreachEntry, appendOutreachBatch, stampLastOutreach } from './outreachLog';
 import { writeAdvisorPipelineSnapshot } from './snapshotWriter';
@@ -140,7 +143,8 @@ export function AdvisorsPage() {
   // smart match against the cohort. Pulling Assignments too so each
   // CompanyLite carries the sub-intervention codes it's engaged in.
   const { rows: companyRows } = useModuleData<Record<string, string>>('companies', 'companies');
-  const { rows: companyAssignmentRows } = useModuleData<Record<string, string>>('companies', 'assignments');
+  const companiesAssignmentsHook = useModuleData<Record<string, string>>('companies', 'assignments');
+  const companyAssignmentRows = companiesAssignmentsHook.rows;
   const companies = useMemo<CompanyLite[]>(
     () => {
       // Pre-index assignments by company_id so the company lite can
@@ -177,7 +181,11 @@ export function AdvisorsPage() {
     [companyRows, companyAssignmentRows]
   );
 
-  const [tab, setTab] = useState<string>('dashboard');
+  // Default landing tab is the new Inbox surface (per Cohort 3 Playbook
+  // section 9.2.1 / Phase 1: application review + filtration). Admins
+  // hit "advisors" wanting to triage new submissions; everything else
+  // is downstream.
+  const [tab, setTab] = useState<string>('inbox');
   const [query, setQuery] = useState('');
   const [filterCountry, setFilterCountry] = useState<string>('');
   const [filterCategory, setFilterCategory] = useState<string>('');
@@ -273,6 +281,35 @@ export function AdvisorsPage() {
     () => active.filter(a => (a.pipeline_status || 'New') === 'New'),
     [active]
   );
+
+  // Inbox tab consumes the same `New`-only list. Renamed for clarity in
+  // the tab counter + tab content; the underlying memo is shared.
+  const inboxAdvisors = newEntries;
+
+  // Pool eligible to match against companies: any advisor not Rejected,
+  // Archived, or already Matched. Drives the Matching tab counter.
+  const matchablePool = useMemo(
+    () => active.filter(a => {
+      const s = (a.pipeline_status || '').toLowerCase();
+      return s !== 'rejected' && s !== 'archived' && s !== 'matched';
+    }),
+    [active],
+  );
+
+  // AM workload counter — feeds the Approve picker so admins assign
+  // to the lowest-loaded AM. "Active" = not Rejected / Archived /
+  // Matched (Matched is a steady-state end of pipeline).
+  const amLoadByEmail = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const a of enriched) {
+      const s = (a.pipeline_status || '').toLowerCase();
+      if (s === 'rejected' || s === 'archived' || s === '') continue;
+      const email = (a.assignee_email || '').toLowerCase().trim();
+      if (!email) continue;
+      m.set(email, (m.get(email) || 0) + 1);
+    }
+    return m;
+  }, [enriched]);
 
   // Saved-view predicate. When a saved view is set, it overrides individual
   // filter chips entirely — easier to reason about than mixing them.
@@ -435,6 +472,143 @@ export function AdvisorsPage() {
       } else {
         toast.error(`Move failed: ${msg}`);
       }
+    }
+  };
+
+  // Inbox approve: advance pipeline_status through New → Acknowledged →
+  // Allocated in one write, set assignee_email, stamp scoring fields,
+  // log activity, optionally fire welcome-email mailto. Per Cohort 3
+  // Playbook section 9.2.1 Phase 1: this is the "approve to pool"
+  // transition that hands the advisor off to an AM.
+  const handleInboxApprove = async (advisor: EnrichedAdvisor, amEmail: string, sendWelcomeEmail: boolean) => {
+    const scored = scoreFields(advisor as Advisor);
+    const today = new Date().toISOString().slice(0, 10);
+    const updates: Partial<Advisor> = {
+      ...scored,
+      pipeline_status: 'Allocated',
+      assignee_email: amEmail,
+      received_ack: today,
+      decision_date: today,
+    };
+    await advHook.updateRow(advisor.advisor_id, updates);
+    if (sheetId) {
+      await appendActivity(sheetId, tabActivity, {
+        user_email: userEmail,
+        advisor_id: advisor.advisor_id,
+        action: 'status_change',
+        field: 'pipeline_status',
+        old_value: advisor.pipeline_status || 'New',
+        new_value: 'Allocated',
+        details: `inbox_approve · assigned to ${amEmail}`,
+      });
+      await actHook.refresh();
+    }
+    if (sendWelcomeEmail && advisor.email) {
+      await sendInboxTemplate(advisor, 'welcome');
+    }
+  };
+
+  // Inbox decline: status -> Rejected, reason logged, optional decline letter.
+  const handleInboxDecline = async (advisor: EnrichedAdvisor, reason: string, sendDeclineLetter: boolean) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const trackerNotes = [advisor.tracker_notes, `Declined ${today}: ${reason}`].filter(Boolean).join('\n');
+    const updates: Partial<Advisor> = {
+      pipeline_status: 'Rejected',
+      decision_date: today,
+      tracker_notes: trackerNotes,
+    };
+    await advHook.updateRow(advisor.advisor_id, updates);
+    if (sheetId) {
+      await appendActivity(sheetId, tabActivity, {
+        user_email: userEmail,
+        advisor_id: advisor.advisor_id,
+        action: 'status_change',
+        field: 'pipeline_status',
+        old_value: advisor.pipeline_status || 'New',
+        new_value: 'Rejected',
+        details: `inbox_decline · ${reason}`,
+      });
+      await actHook.refresh();
+    }
+    if (sendDeclineLetter && advisor.email) {
+      // 'on_file' is the closest "we're not moving forward" template
+      // currently defined in emailTemplates.ts. The team can wire a
+      // dedicated 'decline' template later — this keeps the Inbox flow
+      // working today without expanding the template enum.
+      await sendInboxTemplate(advisor, 'on_file');
+    }
+  };
+
+  // Helper used by both inbox handlers: render the template, open the
+  // mailto, log outreach. Centralised so the two handlers stay short.
+  const sendInboxTemplate = async (advisor: EnrichedAdvisor, templateKey: TemplateKey) => {
+    const senderInfo = getUserByEmail(userEmail);
+    const tmpl = renderTemplate(templateKey, {
+      advisor: {
+        full_name: advisor.full_name || '',
+        email: advisor.email || '',
+        position: advisor.position || '',
+        employer: advisor.employer || '',
+        country: advisor.country || '',
+      },
+      sender: { email: userEmail, name: senderInfo?.name, title: senderInfo?.title },
+    });
+    window.open(templateMailto(tmpl), '_blank');
+    const sentAt = new Date().toISOString();
+    try {
+      await appendOutreachEntry(sheetId, {
+        advisor_id: advisor.advisor_id,
+        advisor_name: advisor.full_name || '',
+        email: advisor.email || '',
+        template_key: templateKey,
+        template_label: TEMPLATE_LABELS[templateKey],
+        sender_email: userEmail,
+        sent_at: sentAt,
+      });
+      await stampLastOutreach(advHook.updateRow as Parameters<typeof stampLastOutreach>[0], advisor.advisor_id, templateKey, sentAt);
+    } catch (err) {
+      console.warn('[advisors] outreach log failed', err);
+    }
+  };
+
+  // Match an advisor to a Cohort 3 company. Writes:
+  //   1. companies::assignments — a new row keyed by canonical pillar/sub
+  //      (resolved via buildAssignmentRowForMatch) so the Company profile's
+  //      Program tab picks the advisor up automatically.
+  //   2. advisors::advisors — updates pipeline_status, assignment_company_id,
+  //      assignment_intervention_type, assignment_status.
+  const handleCreateMatch = async (input: { advisor: EnrichedAdvisor; company: CompanyLite; subIntervention: string }) => {
+    const { advisor, company, subIntervention } = input;
+    const today = new Date().toISOString().slice(0, 10);
+    // 1) companies::assignments row
+    const row = buildAssignmentRowForMatch({
+      advisor: advisor as Advisor,
+      company,
+      subIntervention,
+      ownerEmail: advisor.assignee_email || userEmail,
+    });
+    await companiesAssignmentsHook.createRow(row);
+    // 2) advisor row
+    const advisorUpdates: Partial<Advisor> = {
+      pipeline_status: 'Matched',
+      assignment_company_id: company.company_id,
+      assignment_intervention_type: row.sub_intervention || subIntervention,
+      assignment_status: 'Proposed',
+      assignment_notes: `Matched to ${company.company_name} (${subIntervention}) on ${today}`,
+    };
+    await advHook.updateRow(advisor.advisor_id, advisorUpdates);
+    // 3) activity log entry (advisor side)
+    if (sheetId) {
+      await appendActivity(sheetId, tabActivity, {
+        user_email: userEmail,
+        advisor_id: advisor.advisor_id,
+        action: 'status_change',
+        field: 'pipeline_status',
+        old_value: advisor.pipeline_status || '',
+        new_value: 'Matched',
+        details: `Matched to ${company.company_name} (${subIntervention})`,
+      });
+      await actHook.refresh();
     }
   };
 
@@ -1060,6 +1234,10 @@ export function AdvisorsPage() {
     // first so opening the page lands on the summary; Pipeline next as the
     // primary triage surface; Roster as the searchable index; Follow-ups
     // as the side workload; Activity as the audit trail.
+    // Inbox is the headline triage surface — only `New` form submissions
+    // show here, sorted by Stage 1 score, with one-click Approve/Decline.
+    { value: 'inbox', label: 'Inbox', icon: <InboxIcon className="h-4 w-4" />, count: inboxAdvisors.length },
+    { value: 'matching', label: 'Matching', icon: <Sparkles className="h-4 w-4" />, count: matchablePool.length },
     { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
     { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: active.length },
     { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: filtered.length },
@@ -1256,6 +1434,30 @@ export function AdvisorsPage() {
             description="Fetching from Google Sheets."
           />
         </Card>
+      )}
+
+      {tab === 'inbox' && (
+        <AdvisorInboxTab
+          advisors={inboxAdvisors}
+          amLoadByEmail={amLoadByEmail}
+          canEdit={canDoIntake}
+          userEmail={userEmail}
+          onApprove={handleInboxApprove}
+          onDecline={handleInboxDecline}
+          onOpenDetail={a => setSelectedId(a.advisor_id)}
+        />
+      )}
+
+      {tab === 'matching' && (
+        <AdvisorMatchingTab
+          pool={matchablePool}
+          companies={companies}
+          assignments={companyAssignmentRows}
+          canEdit={canEdit}
+          userEmail={userEmail}
+          onCreateMatch={handleCreateMatch}
+          onOpenAdvisor={a => setSelectedId(a.advisor_id)}
+        />
       )}
 
       {tab === 'pipeline' && (
