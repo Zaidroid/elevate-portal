@@ -167,12 +167,17 @@ def _build_advisors(ws):
     write_header(ws, ADVISORS_HEADERS)
     freeze_header(ws)
 
-    # advisor_id: ADV-E3-0001 mints when full_name (col C) is entered.
-    for row in range(2, ADVISORS_LAST_ROW + 1):
-        ws.cell(
-            row=row, column=1,
-            value=f'=IF(C{row}<>"", "ADV-E3-"&TEXT(ROW()-1, "0000"), "")',
-        )
+    # advisor_id is intentionally NOT auto-computed on the sheet anymore.
+    # The original formula `=IF(C{row}<>"", "ADV-E3-"&TEXT(ROW()-1,"0000"), "")`
+    # silently overwrote the importer's stable email+timestamp IDs, which
+    # broke every portal updateRow call ("Row not found" because the
+    # cached ID didn't match the formula-computed one). The portal's
+    # importFromFormResponses.ts is now the sole minter of advisor_id
+    # (pattern: adv-<email-slug>-<YYYYMMDDHHMMSS>), and the column is
+    # left blank for openpyxl to mark editable. Existing rows that
+    # carry the legacy ADV-E3-NNNN format still work; the portal's
+    # updateRow uses tolerant + email-fallback lookup.
+    pass
 
     # Validators
     add_dropdown(ws, "I", '"1,2,3,4,5"', last_row=ADVISORS_LAST_ROW)   # tech_rating

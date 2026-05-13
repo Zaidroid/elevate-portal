@@ -74,6 +74,7 @@ import { writeAdvisorPipelineSnapshot } from './snapshotWriter';
 import { ALL_TEMPLATE_KEYS, renderTemplate, templateMailto, TEMPLATE_LABELS, type TemplateKey } from './emailTemplates';
 import { deduplicateAdvisors } from './deduplicateAdvisors';
 import { recordRun } from '../../lib/observability/last-run';
+import { fetchRange, updateRange } from '../../lib/sheets/client';
 
 // Best-effort year extractor. Handles ISO ('2026-01-15...'), US-locale
 // ('1/15/2026'), and 'Jan 15, 2026'-ish forms. Returns 0 when nothing
@@ -484,32 +485,50 @@ export function AdvisorsPage() {
     }
   };
 
-  // Resolve an advisor's CURRENT row by email. Used as a fallback when
-  // the cached advisor_id no longer matches the live sheet — this
-  // happens when the importer / dedupe re-keys a row between polls,
-  // leaving the UI holding a stale ID. Email is the most stable
-  // identifier on advisor rows (the form requires it).
-  const findCurrentAdvisorId = async (advisor: EnrichedAdvisor): Promise<string> => {
-    if (!advisor.email) return advisor.advisor_id;
-    await advHook.refresh();
-    const fresh = advHook.rows.find(r =>
-      (r.email || '').toLowerCase().trim() === advisor.email.toLowerCase().trim()
-    );
-    return fresh?.advisor_id || advisor.advisor_id;
-  };
-
-  // Wrap updateRow with one auto-retry on "Row not found". The provider
-  // already does tolerant lookup (trim + case-insensitive); this layer
-  // handles the genuinely-stale-ID case by re-fetching and looking up
-  // by email.
+  // Wrap updateRow with a fallback that bypasses the React cache when
+  // the cached advisor_id has drifted from the live sheet — this
+  // happens when the Advisors tab's column-A formula
+  //   =IF(C{row}<>"", "ADV-E3-"&TEXT(ROW()-1,"0000"), "")
+  // wins over the importer's literal advisor_id between poll cycles.
+  // The cache shows `adv-<email>-<ts>`; the live sheet shows
+  // `ADV-E3-NNNN`. The hook-based retry path can't see through React
+  // state delay, so we go directly to the sheet API and look up the
+  // row by email (the most stable column).
   const updateAdvisorWithRetry = async (advisor: EnrichedAdvisor, updates: Partial<Advisor>) => {
     try {
       await advHook.updateRow(advisor.advisor_id, updates);
+      return;
     } catch (err) {
-      if (!/Row with .* not found/i.test((err as Error).message || '')) throw err;
-      const liveId = await findCurrentAdvisorId(advisor);
-      if (liveId === advisor.advisor_id) throw err; // refresh didn't help — give up
-      await advHook.updateRow(liveId, updates);
+      const msg = (err as Error).message || '';
+      if (!/Row with .* not found/i.test(msg)) throw err;
+      if (!advisor.email || !sheetId) throw err;
+      // Direct fetch — bypass useModuleData's cached snapshot entirely.
+      const data = await fetchRange(sheetId, `${tabAdvisors}!A:ZZ`);
+      if (data.length === 0) throw err;
+      const headers = data[0].map(h => h?.trim() ?? '');
+      const emailIdx = headers.indexOf('email');
+      if (emailIdx < 0) throw err;
+      const targetEmail = advisor.email.toLowerCase().trim();
+      let targetRow = -1;
+      for (let i = 1; i < data.length; i++) {
+        if ((data[i][emailIdx] || '').toLowerCase().trim() === targetEmail) {
+          targetRow = i + 1;
+          break;
+        }
+      }
+      if (targetRow < 0) throw err;
+      // Build the merged row in canonical header order and write it.
+      const merged: Record<string, string> = {};
+      headers.forEach((h, i) => { merged[h] = data[targetRow - 1][i] ?? ''; });
+      Object.entries(updates).forEach(([k, v]) => {
+        if (v !== undefined) merged[k] = String(v);
+      });
+      merged.updated_at = new Date().toISOString();
+      const rowValues = [headers.map(h => merged[h] ?? '')];
+      await updateRange(sheetId, `${tabAdvisors}!A${targetRow}`, rowValues);
+      // Refresh the hook so the UI catches up; we just sidestepped its
+      // own cache invalidation.
+      await advHook.refresh();
     }
   };
 
