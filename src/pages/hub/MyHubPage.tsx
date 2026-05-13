@@ -21,6 +21,7 @@ import { canonicalCohortName, COHORT3_ALIASES } from '../../config/cohort3Aliase
 import { computeAlerts, type Alert } from '../../lib/alerts/index';
 import { keepCompaniesSection } from '../../lib/sheets/sections';
 import { aggregateByCity, aggregateBySub } from '../../data/aggregations';
+import { dedupeAssignmentRowsForRead } from '../../lib/maintenance/dedupeAssignments';
 import {
   Badge,
   Button,
@@ -133,13 +134,21 @@ export function MyHubPage() {
     return s;
   }, [cohortRows]);
 
+  // Runtime dedup — collapses duplicate (company, canonical-intervention)
+  // rows so MyHub counts and rollups don't double-count interventions
+  // that exist as two rows in the sheet.
+  const dedupedAssignments = useMemo(
+    () => dedupeAssignmentRowsForRead(assignments.rows),
+    [assignments.rows],
+  );
+
   const myAssignments = useMemo(
-    () => assignments.rows.filter(a => {
+    () => dedupedAssignments.filter(a => {
       if (!cohortCompanyIds.has(a.company_id)) return false;
       if (view.scope === 'all') return true;
       return (a.owner_email || '').toLowerCase() === me || myCompanyIds.has(a.company_id);
     }),
-    [assignments.rows, view.scope, me, myCompanyIds, cohortCompanyIds],
+    [dedupedAssignments, view.scope, me, myCompanyIds, cohortCompanyIds],
   );
 
   // Alerts scoped first to cohort 3 (drops noise from pre-cohort PRs /
@@ -183,17 +192,19 @@ export function MyHubPage() {
     });
   }, [activity.rows, view.scope, myCompanyIds, cohortCompanyIds]);
 
-  // Per-company aggregates for the My Companies table.
+  // Per-company aggregates for the My Companies table. Uses deduped
+  // assignments so a company with a duplicate-row C-Suite shows ONE
+  // C-Suite badge, not two.
   const asgByCompany = useMemo(() => {
     const m = new Map<string, Assignment[]>();
-    for (const a of assignments.rows) {
+    for (const a of dedupedAssignments) {
       if (!a.company_id) continue;
       const arr = m.get(a.company_id) ?? [];
       arr.push(a);
       m.set(a.company_id, arr);
     }
     return m;
-  }, [assignments.rows]);
+  }, [dedupedAssignments]);
 
   // Total committed budget across my pool.
   const myBudget = useMemo(() => {

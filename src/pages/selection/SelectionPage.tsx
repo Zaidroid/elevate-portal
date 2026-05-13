@@ -14,8 +14,10 @@
 //   Activity — selection-flow audit log
 //
 // Multi-user safety: presence heartbeat fires while the page is open
-// so the team can see who's on the same company. SheetConflictError
-// (already in useSheetDoc) surfaces a banner via the form's catch.
+// so the team can see who's on the same company. (Note: a previous
+// SheetConflictError throw lived in useSheetDoc — that hook was deleted
+// May 2026; the design notes for re-introducing conflict detection
+// paired with UX live in the SheetDataProvider doc-block.)
 
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -46,7 +48,8 @@ import {
 } from '../../lib/ui';
 import type { TabItem, Tone } from '../../lib/ui';
 import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
-import { COHORT3_BUDGET_2026, COHORT3_BUDGET_TOTAL_USD, PILLARS, pillarFor, resolveIntervention } from '../../config/interventions';
+import { COHORT3_BUDGET_2026, COHORT3_BUDGET_TOTAL_USD, PILLARS, pillarFor, resolveIntervention, canonicalAssignmentKey } from '../../config/interventions';
+import { mintAssignmentId } from '../../lib/ids/assignments';
 import { INTERVIEWED_NAMES, isInterviewed } from '../companies/interviewedSource';
 import type { ReviewableCompany, SelectionContext } from './ReviewQueueTab';
 import type { FinalLockArgs } from './FinalCohortTab';
@@ -387,17 +390,21 @@ export function SelectionPage() {
         profile_manager_email: args.pmEmail,
       } as Master);
     }
-    const now = new Date().toISOString();
-    const existingPairs = new Set(
+    // Dedup by CANONICAL key so a legacy row (intervention_type='C-Suite')
+    // and a new row (intervention_type='MA', sub_intervention='C-Suite')
+    // collide instead of both surviving. Without this, every finalize
+    // created a phantom second-row of the same intervention.
+    const existingCanonical = new Set(
       assignments.rows
         .filter(a => a.company_id === args.companyId)
-        .map(a => `${a.intervention_type}::${a.sub_intervention || ''}`),
+        .map(a => canonicalAssignmentKey({ intervention_type: a.intervention_type, sub_intervention: a.sub_intervention })),
     );
     for (const i of args.interventions) {
-      const key = `${i.pillar}::${i.sub || ''}`;
-      if (existingPairs.has(key)) continue;
+      const key = canonicalAssignmentKey({ intervention_type: i.pillar, sub_intervention: i.sub });
+      if (existingCanonical.has(key)) continue;
+      existingCanonical.add(key);
       await assignments.createRow({
-        assignment_id: `asn-${args.companyId}-${i.pillar}-${i.sub || 'all'}-${now}`,
+        assignment_id: mintAssignmentId({ companyId: args.companyId, intervention_type: i.pillar, sub_intervention: i.sub }),
         company_id: args.companyId,
         intervention_type: i.pillar,
         sub_intervention: i.sub || '',
@@ -472,8 +479,22 @@ export function SelectionPage() {
       }
     }
 
-    // Adds.
+    // Adds — dedup against existing assignments by canonical key so the
+    // Stage 3 drawer can't accidentally write a second copy of the same
+    // intervention. This was the root cause of "AI Pilot has two C-Suite"
+    // (one legacy 'C-Suite::', one canonical 'MA::C-Suite').
+    const existingCanonical = new Set(
+      assignments.rows
+        .filter(a => a.company_id === companyId)
+        .map(a => canonicalAssignmentKey({ intervention_type: a.intervention_type, sub_intervention: a.sub_intervention })),
+    );
     for (const a of newAssignments) {
+      const key = canonicalAssignmentKey({ intervention_type: a.intervention_type, sub_intervention: a.sub_intervention });
+      if (existingCanonical.has(key)) {
+        console.warn('[stage3] skipped duplicate intervention add:', companyId, key);
+        continue;
+      }
+      existingCanonical.add(key);
       await assignments.createRow(a as unknown as Record<string, string | undefined>);
     }
     // Removes.
@@ -540,6 +561,14 @@ export function SelectionPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-4">
+      {cohortMode && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+          <span className="font-semibold">Selection archived.</span>
+          <span className="text-amber-800 dark:text-amber-200">
+            Cohort 3 is committed. Operational changes (status, AM, interventions) live in the Companies module from here on; this view is read-only history.
+          </span>
+        </div>
+      )}
       <PageHeader
         title="Selection · Cohort 3"
         subtitle={cohortMode ? 'Cohort committed. Stage 3 is the live view; Stage 1/2 are archived under "Show history".' : 'Pre-cohort selection workflow.'}
@@ -2410,7 +2439,7 @@ function parseTargetsTab(rows: Record<string, string>[]): TargetMap {
   // Each row in `rows` is keyed by its first-row column header. The
   // Dutch table starts at row 1 (header) so its data rows show up
   // here; the SIDA section starts at row 12 and uses different column
-  // names — but since useSheetDoc parses ONE header row, only Dutch
+  // names — but since the data hook parses ONE header row, only Dutch
   // headers will be the keys. SIDA rows show up with mostly-empty
   // header keys but their indicator text lands in the first cell.
   //

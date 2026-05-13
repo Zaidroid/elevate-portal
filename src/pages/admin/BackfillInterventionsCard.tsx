@@ -63,9 +63,12 @@ type Plan = {
   alreadyOnConferences: string[];
 };
 
+import { mintAssignmentId as canonicalMint } from '../../lib/ids/assignments';
+
 function mintAssignmentId(companyId: string): string {
-  // Match the Stage-3 writer's id shape so the rows look the same.
-  return `asn-${companyId}-MA-Conferences-${Date.now()}`;
+  // Conferences-specific helper; delegates to the canonical minter so
+  // the id shape stays consistent across every writer.
+  return canonicalMint({ companyId, intervention_type: 'MA', sub_intervention: 'Conferences' });
 }
 
 export function BackfillInterventionsCard() {

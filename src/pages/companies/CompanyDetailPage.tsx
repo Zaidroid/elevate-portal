@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
+  AlertTriangle,
   ArrowLeft,
   Building2,
   ClipboardList,
@@ -28,7 +29,8 @@ import { keepCompaniesSection } from '../../lib/sheets/sections';
 import { canonicalCohortName } from '../../config/cohort3Aliases';
 import { getProfileManagers, displayName } from '../../config/team';
 import { derivePRFields } from '../../lib/procurement/compute';
-import { INTERVENTION_TYPES, CORE_PILLARS, pillarFor } from '../../config/interventions';
+import { INTERVENTION_TYPES, CORE_PILLARS, pillarFor, canonicalAssignmentKey } from '../../config/interventions';
+import { dedupeAssignmentRowsForRead } from '../../lib/maintenance/dedupeAssignments';
 import {
   Badge,
   Breadcrumbs,
@@ -119,19 +121,45 @@ export function CompanyDetailPage() {
   const confs    = useModuleData<ConferenceRow>('conferences', 'tracker');
   const docs     = useModuleData<Doc>('docs', 'agreements');
 
+  // Selection-workbook reads — ARCHIVE only. Cohort 3 selection is
+  // complete; these tabs no longer mutate. SheetDataProvider batches
+  // them all into one batchGet per poll cycle, so the runtime cost is
+  // one HTTP call per 2 minutes regardless of how many tabs we read.
   const needs      = useModuleData<SelectionRow>('selection', 'companyNeeds');
   const score      = useModuleData<SelectionRow>('selection', 'scoringMatrix');
   const interviews = useModuleData<SelectionRow>('selection', 'interviewAssessments');
   const discussion = useModuleData<SelectionRow>('selection', 'interviewDiscussion');
   const ebAssess   = useModuleData<SelectionRow>('selection', 'ebAssessments');
 
-  // Find Master row first — by route id, then by canonical name match
-  // against the route id (in case the URL came from an external link
-  // using the canonical name).
+  // Find Master row by ID. Falls back to canonical-name match so deep
+  // links built from a canonical cohort name (e.g. 'co-ai-pilot') still
+  // resolve to whichever company_id the master sheet actually uses —
+  // without this fallback, masterKey is '' and EVERY filter by
+  // company_id (contacts, reviews, assignments, preDecisions, comments,
+  // activity) returns ZERO rows, making the profile look empty.
   const masterRow = useMemo(() => {
-    const byId = companies.rows.find(r => r.company_id === id);
+    // Short-circuit early: no URL id → nothing to look up. Avoids three
+    // wasted O(n) scans of companies.rows for an unreachable route.
+    const trimmedId = (id || '').trim();
+    if (!trimmedId) return undefined;
+    // 1. Exact company_id match (the common path).
+    const byId = companies.rows.find(r => r.company_id === trimmedId);
     if (byId) return byId;
-    return undefined;
+    // 2. Canonical-cohort match (URL might be a slug like 'co-ai-pilot').
+    const idCanon = canonicalCohortName(trimmedId);
+    if (idCanon) {
+      const byCanon = companies.rows.find(
+        r => canonicalCohortName(r.company_name || '') === idCanon
+      );
+      if (byCanon) return byCanon;
+    }
+    // 3. Case-insensitive name match (URL might literally be the
+    // company_name).
+    const idLower = trimmedId.toLowerCase();
+    const byName = companies.rows.find(
+      r => (r.company_name || '').toLowerCase().trim() === idLower
+    );
+    return byName;
   }, [companies.rows, id]);
 
   // Find applicant data: first by numeric route id (legacy applicant
@@ -202,9 +230,17 @@ export function CompanyDetailPage() {
     () => contacts.rows.filter(c => masterKey && c.company_id === masterKey),
     [contacts.rows, masterKey]
   );
-  const companyAssignments = useMemo(
+  // Raw filtered rows for the Program tab (it groups by canonical and
+  // surfaces duplicates inline). All other consumers — count badges,
+  // budget rollups, AssignInterventionDrawer pre-check — use the
+  // deduped projection so they don't double-count.
+  const companyAssignmentsRaw = useMemo(
     () => assignments.rows.filter(a => masterKey && a.company_id === masterKey),
     [assignments.rows, masterKey]
+  );
+  const companyAssignments = useMemo(
+    () => dedupeAssignmentRowsForRead(companyAssignmentsRaw),
+    [companyAssignmentsRaw]
   );
   const assignedAdvisors = useMemo(
     () => advisors.rows.filter(a => masterKey && (a.assignment_company_id || '') === masterKey),
@@ -503,7 +539,7 @@ export function CompanyDetailPage() {
         )}
         {tab === 'program' && (
           <ProgramTab
-            assignments={companyAssignments}
+            assignments={companyAssignmentsRaw}
             prs={companyPRs}
             payments={companyPayments}
             confs={companyConfs}
@@ -562,9 +598,31 @@ export function CompanyDetailPage() {
         companyId={masterKey}
         companyName={company.company_name || ''}
         onCreate={async row => {
-          await assignments.createRow(row);
-          toast.success('Intervention assigned', `${row.intervention_type} added to ${company.company_name}.`);
-          setQuickAction(null);
+          // Canonical-equivalent pre-check: refuse to create a second
+          // assignment for the same canonical intervention. Without
+          // this, a legacy 'C-Suite' row + a canonical 'MA / C-Suite'
+          // row coexist and surface as a duplicate Program-tab card.
+          const incomingKey = canonicalAssignmentKey({
+            intervention_type: row.intervention_type,
+            sub_intervention: row.sub_intervention,
+          });
+          const existing = companyAssignments.find(a =>
+            canonicalAssignmentKey({ intervention_type: a.intervention_type, sub_intervention: a.sub_intervention }) === incomingKey
+          );
+          if (existing) {
+            toast.error(
+              'Already assigned',
+              `${company.company_name} already has ${row.sub_intervention || row.intervention_type} (${existing.assignment_id}). Open that row to edit instead.`,
+            );
+            return;
+          }
+          try {
+            await assignments.createRow(row);
+            toast.success('Intervention assigned', `${row.sub_intervention || row.intervention_type} added to ${company.company_name}.`);
+            setQuickAction(null);
+          } catch (err) {
+            toast.error('Assign failed', (err as Error).message);
+          }
         }}
       />
 
@@ -1949,6 +2007,11 @@ type ProgramGroup = {
   intervention: string;
   subIntervention: string;
   assignment: Assignment | undefined;
+  // All assignment rows that canonical-resolve to the same intervention.
+  // When length > 1 the group has duplicate rows in the master sheet
+  // (e.g. one with legacy intervention_type='C-Suite' and one with
+  // canonical intervention_type='MA' + sub_intervention='C-Suite').
+  duplicateAssignments: Assignment[];
   events: ProgramEvent[];
   budgetUsd: number;
   paidUsd: number;
@@ -1974,10 +2037,13 @@ function ProgramTab({
   const groups = useMemo<ProgramGroup[]>(() => {
     const byKey = new Map<string, ProgramGroup>();
 
+    // Group by canonical intervention key — collapses legacy + canonical
+    // duplicates (e.g. `intervention_type='C-Suite'` and
+    // `intervention_type='MA' + sub_intervention='C-Suite'`) onto one
+    // card. Each underlying row is kept in `duplicateAssignments` so the
+    // UI can show a warning and offer to merge / delete.
     const ensure = (interventionType: string, sub: string, assignment?: Assignment): ProgramGroup => {
-      const key = assignment?.assignment_id
-        ? `A:${assignment.assignment_id}`
-        : `I:${interventionType}|${sub}`.toLowerCase();
+      const key = canonicalAssignmentKey({ intervention_type: interventionType, sub_intervention: sub });
       let g = byKey.get(key);
       if (!g) {
         g = {
@@ -1985,11 +2051,35 @@ function ProgramTab({
           intervention: interventionType || '(unspecified)',
           subIntervention: sub,
           assignment,
+          duplicateAssignments: [],
           events: [],
           budgetUsd: parseFloat(assignment?.budget_usd || '0') || 0,
           paidUsd: 0,
         };
         byKey.set(key, g);
+      } else if (assignment && assignment.assignment_id) {
+        // Already have a group; remember this extra assignment so the UI
+        // can flag the duplicate. Promote the row with the most
+        // information (budget > status > older) to be the "primary".
+        const existing = g.assignment;
+        if (!existing) {
+          g.assignment = assignment;
+          g.budgetUsd = parseFloat(assignment.budget_usd || '0') || 0;
+        } else if (assignment.assignment_id !== existing.assignment_id) {
+          const incomingBudget = parseFloat(assignment.budget_usd || '0') || 0;
+          const existingBudget = g.budgetUsd;
+          // Surface BOTH rows. The "primary" is whichever has the
+          // larger budget (or, if tied, the earlier start_date / older
+          // assignment_id) — that's the row whose data the team
+          // actually populated.
+          if (incomingBudget > existingBudget) {
+            g.duplicateAssignments.push(existing);
+            g.assignment = assignment;
+            g.budgetUsd = incomingBudget;
+          } else {
+            g.duplicateAssignments.push(assignment);
+          }
+        }
       }
       return g;
     };
@@ -2129,6 +2219,13 @@ function ProgramGroupCard({
               {group.assignment?.fund_code && ` · Fund ${group.assignment.fund_code}`}
               {group.assignment?.status && ` · ${group.assignment.status}`}
             </div>
+            {group.duplicateAssignments.length > 0 && (
+              <div className="mt-1 inline-flex items-center gap-1 rounded-md bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-800 dark:bg-amber-900/50 dark:text-amber-200"
+                   title={`This intervention has ${group.duplicateAssignments.length + 1} duplicate rows in the data — same canonical intervention, different IDs: ${[group.assignment?.assignment_id, ...group.duplicateAssignments.map(d => d.assignment_id)].filter(Boolean).join(', ')}. Display is collapsed visually, but counts elsewhere in the portal (activity feed, dashboard rollups) still see all rows. Run Admin → Lookups → Duplicate assignments to merge + delete them.`}>
+                <AlertTriangle className="h-3 w-3" />
+                {group.duplicateAssignments.length} duplicate row{group.duplicateAssignments.length === 1 ? '' : 's'} pending cleanup
+              </div>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-4 text-right">

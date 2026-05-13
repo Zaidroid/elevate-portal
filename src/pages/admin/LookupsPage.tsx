@@ -17,9 +17,11 @@ import { getSheetId, getTab } from '../../config/sheets';
 import type { ModuleKey } from '../../config/sheets';
 import { ensureHumanFriendlyTab } from '../../lib/sheets/output-formatting';
 import { AutoMergeCohortCard } from './AutoMergeCohortCard';
+import { DedupeAssignmentsCard } from './DedupeAssignmentsCard';
 import { RebuildDashboardsCard } from './RebuildDashboardsCard';
 import { BackfillCohortFieldsCard } from './BackfillCohortFieldsCard';
 import { BackfillInterventionsCard } from './BackfillInterventionsCard';
+import { Selection2026Card } from './Selection2026Card';
 
 type LookupCategory = {
   module: ModuleKey;
@@ -198,7 +200,9 @@ export function LookupsPage() {
       <BackfillCohortFieldsCard />
       <BackfillInterventionsCard />
       <RebuildDashboardsCard />
+      <Selection2026Card />
       <AutoMergeCohortCard />
+      <DedupeAssignmentsCard />
       <ReformatOutputTabsCard />
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">

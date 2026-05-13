@@ -19,6 +19,19 @@ type ComputeInputs = {
   payments: Array<Record<string, string>>;
 };
 
+import { resolveIntervention } from '../../config/interventions';
+
+// True if a row resolves (via canonical taxonomy) to the named sub-intervention.
+// Prefer this over `intervention_type === '<literal>'` so legacy spellings
+// (MA-Bridge, Bridge, MA-ElevateBridge, Conference) don't silently miss.
+function resolvesToSub(row: Record<string, string>, subName: string): boolean {
+  const candidates = [row.intervention_type, row.sub_intervention].filter(Boolean) as string[];
+  for (const c of candidates) {
+    if (resolveIntervention(c)?.sub === subName) return true;
+  }
+  return false;
+}
+
 // Map of source-text phrase fragments → computation. First match wins.
 type Rule = {
   match: RegExp;
@@ -64,10 +77,8 @@ const RULES: Rule[] = [
   },
   {
     match: /conference|travel/i,
-    hint: 'COUNT(Assignments WHERE intervention_type = Conferences)',
-    compute: ({ assignments }) => assignments.filter(a =>
-      (a.intervention_type || '') === 'Conferences'
-    ).length,
+    hint: 'COUNT(Assignments WHERE intervention resolves to Conferences)',
+    compute: ({ assignments }) => assignments.filter(a => resolvesToSub(a, 'Conferences')).length,
   },
   {
     match: /spend|burn|paid|disbursed/i,
@@ -78,10 +89,8 @@ const RULES: Rule[] = [
   },
   {
     match: /freelancer|elevatebridge/i,
-    hint: 'COUNT(Assignments WHERE intervention_type = MA-ElevateBridge)',
-    compute: ({ assignments }) => assignments.filter(a =>
-      (a.intervention_type || '') === 'MA-ElevateBridge'
-    ).length,
+    hint: 'COUNT(Assignments WHERE intervention resolves to ElevateBridge)',
+    compute: ({ assignments }) => assignments.filter(a => resolvesToSub(a, 'ElevateBridge')).length,
   },
 ];
 

@@ -3,7 +3,7 @@
 // dots, review consensus, status). Expanded mode shows contact + recent
 // comments + quick actions: change PM, add intervention, post comment, jump
 // to detail. All actions delegate up via callbacks so the parent can route
-// the writes through useSheetDoc / lib/sheets/client.
+// the writes through useModuleData / lib/sheets/client.
 
 import { useState } from 'react';
 import { ChevronDown, ChevronUp, ExternalLink, MessageCircle, Plus, UserCircle2 } from 'lucide-react';

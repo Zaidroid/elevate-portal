@@ -25,6 +25,7 @@ import type {
   FilterDrawerValues, FilterFieldDef, TabItem, Tone,
 } from '../../lib/ui';
 import { computeIndicator, parseTarget } from '../../lib/logframes/compute';
+import { dedupeAssignmentRowsForRead } from '../../lib/maintenance/dedupeAssignments';
 
 type Row = Record<string, string>;
 type FundView = 'dutch' | 'sida';
@@ -83,8 +84,11 @@ export function LogframesPage() {
 
   // Live data joined for auto-computed actuals.
   const { rows: companies }   = useModuleData<Row>('companies', 'companies');
-  const { rows: assignments } = useModuleData<Row>('companies', 'assignments');
+  const { rows: assignmentsRaw } = useModuleData<Row>('companies', 'assignments');
   const { rows: payments }    = useModuleData<Row>('payments',  'payments');
+  // Runtime dedup so indicator actuals don't double-count duplicate
+  // intervention rows.
+  const assignments = useMemo(() => dedupeAssignmentRowsForRead(assignmentsRaw), [assignmentsRaw]);
 
   const inputs = useMemo(() => ({ companies, assignments, payments }), [companies, assignments, payments]);
 

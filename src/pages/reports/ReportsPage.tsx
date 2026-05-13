@@ -11,12 +11,16 @@ import { getSheetId } from '../../config/sheets';
 import { exportAllDonorReports } from '../../lib/export/donorExport';
 import type { Company, Assignment, PR, Payment, Conference, ConferenceTrackerRow, Agreement } from '../../data/types';
 import { keepCompaniesSection } from '../../lib/sheets/sections';
+import { dedupeAssignmentRowsForRead } from '../../lib/maintenance/dedupeAssignments';
 
 type Row = Record<string, string>;
 
 export function ReportsPage() {
   const { rows: companies }   = useModuleData<Row>('companies',   'companies');
-  const { rows: assignments } = useModuleData<Row>('companies',   'assignments');
+  const { rows: assignmentsRaw } = useModuleData<Row>('companies',   'assignments');
+  // Runtime dedup so the donor report + per-pillar rollups don't
+  // double-count interventions that have duplicate rows in the sheet.
+  const assignments = useMemo(() => dedupeAssignmentRowsForRead(assignmentsRaw), [assignmentsRaw]);
   const { rows: payments }    = useModuleData<Row>('payments',    'payments');
   const q1Hook = useModuleData<Row>('procurement', 'q1');
   const q2Hook = useModuleData<Row>('procurement', 'q2');

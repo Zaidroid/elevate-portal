@@ -29,9 +29,10 @@ import type { Tone } from '../lib/ui';
 import { useModuleData } from '../data/useModuleData';
 import type { Company, Assignment, PR, Payment, Agreement } from '../data/types';
 import { PersonalGreeting } from '../lib/greeting';
-import { canonicalCohortName, COHORT3_ALIASES } from '../config/cohort3Aliases';
+import { COHORT3_ALIASES, isCohort3 } from '../config/cohort3Aliases';
 import { COHORT3_BUDGET_TOTAL_USD } from '../config/interventions';
 import { aggregateByAm, aggregateByCity, aggregateByDonor, aggregateBySub } from '../data/aggregations';
+import { dedupeAssignmentRowsForRead } from '../lib/maintenance/dedupeAssignments';
 import type { AmAggregation, CityAggregation, DonorAggregation, SubAggregation } from '../data/aggregations';
 import { PILLARS as PILLARS_FOR_DIAG } from '../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from './companies/interviewedSource';
@@ -77,10 +78,6 @@ function effectiveStatus(c: Company): string {
   return sheetStatus || 'Active';
 }
 
-function inCohort3(c: Company): boolean {
-  return canonicalCohortName(c.company_name || '') !== null;
-}
-
 function fmtUsd(n: number): string {
   if (!Number.isFinite(n)) return '—';
   return `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
@@ -118,7 +115,7 @@ export function HomePage() {
   ], [q1Hook.rows, q1Hook.headers, q2Hook.rows, q2Hook.headers, q3Hook.rows, q3Hook.headers, q4Hook.rows, q4Hook.headers]);
 
   // Cohort 3 anchor: the 41 companies whose name resolves to a canonical.
-  const cohort = useMemo(() => master.rows.filter(inCohort3), [master.rows]);
+  const cohort = useMemo(() => master.rows.filter(isCohort3), [master.rows]);
   const cohortIds = useMemo(() => new Set(cohort.map(c => c.company_id)), [cohort]);
   const cohortSize = COHORT3_ALIASES.length; // 41
   const interviewedSize = INTERVIEWED_NAMES.size; // 52
@@ -135,21 +132,32 @@ export function HomePage() {
   const withdrawnCount = statusCount['Withdrawn'] ?? 0;
   const activeCount = cohortSize - withdrawnCount;
 
+  // Runtime dedup: collapse duplicate (company, canonical-intervention)
+  // rows so the home rollups don't double-count interventions that
+  // exist as two rows in the sheet (e.g. one legacy 'C-Suite' row + one
+  // canonical 'MA / C-Suite' row for the same company). The admin
+  // Dedupe action physically deletes the orphan rows; this keeps the
+  // displayed numbers honest until that runs.
+  const dedupedAssignments = useMemo(
+    () => dedupeAssignmentRowsForRead(assignments.rows),
+    [assignments.rows],
+  );
+
   // Centralised cohort 3 rollups — same helpers used by MyHubPage and the
   // dashboard rebuilder so a number can never appear differently in two
   // places. See src/data/aggregations.ts.
-  const amRollup: AmAggregation[]    = useMemo(() => aggregateByAm(cohort, assignments.rows, payments.rows, allPRs),
-                                                [cohort, assignments.rows, payments.rows, allPRs]);
-  const cityRollup: CityAggregation[] = useMemo(() => aggregateByCity(cohort, assignments.rows, payments.rows),
-                                                [cohort, assignments.rows, payments.rows]);
-  const subRollup: SubAggregation[]   = useMemo(() => aggregateBySub(cohort, assignments.rows, payments.rows),
-                                                [cohort, assignments.rows, payments.rows]);
-  const donorRollup: DonorAggregation[] = useMemo(() => aggregateByDonor(cohort, assignments.rows, payments.rows),
-                                                  [cohort, assignments.rows, payments.rows]);
+  const amRollup: AmAggregation[]    = useMemo(() => aggregateByAm(cohort, dedupedAssignments, payments.rows, allPRs),
+                                                [cohort, dedupedAssignments, payments.rows, allPRs]);
+  const cityRollup: CityAggregation[] = useMemo(() => aggregateByCity(cohort, dedupedAssignments, payments.rows),
+                                                [cohort, dedupedAssignments, payments.rows]);
+  const subRollup: SubAggregation[]   = useMemo(() => aggregateBySub(cohort, dedupedAssignments, payments.rows),
+                                                [cohort, dedupedAssignments, payments.rows]);
+  const donorRollup: DonorAggregation[] = useMemo(() => aggregateByDonor(cohort, dedupedAssignments, payments.rows),
+                                                  [cohort, dedupedAssignments, payments.rows]);
 
   const totalAssignments = useMemo(
-    () => assignments.rows.filter(a => cohortIds.has(a.company_id)).length,
-    [assignments.rows, cohortIds],
+    () => dedupedAssignments.filter(a => cohortIds.has(a.company_id)).length,
+    [dedupedAssignments, cohortIds],
   );
   const totalCommitted = useMemo(
     () => amRollup.reduce((s, am) => s + am.plannedUsd, 0),

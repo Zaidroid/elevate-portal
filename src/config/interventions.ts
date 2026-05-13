@@ -135,6 +135,45 @@ export function resolveIntervention(
 
 export const CORE_PILLARS: Pillar[] = PILLARS;
 
+// Canonical key for deduplicating + grouping intervention assignments.
+// An assignment can carry its intervention in two columns:
+//   - intervention_type   (might be 'MA' / 'C-Suite' / 'MA-C-Suite' / 'MA-Technical')
+//   - sub_intervention    (might be 'C-Suite' / '' / 'Technical')
+// Combined with the flavor field on LEGACY entries, two rows that
+// represent THE SAME INTERVENTION can end up with different raw
+// strings — the Program tab then renders them as separate cards.
+// This helper resolves both columns through resolveIntervention() and
+// returns a single stable string the rest of the codebase can group by.
+//
+// Returns 'UNKNOWN::<raw>' when nothing resolves so we don't silently
+// collapse genuinely-broken rows; the team can spot them in the
+// duplicate diagnostic.
+export function canonicalAssignmentKey(input: {
+  intervention_type?: string;
+  sub_intervention?: string;
+}): string {
+  const candidates = [input.intervention_type, input.sub_intervention].filter(Boolean) as string[];
+  for (const c of candidates) {
+    const r = resolveIntervention(c);
+    if (r && r.sub) {
+      // Sub-intervention is the canonical grouping unit. Flavor (e.g.
+      // C-Suite/Technical vs C-Suite/Soft) splits the group ONLY for
+      // assignments that explicitly carry it.
+      return r.flavor ? `${r.pillar}::${r.sub}::${r.flavor}` : `${r.pillar}::${r.sub}`;
+    }
+  }
+  // Fall back to pillar-only when no sub resolves (rare but legal).
+  for (const c of candidates) {
+    const r = resolveIntervention(c);
+    if (r) return `${r.pillar}::`;
+  }
+  // Truly unmappable — return a transparent fingerprint so the row
+  // shows up under the Schema Doctor's unmapped-intervention list and
+  // isn't silently collapsed with anything else.
+  const raw = candidates.join('|').toLowerCase().trim();
+  return raw ? `UNKNOWN::${raw}` : 'UNKNOWN::';
+}
+
 // ─── 2026 budget capacity per pillar / sub ───────────────────────────
 //
 // Numbers come straight from the Logframes workbook's "Program Budget"
