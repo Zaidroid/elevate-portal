@@ -103,3 +103,15 @@ export function cohortEntryFor(name: string): CohortAlias | null {
   if (!canon) return null;
   return byCanonical.get(canon) || null;
 }
+
+/** True if this row's company name resolves to a Cohort 3 canonical entry.
+ *  This is the canonical "is in cohort?" check — every page that needs to
+ *  filter to the 41 cohort companies should call this. */
+export function isCohort3<T extends { company_name?: string }>(row: T): boolean {
+  return canonicalCohortName(row.company_name || '') !== null;
+}
+
+/** Filter to just the Cohort 3 rows. */
+export function filterCohort3<T extends { company_name?: string }>(rows: T[]): T[] {
+  return rows.filter(isCohort3);
+}

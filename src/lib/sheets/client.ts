@@ -3,10 +3,52 @@
 // 429 exponential backoff, session-expired event bus.
 
 import { assertWritable } from './writeGuard';
+import { recordRun } from '../observability/last-run';
 
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
 export const sessionEvents = new EventTarget();
+
+/**
+ * Fires after every successful write through this adapter
+ * (updateRange / appendRows / batchUpdate / deleteSheetRow). The
+ * SheetDataProvider listens and invalidates matching cache keys so
+ * "Path B" writers (admin tools, dedupe runs, dashboard rebuilders,
+ * snapshot writers, etc.) don't leave the live UI showing stale data
+ * until the next 120 s poll.
+ *
+ * Detail shape:
+ *   { sheetId: string; range?: string }
+ *
+ * `range` is present for updateRange/appendRows so listeners can
+ * narrow invalidation to the affected tab. For batchUpdate the range
+ * is unknown (requests can touch multiple tabs / formats), so it's
+ * omitted and listeners should invalidate every key for that sheetId.
+ */
+export const writeEvents = new EventTarget();
+
+function dispatchWrite(sheetId: string, range?: string): void {
+  try {
+    writeEvents.dispatchEvent(new CustomEvent('write', { detail: { sheetId, range } }));
+  } catch {
+    // Defensive — never let a listener exception break the write.
+  }
+}
+
+/**
+ * Extract the tab name from a Sheets API range string.
+ * Handles quoted tab names ('Intervention Assignments'!A:ZZ) and
+ * unquoted ones (Companies!A1:Z100). Returns null if the string
+ * doesn't contain a tab prefix.
+ */
+export function parseTabFromRange(range: string): string | null {
+  if (!range) return null;
+  const quoted = range.match(/^'([^']+)'!/);
+  if (quoted) return quoted[1];
+  const unquoted = range.match(/^([^!]+)!/);
+  if (unquoted) return unquoted[1];
+  return null;
+}
 
 export type ValueRenderOption = 'FORMATTED_VALUE' | 'UNFORMATTED_VALUE' | 'FORMULA';
 export type ValueInputOption = 'RAW' | 'USER_ENTERED';
@@ -94,6 +136,16 @@ export async function fetchRange(
     const msg = (err as Error).message || '';
     if (msg.includes('Unable to parse range') || msg.includes('not found')) {
       console.warn(`[sheets] Tab missing for range "${range}" in ${sheetId} — treating as empty.`);
+      // Surface the missing tab via the pill so it's not silently swallowed.
+      // The page sees an empty rows array; the pill flags that the underlying
+      // tab doesn't exist, prompting the admin to check sheet config.
+      recordRun(`Missing tab: ${range}`, {
+        outcome: 'fail',
+        ok: 0,
+        fail: 1,
+        message: `Tab not found in ${sheetId.slice(0, 8)}…`,
+        error: msg,
+      });
       return [];
     }
     throw err;
@@ -112,6 +164,7 @@ export async function appendRows(
     rangeUrl(sheetId, range) +
     `:append?valueInputOption=${input}&insertDataOption=INSERT_ROWS`;
   await request(url, { method: 'POST', body: JSON.stringify({ values }) });
+  dispatchWrite(sheetId, range);
 }
 
 export async function updateRange(
@@ -124,6 +177,7 @@ export async function updateRange(
   const input = opts.valueInput || 'USER_ENTERED';
   const url = `${rangeUrl(sheetId, range)}?valueInputOption=${input}`;
   await request(url, { method: 'PUT', body: JSON.stringify({ values }) });
+  dispatchWrite(sheetId, range);
 }
 
 export async function batchUpdate(
@@ -132,7 +186,13 @@ export async function batchUpdate(
 ): Promise<unknown> {
   assertWritable(sheetId);
   const url = `${SHEETS_API}/${sheetId}:batchUpdate`;
-  return request(url, { method: 'POST', body: JSON.stringify({ requests }) });
+  const result = await request(url, { method: 'POST', body: JSON.stringify({ requests }) });
+  // No range — batchUpdate requests can touch multiple tabs, so the
+  // listener should invalidate every key for this sheet. Wasteful for
+  // pure-formatting batchUpdates, but correct for content-changing
+  // ones (deletes via deleteDimension, etc.).
+  dispatchWrite(sheetId);
+  return result;
 }
 
 // Delete a single row from a tab. rowNumber is 1-based (header is row 1).

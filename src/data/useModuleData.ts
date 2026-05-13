@@ -1,20 +1,14 @@
 /**
- * useModuleData — Drop-in replacement for useSheetDoc that routes through
- * the centralized SheetDataProvider instead of creating independent poll loops.
+ * useModuleData — Page-level data hook routing through the centralized
+ * SheetDataProvider. Replaced an older per-tab hook (`useSheetDoc`,
+ * deleted May 2026) that created independent poll loops; the migration
+ * to this central pattern reduced quota cost ~40× (see SheetDataProvider
+ * doc-block for numbers).
  *
- * Migration guide:
- *   BEFORE:
- *     const { rows, loading, error, updateRow, createRow } = useSheetDoc<MyType>(
- *       getSheetId('companies') || null,
- *       getTab('companies', 'assignments'),
- *       'assignment_id',
- *       { userEmail: user?.email }
- *     );
- *
- *   AFTER:
- *     const { rows, loading, error, updateRow, createRow } = useModuleData<MyType>(
- *       'companies', 'assignments'
- *     );
+ * Usage:
+ *   const { rows, loading, error, updateRow, createRow } = useModuleData<MyType>(
+ *     'companies', 'assignments'
+ *   );
  *
  * The hook registers the DataKey with the provider on mount and unregisters
  * on unmount. Data stays cached in memory between navigations.

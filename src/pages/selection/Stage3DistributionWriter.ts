@@ -21,6 +21,7 @@ import { pillarFor } from '../../config/interventions';
 import { updateRange } from '../../lib/sheets/client';
 import { ensureHumanFriendlyTab, colLetter } from '../../lib/sheets/output-formatting';
 import { getSheetId, getTab } from '../../config/sheets';
+import { recordRun } from '../../lib/observability/last-run';
 
 const HEADERS = [
   'Company',
@@ -199,7 +200,17 @@ export async function writeStage3DistributionTab(input: WriteDistributionInput):
     );
     try {
       await updateRange(sheetId, `${tabName}!A${wipeStart}:${lastCol}${wipeEnd}`, blank, { valueInput: 'RAW' });
-    } catch { /* non-fatal */ }
+    } catch (err) {
+      // Non-fatal but surface — a wipe failure means stale rows from a
+      // larger prior write will linger past the new content's end.
+      recordRun('Stage 3 wipe-trailing', {
+        outcome: 'fail',
+        ok: 0,
+        fail: 1,
+        message: `Trailing rows ${wipeStart}–${wipeEnd} not wiped`,
+        error: (err as Error).message || String(err),
+      });
+    }
   }
 
   // Per-AM rollup block written to columns to the RIGHT of the data so
@@ -232,7 +243,15 @@ export async function writeStage3DistributionTab(input: WriteDistributionInput):
       `${tabName}!${rollupCol}${headerRowOneBased}:${colLetter(HEADERS.length + 4)}${headerRowOneBased + rollupRows.length - 1}`,
       rollupRows,
     );
-  } catch { /* non-fatal */ }
+  } catch (err) {
+    recordRun('Stage 3 rollup', {
+      outcome: 'fail',
+      ok: 0,
+      fail: 1,
+      message: 'Per-AM rollup block not written',
+      error: (err as Error).message || String(err),
+    });
+  }
 
   void totalBodyRows;
   return { rowsWritten: rows.length, tabName };

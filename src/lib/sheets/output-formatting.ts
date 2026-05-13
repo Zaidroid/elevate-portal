@@ -23,6 +23,7 @@
 // is safe; formatting requests overwrite prior values without error.
 
 import { batchUpdate, ensureSchema, getSpreadsheetMeta } from './client';
+import { recordRun } from '../observability/last-run';
 
 // ─── brand palette ──────────────────────────────────────────────────
 
@@ -272,13 +273,31 @@ export async function ensureHumanFriendlyTab(
   }
 
   // Send formatting in chunks of 100 (Sheets API request soft limit).
+  let chunkOk = 0;
+  let chunkFail = 0;
+  let firstError: string | undefined;
   for (let i = 0; i < requests.length; i += 100) {
     try {
       await batchUpdate(sheetId, requests.slice(i, i + 100));
+      chunkOk += 1;
     } catch (err) {
       // Formatting is non-fatal — content writes still succeed.
-      console.warn(`[output-formatting] batchUpdate chunk failed for ${tabName}:`, (err as Error).message);
+      const msg = (err as Error).message;
+      console.warn(`[output-formatting] batchUpdate chunk failed for ${tabName}:`, msg);
+      chunkFail += 1;
+      if (!firstError) firstError = msg;
     }
+  }
+  // Surface partial-format failures via the pill so silent fails don't
+  // leave dashboards with mixed formatting and no signal.
+  if (chunkFail > 0) {
+    recordRun(`Format: ${tabName}`, {
+      outcome: chunkOk > 0 ? 'partial' : 'fail',
+      ok: chunkOk,
+      fail: chunkFail,
+      message: `${chunkOk}/${chunkOk + chunkFail} format chunks ok`,
+      error: firstError,
+    });
   }
 
   return {

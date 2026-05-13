@@ -37,7 +37,7 @@ export function startPresenceHeartbeat(userEmail: string, companyId?: string): (
 }
 
 // Compute the set of user emails currently viewing each company. Reads
-// the activity log rows passed in (already loaded by useSheetDoc) and
+// the activity log rows passed in (already loaded by useModuleData) and
 // filters to recent presence entries.
 export type PresenceMap = Map<string, string[]>;   // companyId → user_emails (most recent first)
 

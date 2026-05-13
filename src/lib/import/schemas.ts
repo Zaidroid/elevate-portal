@@ -16,7 +16,7 @@ export type ImportTarget = {
   required: string[];        // headers that must be present in source
   // Headers we never want users to fill from a source file. The sheet sets
   // them via formula (e.g. company_id = "E3-"&TEXT(ROW(),"0000")) or the
-  // useSheetDoc hook stamps them on write (updated_at, updated_by).
+  // data hook stamps them on write (updated_at, updated_by).
   autoFilled?: string[];
   // Soft cap so a runaway file does not blow API quota.
   maxRows?: number;

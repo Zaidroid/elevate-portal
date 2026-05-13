@@ -8,7 +8,7 @@ import type { Tone } from './Badge';
 //
 // Items are keyed by `id` and bucketed by `status`. Dropping a card onto another
 // column calls `onStatusChange(id, newStatus)` — the caller is responsible for
-// persisting that change (useSheetDoc.updateRow). Cards are rendered via the
+// persisting that change (useModuleData's updateRow). Cards are rendered via the
 // `renderCard` prop so each module can show its own summary.
 //
 // Columns can be hidden at read-time via `columns[].hidden` or collapsed with

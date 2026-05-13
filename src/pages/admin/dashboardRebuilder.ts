@@ -22,7 +22,7 @@ import type { Review } from '../companies/reviewTypes';
 import { ACCOUNT_MANAGERS, displayName } from '../../config/team';
 import { pillarFor, PILLARS, resolveIntervention, COHORT3_BUDGET_TOTAL_USD } from '../../config/interventions';
 import { INTERVIEWED_NAMES, isInterviewed } from '../companies/interviewedSource';
-import { COHORT3_ALIASES, canonicalCohortName, cohortEntryFor } from '../../config/cohort3Aliases';
+import { COHORT3_ALIASES, canonicalCohortName, cohortEntryFor, isCohort3 } from '../../config/cohort3Aliases';
 
 // ─── Brand palette (mirrors gsg_sheets/brand.py) ────────────────────
 
@@ -69,10 +69,6 @@ const BAR_FONT = 'Menlo';
 // the single source of truth maintained alongside the Stage 3
 // distribution; using it everywhere here keeps the dashboard's counts
 // matched to what the portal displays.
-
-function inCohort3(c: Company): boolean {
-  return canonicalCohortName(c.company_name || '') !== null;
-}
 
 function effectiveStatus(c: Company): string {
   const sheetStatus = (c.status || '').trim();
@@ -254,7 +250,7 @@ export function buildCompaniesDashboard(input: {
 }): FormattedDashboard {
   const at = input.generatedAt ?? new Date();
   // The 41 cohort-3 companies (canonical alias map is authoritative).
-  const cohort = input.companies.filter(inCohort3);
+  const cohort = input.companies.filter(isCohort3);
   // Authoritative cardinal sizes — these match what the portal shows.
   const interviewedCount = INTERVIEWED_NAMES.size;       // 52
   const cohortSize = COHORT3_ALIASES.length;             // 41

@@ -3,7 +3,7 @@
 // Lets a non-engineer pull rows out of a legacy .xlsx or .csv file and append
 // them to one of the E3 master sheets. Mirrors the Python migrators in
 // sheet-builders/migrators/ but runs entirely in the browser using the same
-// OAuth token and the same useSheetDoc-style append path, so writes go through
+// OAuth token and the same adapter-level append path, so writes go through
 // the existing rate-limit + session-expired plumbing.
 //
 // Steps: 1) pick target  2) drop file  3) pick worksheet  4) map columns
@@ -809,7 +809,7 @@ function buildRowsForCommit(
       const idx = headerToSourceIdx[h];
       if (idx >= 0) v = srcRow[idx] ?? '';
       // Stamp updated_at / updated_by for any target that exposes them, even
-      // if the user did not map them — matches what useSheetDoc does on writes.
+      // if the user did not map them — matches what useModuleData does on writes.
       if (!v && h === 'updated_at') v = now;
       if (!v && h === 'updated_by' && userEmail) v = userEmail;
       if (target.required.includes(h) && !v) {

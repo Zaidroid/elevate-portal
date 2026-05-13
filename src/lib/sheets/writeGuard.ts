@@ -14,6 +14,7 @@
 // an env var is missing in a particular environment.
 
 import { SHEETS } from '../../config/sheets';
+import { recordRun } from '../observability/last-run';
 
 const DENY_PATTERNS = [
   /Source$/,           // procurementSource, paymentsSource, …
@@ -59,6 +60,16 @@ export function assertWritable(sheetId: string): void {
         `[writeGuard] Unknown sheetId for write: ${sheetId}. ` +
         `Add it to SHEETS in src/config/sheets.ts so the read-only guard can verify it.`,
       );
+      // Surface in the pill so a missing env var doesn't silently
+      // bypass the read-only guard. Truncate the sheetId so the
+      // popover stays compact.
+      recordRun('Unknown sheetId for write', {
+        outcome: 'fail',
+        ok: 0,
+        fail: 1,
+        message: 'Write went through unguarded',
+        error: `Unregistered sheetId ${sheetId.slice(0, 12)}…`,
+      });
     }
     return;
   }

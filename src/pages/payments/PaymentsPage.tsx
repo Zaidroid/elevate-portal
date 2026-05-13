@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Search, Plus, CheckCircle2, XCircle, Download, RefreshCw } from 'lucide-react';
 import { useAuth } from '../../services/auth';
-import { ACCOUNT_MANAGERS, displayName, isAdmin } from '../../config/team';
+import { isAdmin } from '../../config/team';
 import { useModuleData } from '../../data/useModuleData';
 import type { Payment, PR, Company } from '../../data/types';
 import { keepCompaniesSection } from '../../lib/sheets/sections';
-import { canonicalCohortName, cohortEntryFor } from '../../config/cohort3Aliases';
+import { canonicalCohortName } from '../../config/cohort3Aliases';
+import { buildCompanyLookup } from '../../data/companyLookup';
 import { COHORT3_BUDGET_TOTAL_USD } from '../../config/interventions';
 import { Badge, Button, Card, CardHeader, DataTable, Drawer, PageHeader, statusTone, downloadCsv, timestampedFilename } from '../../lib/ui';
 import type { Column } from '../../lib/ui';
@@ -61,31 +62,9 @@ export function PaymentsPage() {
   ], [q1.rows, q1.headers, q2.rows, q2.headers, q3.rows, q3.headers, q4.rows, q4.headers]);
 
   // company_id → derived view (canonical name + AM + donor + budget cap).
-  type CompanyLookup = {
-    companyId: string;
-    name: string;
-    amName: string;
-    donor: string;
-    budgetCap: number;
-  };
-  const companyLookup = useMemo(() => {
-    const m = new Map<string, CompanyLookup>();
-    for (const c of masterHook.rows) {
-      if (!c.company_id) continue;
-      const entry = cohortEntryFor(c.company_name || '');
-      const am = (c.profile_manager_email || entry?.am || '').toLowerCase();
-      const amName = ACCOUNT_MANAGERS.find(a => a.email.toLowerCase() === am)?.name
-        || (am ? displayName(am) : '');
-      m.set(c.company_id, {
-        companyId: c.company_id,
-        name: entry?.canonical || c.company_name || c.company_id,
-        amName,
-        donor: entry?.donor || c.fund_code || '',
-        budgetCap: entry?.budgetUsd || 0,
-      });
-    }
-    return m;
-  }, [masterHook.rows]);
+  // Shape + builder live in src/data/companyLookup so Procurement can use
+  // the same derivation without duplication.
+  const companyLookup = useMemo(() => buildCompanyLookup(masterHook.rows), [masterHook.rows]);
 
   const [query, setQuery] = useState('');
   const [view, setView] = useState<'output' | 'source'>('output');
