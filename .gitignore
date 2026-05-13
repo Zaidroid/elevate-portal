@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# sheet-builders Python tooling — output + caches
+sheet-builders/out/
+sheet-builders/inputs/
+sheet-builders/**/__pycache__/
+sheet-builders/.venv/
+*.pyc
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

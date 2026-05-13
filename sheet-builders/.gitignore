@@ -1,0 +1,6 @@
+out/
+__pycache__/
+*.pyc
+.venv/
+sheet-builders/.DS_Store
+.DS_Store
