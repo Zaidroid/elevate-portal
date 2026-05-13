@@ -12,8 +12,6 @@ import {
   AlertCircle,
   Archive,
   Award,
-  BarChart3,
-  Calendar,
   CloudDownload,
   Download,
   ExternalLink,
@@ -190,6 +188,15 @@ export function AdvisorsPage() {
   const [filterCountry, setFilterCountry] = useState<string>('');
   const [filterCategory, setFilterCategory] = useState<string>('');
   const [filterPipeline, setFilterPipeline] = useState<string>('');
+  // AM filter for the Pipeline tab. Admins / leadership land on ''
+  // (every AM's portfolio); a profile manager lands pre-filtered to
+  // their own email so they see only the advisors they own. The
+  // dropdown lets either role switch.
+  const [filterAm, setFilterAm] = useState<string>(() => {
+    if (isAdmin(userEmail) || isLeadership(userEmail)) return '';
+    // Profile-manager / member tiers: default to their own portfolio.
+    return userEmail || '';
+  });
   // Saved view: one-click preset that overrides individual filters with
   // a more expressive predicate (e.g. "stuck > SLA" or "matched this month")
   // that the basic chips cannot express.
@@ -337,13 +344,15 @@ export function AdvisorsPage() {
   // longer matches the filter. So we only apply pipeline filter to the
   // roster/follow-ups/activity views.
   const kanbanItems = useMemo(() => {
+    const amLower = (filterAm || '').toLowerCase().trim();
     return active.filter(a => {
       if (savedView && !savedViewPredicate(a)) return false;
       if (filterCountry && normalizeCountry(a.country) !== filterCountry) return false;
       if (filterCategory && a.stage2.primary !== filterCategory) return false;
+      if (amLower && (a.assignee_email || '').toLowerCase().trim() !== amLower) return false;
       return matchesQuery(a, query);
     });
-  }, [active, query, filterCountry, filterCategory, savedView, savedViewPredicate]);
+  }, [active, query, filterCountry, filterCategory, filterAm, savedView, savedViewPredicate]);
 
   const filtered = useMemo(() => {
     if (!filterPipeline) return kanbanItems;
@@ -1234,19 +1243,20 @@ export function AdvisorsPage() {
     // first so opening the page lands on the summary; Pipeline next as the
     // primary triage surface; Roster as the searchable index; Follow-ups
     // as the side workload; Activity as the audit trail.
-    // Inbox is the headline triage surface — only `New` form submissions
-    // show here, sorted by Stage 1 score, with one-click Approve/Decline.
+    // Five-tab layout in workflow order:
+    //   1. Inbox     — review new form submissions (Phase 1)
+    //   2. Pipeline  — AM-driven post-approval progression (Phases 4-7)
+    //   3. Matching  — pair admitted advisors to companies (Phases 2-3)
+    //   4. Pool      — searchable index of every advisor
+    //   5. Activity  — audit log
+    //
+    // Dashboard's KPIs were folded into the Inbox header strip; the
+    // Follow-ups list lives in the per-advisor drawer (which also has
+    // the side panel) — both were duplicative as top-level tabs.
     { value: 'inbox', label: 'Inbox', icon: <InboxIcon className="h-4 w-4" />, count: inboxAdvisors.length },
+    { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: kanbanItems.length },
     { value: 'matching', label: 'Matching', icon: <Sparkles className="h-4 w-4" />, count: matchablePool.length },
-    { value: 'dashboard', label: 'Dashboard', icon: <BarChart3 className="h-4 w-4" /> },
-    { value: 'pipeline', label: 'Pipeline', icon: <KanbanIcon className="h-4 w-4" />, count: active.length },
-    { value: 'roster', label: 'Roster', icon: <TableIcon className="h-4 w-4" />, count: filtered.length },
-    {
-      value: 'followups',
-      label: 'Follow-ups',
-      icon: <Calendar className="h-4 w-4" />,
-      count: fuHook.rows.filter(f => f.status === 'Open').length,
-    },
+    { value: 'roster', label: 'Pool', icon: <TableIcon className="h-4 w-4" />, count: filtered.length },
     {
       value: 'activity',
       label: 'Activity',
@@ -1461,12 +1471,45 @@ export function AdvisorsPage() {
       )}
 
       {tab === 'pipeline' && (
-        <AdvisorPipelineKanban
-          advisors={kanbanItems}
-          readOnly={!canEdit}
-          onMove={handleMovePipeline}
-          onCardClick={a => setSelectedId(a.advisor_id)}
-        />
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Account manager:</span>
+            <select
+              value={filterAm}
+              onChange={e => setFilterAm(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm dark:border-navy-700 dark:bg-navy-600 dark:text-white"
+            >
+              <option value="">All AMs ({kanbanItems.length} advisors)</option>
+              {ACCOUNT_MANAGERS.map(am => {
+                const count = active.filter(a => (a.assignee_email || '').toLowerCase() === am.email.toLowerCase() && !['archived'].includes((a.pipeline_status || '').toLowerCase())).length;
+                return (
+                  <option key={am.email} value={am.email}>
+                    {am.name} ({count})
+                  </option>
+                );
+              })}
+              {/* Show any other assignee found in the data (eg. an admin who's
+                  been temporarily assigned) so the filter never hides rows. */}
+              {Array.from(new Set(active.map(a => (a.assignee_email || '').toLowerCase()).filter(e => e && !ACCOUNT_MANAGERS.some(am => am.email.toLowerCase() === e)))).map(email => (
+                <option key={email} value={email}>{email}</option>
+              ))}
+            </select>
+            {filterAm && (
+              <button
+                onClick={() => setFilterAm('')}
+                className="text-xs font-semibold text-brand-teal hover:underline"
+              >
+                Clear filter
+              </button>
+            )}
+          </div>
+          <AdvisorPipelineKanban
+            advisors={kanbanItems}
+            readOnly={!canEdit}
+            onMove={handleMovePipeline}
+            onCardClick={a => setSelectedId(a.advisor_id)}
+          />
+        </>
       )}
 
       {tab === 'roster' && (

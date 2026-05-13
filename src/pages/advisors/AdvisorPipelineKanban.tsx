@@ -23,6 +23,15 @@ const TONE_MAP: Record<string, Tone> = {
   green: 'green',
 };
 
+// Columns to hide from the AM-facing kanban. The Inbox tab owns
+// `new` (incoming form submissions) and `acknowledged` (acknowledged
+// but not yet assigned to an AM) — those aren't AM work, so they don't
+// belong in this surface. Listing them as `HIDDEN_FROM_KANBAN`
+// keeps the canonical PIPELINE_COLUMNS list untouched so other
+// consumers (Dashboard pivots, the per-advisor drawer's "Next action"
+// hint) still see the full lifecycle.
+const HIDDEN_FROM_KANBAN: ReadonlySet<AdvisorPipelineId> = new Set(['new', 'acknowledged']);
+
 export function AdvisorPipelineKanban({
   advisors,
   onMove,
@@ -34,17 +43,25 @@ export function AdvisorPipelineKanban({
   onCardClick: (advisor: EnrichedAdvisor) => void;
   readOnly?: boolean;
 }) {
-  const columns: KanbanColumn<AdvisorPipelineId>[] = PIPELINE_COLUMNS.map(c => ({
-    id: c.id,
-    label: c.label,
-    tone: TONE_MAP[c.tone] || 'neutral',
-    description: c.id === 'on_hold' ? 'Idle — review weekly' : undefined,
-  }));
+  const columns: KanbanColumn<AdvisorPipelineId>[] = PIPELINE_COLUMNS
+    .filter(c => !HIDDEN_FROM_KANBAN.has(c.id))
+    .map(c => ({
+      id: c.id,
+      label: c.label,
+      tone: TONE_MAP[c.tone] || 'neutral',
+      description: c.id === 'on_hold' ? 'Idle — review weekly' : undefined,
+    }));
 
-  // Drop archived advisors entirely — they should not appear in the pipeline.
-  // The roster tab still shows them when "Show archived" is on.
+  // Drop archived + Inbox-stage advisors. Inbox stages (new,
+  // acknowledged) are handled in the Inbox tab; surfacing them here
+  // duplicates the work. The Pool tab still shows the full list.
   const items: AdvItem[] = advisors
-    .filter(a => a.pipeline_status !== 'Archived')
+    .filter(a => {
+      if (a.pipeline_status === 'Archived') return false;
+      const norm = normalizeStatus(a.pipeline_status);
+      if (HIDDEN_FROM_KANBAN.has(norm)) return false;
+      return true;
+    })
     .map(a => ({
       id: a.advisor_id,
       status: (normalizeStatus(a.pipeline_status) as AdvisorPipelineId),

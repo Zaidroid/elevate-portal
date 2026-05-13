@@ -8,7 +8,7 @@
 // pre-filled "Decline (low score)" button. Borderline middle band needs an
 // explicit choice.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Briefcase,
@@ -147,16 +147,22 @@ export function AdvisorInboxTab({
 
       {openApprove && (
         <ApprovePicker
+          key={`approve-${openApprove.advisor_id}`}
           advisor={openApprove}
           amLoadByEmail={amLoadByEmail}
           suggestedAm={suggestedAm}
-          onCancel={() => setOpenApprove(null)}
+          onClose={() => setOpenApprove(null)}
           onConfirm={async (amEmail, sendWelcome) => {
-            setRunning(openApprove.advisor_id);
+            // Close FIRST so the modal disappears the moment the user
+            // clicks; we don't want the picker to sit blocking the UI
+            // while the network round-trip happens. The actual write
+            // is fire-and-forget from this point.
+            const target = openApprove;
+            setOpenApprove(null);
+            setRunning(target.advisor_id);
             try {
-              await onApprove(openApprove, amEmail, sendWelcome);
-              toast.success('Advisor approved', `${openApprove.full_name} assigned to ${displayName(amEmail)}.`);
-              setOpenApprove(null);
+              await onApprove(target, amEmail, sendWelcome);
+              toast.success('Advisor approved', `${target.full_name} assigned to ${displayName(amEmail)}.`);
             } catch (err) {
               toast.error('Approve failed', (err as Error).message);
             } finally {
@@ -168,14 +174,16 @@ export function AdvisorInboxTab({
 
       {openDecline && (
         <DeclinePicker
+          key={`decline-${openDecline.advisor_id}`}
           advisor={openDecline}
-          onCancel={() => setOpenDecline(null)}
+          onClose={() => setOpenDecline(null)}
           onConfirm={async (reason, sendLetter) => {
-            setRunning(openDecline.advisor_id);
+            const target = openDecline;
+            setOpenDecline(null);
+            setRunning(target.advisor_id);
             try {
-              await onDecline(openDecline, reason, sendLetter);
-              toast.success('Advisor declined', `${openDecline.full_name} marked rejected.`);
-              setOpenDecline(null);
+              await onDecline(target, reason, sendLetter);
+              toast.success('Advisor declined', `${target.full_name} marked rejected.`);
             } catch (err) {
               toast.error('Decline failed', (err as Error).message);
             } finally {
@@ -308,22 +316,37 @@ function ApprovePicker({
   advisor,
   amLoadByEmail,
   suggestedAm,
-  onCancel,
+  onClose,
   onConfirm,
 }: {
   advisor: EnrichedAdvisor;
   amLoadByEmail: Map<string, number>;
   suggestedAm: string;
-  onCancel: () => void;
-  onConfirm: (amEmail: string, sendWelcomeEmail: boolean) => Promise<void>;
+  onClose: () => void;
+  onConfirm: (amEmail: string, sendWelcomeEmail: boolean) => void | Promise<void>;
 }) {
   const [amEmail, setAmEmail] = useState(suggestedAm);
   const [sendWelcome, setSendWelcome] = useState(true);
   const [busy, setBusy] = useState(false);
 
+  // Close on Esc and on backdrop click — never trap the user in the modal.
+  // The parent caller also closes the modal in its onConfirm handler;
+  // this is the belt-and-suspenders layer for keyboard / overlay clicks.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-      <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl dark:border-navy-700 dark:bg-navy-600">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl dark:border-navy-700 dark:bg-navy-600"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="text-sm font-bold text-navy-500 dark:text-white">Approve {advisor.full_name}</div>
         <div className="text-[11px] text-slate-500 dark:text-slate-400 mb-4">
           Advances status New → Acknowledged → Allocated and assigns the chosen AM.
@@ -366,15 +389,18 @@ function ApprovePicker({
         </label>
 
         <div className="mt-5 flex items-center justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
           <Button
             variant="primary"
             disabled={!amEmail || busy}
-            onClick={async () => {
+            onClick={() => {
+              if (busy) return;
               setBusy(true);
+              // Fire-and-forget — the parent closes the modal as soon
+              // as it processes the click, so we don't await here.
               try {
-                await onConfirm(amEmail, sendWelcome);
-              } finally {
+                void onConfirm(amEmail, sendWelcome);
+              } catch {
                 setBusy(false);
               }
             }}
@@ -391,12 +417,12 @@ function ApprovePicker({
 
 function DeclinePicker({
   advisor,
-  onCancel,
+  onClose,
   onConfirm,
 }: {
   advisor: EnrichedAdvisor;
-  onCancel: () => void;
-  onConfirm: (reason: string, sendLetter: boolean) => Promise<void>;
+  onClose: () => void;
+  onConfirm: (reason: string, sendLetter: boolean) => void | Promise<void>;
 }) {
   const live = useMemo(() => scoreFields(advisor as Advisor), [advisor]);
   const s1num = parseFloat(live.stage1_score || advisor.stage1_score || '0') || 0;
@@ -409,9 +435,21 @@ function DeclinePicker({
 
   const finalReason = reason === 'Other' ? other.trim() : reason;
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-      <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl dark:border-navy-700 dark:bg-navy-600">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl dark:border-navy-700 dark:bg-navy-600"
+        onClick={e => e.stopPropagation()}
+      >
         <div className="text-sm font-bold text-navy-500 dark:text-white">Decline {advisor.full_name}</div>
         <div className="text-[11px] text-slate-500 dark:text-slate-400 mb-4">
           Sets pipeline_status to Rejected and stamps decision_date. Reason is logged to the activity feed.
@@ -447,15 +485,16 @@ function DeclinePicker({
         </label>
 
         <div className="mt-5 flex items-center justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
           <Button
             variant="primary"
             disabled={!finalReason || busy}
-            onClick={async () => {
+            onClick={() => {
+              if (busy) return;
               setBusy(true);
               try {
-                await onConfirm(finalReason, sendLetter);
-              } finally {
+                void onConfirm(finalReason, sendLetter);
+              } catch {
                 setBusy(false);
               }
             }}

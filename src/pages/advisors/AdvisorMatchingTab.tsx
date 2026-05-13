@@ -16,7 +16,7 @@
 // Both writes use the central canonical-key dedupe pre-check so
 // assigning the same advisor twice is a no-op.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   Handshake,
@@ -95,6 +95,17 @@ export function AdvisorMatchingTab({
     [companies, companyId],
   );
 
+  // If the picked company no longer matches the chosen sub-intervention
+  // filter (admin changed C-Suite -> Marketing Agency), clear the
+  // selection so the dropdown isn't lying about which company is
+  // active.
+  useEffect(() => {
+    if (!companyId) return;
+    const stillEligible = filteredCompanies.some(c => c.company_id === companyId);
+    if (!stillEligible) setCompanyId('');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subFilter]);
+
   // Existing matches for the selected company — used to (a) gray out
   // advisors already matched and (b) show "X advisors already matched"
   // up top.
@@ -167,21 +178,28 @@ export function AdvisorMatchingTab({
     }
   };
 
-  // Companies needing the selected sub-intervention bubble up first in
-  // the picker. Helps the admin find work-needing companies fast.
-  const sortedCompanies = useMemo(() => {
-    const needsSub = (c: CompanyLite): boolean => {
-      const subs = c.subs;
-      if (!subs || subs.length === 0) return false;
-      const lc = subFilter.toLowerCase();
-      return subs.some(s => (s || '').toLowerCase() === lc);
-    };
-    return [...companies].sort((a, b) => {
-      const an = needsSub(a) ? 0 : 1;
-      const bn = needsSub(b) ? 0 : 1;
-      if (an !== bn) return an - bn;
-      return (a.company_name || '').localeCompare(b.company_name || '');
-    });
+  // Only show companies that have been actually allocated the
+  // selected sub-intervention. The dropdown is otherwise overwhelming
+  // and offers companies the matcher can't help with — per the
+  // playbook (Phase 2) the match is built per-company-need, not as a
+  // catalogue.
+  //
+  // `subs` is sourced from companies::assignments via AdvisorsPage's
+  // CompanyLite memo. We canonicalize both sides through
+  // resolveIntervention so a row recorded as 'MA-C-Suite' (legacy) or
+  // 'C-Suite' (canonical) both resolve to the same sub for matching.
+  const filteredCompanies = useMemo(() => {
+    const targetSub = (resolveIntervention(subFilter)?.sub || subFilter).toLowerCase();
+    return companies
+      .filter(c => {
+        const subs = c.subs;
+        if (!subs || subs.length === 0) return false;
+        return subs.some(s => {
+          const canonical = (resolveIntervention(s)?.sub || s).toLowerCase();
+          return canonical === targetSub;
+        });
+      })
+      .sort((a, b) => (a.company_name || '').localeCompare(b.company_name || ''));
   }, [companies, subFilter]);
 
   return (
@@ -199,13 +217,14 @@ export function AdvisorMatchingTab({
               onChange={e => setCompanyId(e.target.value)}
               className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-navy-700 dark:bg-navy-600 dark:text-white"
             >
-              <option value="">— Select a company —</option>
-              {sortedCompanies.map(c => (
+              <option value="">
+                {filteredCompanies.length === 0
+                  ? `— No Cohort 3 company is assigned ${subFilter} —`
+                  : `— Select a company (${filteredCompanies.length} need${filteredCompanies.length === 1 ? 's' : ''} ${subFilter}) —`}
+              </option>
+              {filteredCompanies.map(c => (
                 <option key={c.company_id} value={c.company_id}>
                   {c.company_name}
-                  {c.subs && c.subs.map(s => (s || '').toLowerCase()).includes(subFilter.toLowerCase())
-                    ? '  ★ needs ' + subFilter
-                    : ''}
                 </option>
               ))}
             </select>
