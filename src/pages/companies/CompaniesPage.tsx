@@ -457,6 +457,48 @@ export function CompaniesPage() {
         )}
       </Card>
 
+      {scope === 'waitlist' && (sourceData.loading || sourceData.error || sourceData.rows.length === 0) && (
+        <Card className={
+          sourceData.error
+            ? 'border-l-4 border-l-red-400'
+            : sourceData.loading
+              ? 'border-l-4 border-l-slate-300'
+              : 'border-l-4 border-l-red-400'
+        }>
+          <div className="flex items-start gap-3">
+            <AlertTriangle className={`mt-0.5 h-4 w-4 flex-shrink-0 ${sourceData.loading ? 'text-slate-400' : 'text-red-500'}`} />
+            <div className="min-w-0 flex-1 text-xs">
+              {sourceData.loading ? (
+                <>
+                  <div className="font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">Loading Source Data…</div>
+                  <p className="mt-1 text-slate-500">Reading the Selection workbook. The waitlist will populate when this finishes.</p>
+                </>
+              ) : sourceData.error ? (
+                <>
+                  <div className="font-bold uppercase tracking-wider text-red-700 dark:text-red-300">Couldn't read Source Data</div>
+                  <p className="mt-1 text-slate-600 dark:text-slate-300">
+                    The Selection workbook returned an error. Most common cause: your Google account hasn't been granted read access to the <code>E3 - Selection Data</code> sheet. Ask Zaid to share it with you.
+                  </p>
+                  <pre className="mt-2 overflow-x-auto rounded bg-red-50 p-2 text-2xs text-red-800 dark:bg-red-950 dark:text-red-200">{String(sourceData.error)}</pre>
+                </>
+              ) : (
+                <>
+                  <div className="font-bold uppercase tracking-wider text-red-700 dark:text-red-300">Source Data is empty</div>
+                  <p className="mt-1 text-slate-600 dark:text-slate-300">
+                    The Selection workbook loaded but returned 0 applicant rows. Likely causes:
+                  </p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4 text-slate-600 dark:text-slate-300">
+                    <li>Your Google account doesn't have read access to the <code>E3 - Selection Data</code> sheet — ask Zaid to share it with you.</li>
+                    <li>The "Source Data" tab in that sheet is empty or has been renamed.</li>
+                    <li><code>VITE_SHEET_SELECTION</code> isn't set in the deployed environment.</li>
+                  </ul>
+                </>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
+
       {scope === 'waitlist' && unmatchedCanonicals.length > 0 && sourceData.rows.length > 0 && (
         <Card className="border-l-4 border-l-amber-400">
           <div className="flex items-start gap-3">
@@ -508,27 +550,31 @@ export function CompaniesPage() {
       )}
 
       {sorted.length === 0 ? (
-        <Card>
-          <EmptyState
-            icon={<Building2 className="h-8 w-8" />}
-            title={
-              hasActiveFilter
-                ? 'No companies match these filters'
-                : scope === 'waitlist'
-                  ? 'No waitlist applicants found'
-                  : scope === 'mine'
-                    ? 'You have no assigned companies'
-                    : 'No cohort 3 companies yet'
-            }
-            description={
-              hasActiveFilter
-                ? 'Try clearing a filter or widening your search.'
-                : scope === 'waitlist'
-                  ? 'Either the Source Data tab is empty, or every applicant resolved to the selected 41.'
-                  : 'Run the cohort allocation seed in /import to populate the cohort.'
-            }
-          />
-        </Card>
+        // Suppress the redundant empty card in waitlist scope when the
+        // status pill above already explains *why* Source Data is empty.
+        scope === 'waitlist' && (sourceData.loading || sourceData.error || sourceData.rows.length === 0) ? null : (
+          <Card>
+            <EmptyState
+              icon={<Building2 className="h-8 w-8" />}
+              title={
+                hasActiveFilter
+                  ? 'No companies match these filters'
+                  : scope === 'waitlist'
+                    ? 'No waitlist applicants found'
+                    : scope === 'mine'
+                      ? 'You have no assigned companies'
+                      : 'No cohort 3 companies yet'
+              }
+              description={
+                hasActiveFilter
+                  ? 'Try clearing a filter or widening your search.'
+                  : scope === 'waitlist'
+                    ? 'Every Source Data applicant resolved to one of the 41 selected — nothing left for the waitlist.'
+                    : 'Run the cohort allocation seed in /import to populate the cohort.'
+              }
+            />
+          </Card>
+        )
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {sorted.map(c => (
