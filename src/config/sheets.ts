@@ -252,7 +252,21 @@ export function getSheetId(module: ModuleKey): string {
   if (!id) {
     console.warn(`[sheets config] Missing sheet ID for module '${module}'. Set VITE_SHEET_${module.toUpperCase()} in env.`);
   }
-  return id;
+  // If the env var holds a comma-separated list (used by modules with
+  // multiple data sources, e.g. advisorsFormResponses pulling from both
+  // the canonical portal sheet and the legacy Google Form), return the
+  // FIRST id so callers expecting a single string keep working.
+  return id.includes(',') ? id.split(',')[0].trim() : id;
+}
+
+/** Like getSheetId but returns ALL ids when the env var holds a
+ *  comma-separated list. Use for modules that fan out across multiple
+ *  source sheets (e.g. advisorsFormResponses). Always returns at least
+ *  one id when configured. */
+export function getSheetIds(module: ModuleKey): string[] {
+  const raw = SHEETS[module].sheetId;
+  if (!raw) return [];
+  return raw.split(',').map(s => s.trim()).filter(Boolean);
 }
 
 export function getTab(module: ModuleKey, tab: string): string {

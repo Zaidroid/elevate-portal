@@ -188,7 +188,10 @@ export type ImportResult = {
 };
 
 export async function importNewFormResponses(opts: {
-  formSheetId: string;
+  /** One or more form-responses sheets to pull from. Earlier IDs win on
+   *  dedupe (within a single tick) when the same email+date appears in
+   *  multiple sources, so put the canonical sheet first. */
+  formSheetIds: string[];
   formTabName: string;
   destSheetId: string;
   destTabName: string;
@@ -208,7 +211,9 @@ export async function importNewFormResponses(opts: {
     skippedNoEmail: 0,
     ranAt: new Date().toISOString(),
     decisions: [],
-    sourceSheetId: opts.formSheetId,
+    // Comma-joined for back-compat with the FormIntakeDiagnostics card,
+    // which still shows a single sourceSheetId string.
+    sourceSheetId: opts.formSheetIds.join(', '),
     sourceTabName: opts.formTabName,
     destSheetId: opts.destSheetId,
     destTabName: opts.destTabName,
@@ -220,106 +225,128 @@ export async function importNewFormResponses(opts: {
     result.errors.push('Destination headers not loaded yet — skipping this tick.');
     return result;
   }
-
-  // 1. Fetch from form-responses sheet
-  let raw: string[][] = [];
-  try {
-    raw = await fetchRange(opts.formSheetId, `${opts.formTabName}!A:ZZ`);
-  } catch (err) {
-    result.errors.push(`Failed to read form responses: ${(err as Error).message}`);
-    return result;
-  }
-  if (raw.length < 2) {
-    result.errors.push('Form responses sheet is empty or missing data rows');
+  if (!opts.formSheetIds || opts.formSheetIds.length === 0) {
+    result.errors.push('No form-responses sheet IDs configured.');
     return result;
   }
 
-  const headers = raw[0];
-  const rows = raw.slice(1);
-  result.fetched = rows.length;
+  // 1. Fetch every source in parallel. Failures on one source are
+  //    logged but do not block the others.
+  type Fetched = { sheetId: string; headers: string[]; rows: string[][] };
+  const fetched: Fetched[] = (await Promise.all(
+    opts.formSheetIds.map(async sheetId => {
+      try {
+        const raw = await fetchRange(sheetId, `${opts.formTabName}!A:ZZ`);
+        if (raw.length < 2) return { sheetId, headers: [], rows: [] as string[][] };
+        return { sheetId, headers: raw[0], rows: raw.slice(1) };
+      } catch (err) {
+        result.errors.push(`Failed to read ${sheetId}: ${(err as Error).message}`);
+        return { sheetId, headers: [] as string[], rows: [] as string[][] };
+      }
+    }),
+  )).filter(f => f.rows.length > 0);
 
-  // 2. Map each source column to a canonical destination column.
-  //    Track headers that had a value somewhere but couldn't be routed
-  //    so the UI can show the team WHICH form columns drifted.
-  const colRouting: Array<keyof Advisor | null> = headers.map(h => routeHeader(h));
-  for (let i = 0; i < headers.length; i++) {
-    const headerName = String(headers[i] ?? '').trim();
-    const target = colRouting[i];
-    if (target) {
-      if (headerName) result.mappedHeaders.push({ source: headerName, target: String(target) });
-      continue;
+  if (fetched.length === 0) {
+    if (result.errors.length === 0) {
+      result.errors.push('All form-responses sheets are empty or missing data rows');
     }
-    if (!headerName) continue;
-    const hasAny = rows.some(r => String(r[i] ?? '').trim() !== '');
-    if (hasAny) result.unmappedHeaders.push(headerName);
+    return result;
   }
 
-  // 3. Build an existing-key set to dedupe against
+  result.fetched = fetched.reduce((n, f) => n + f.rows.length, 0);
+
+  // 2. Build an existing-key set to dedupe against. Keys accumulate
+  //    across sources so two sources offering the same applicant don't
+  //    write twice in the same tick.
   const knownKeys = new Set<string>();
   for (const a of opts.existingAdvisors) {
     if (!a.email) continue;
     knownKeys.add(dedupeKey(a.email, normalizeTimestamp(a.timestamp || '')));
   }
 
-  // 4. Walk rows; append unknowns to the destination
+  // 3. For each source: route columns, walk rows, dedupe, accumulate.
   const newRows: Partial<Advisor>[] = [];
-  for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
-    const r = rows[rowIdx];
-    const sheetRowNumber = rowIdx + 2; // +1 for header, +1 for 1-based
-    if (r.every(v => !v)) continue;
-    const draft: Partial<Advisor> = {};
-    for (let i = 0; i < headers.length && i < r.length; i++) {
+  const mappedSeen = new Set<string>(); // dedupe mapped headers across sources
+
+  for (const { sheetId, headers, rows } of fetched) {
+    const colRouting: Array<keyof Advisor | null> = headers.map(h => routeHeader(h));
+    for (let i = 0; i < headers.length; i++) {
+      const headerName = String(headers[i] ?? '').trim();
       const target = colRouting[i];
-      if (!target) continue;
-      draft[target] = String(r[i] ?? '').trim() as Advisor[typeof target];
+      if (target) {
+        const key = `${headerName}::${target}`;
+        if (headerName && !mappedSeen.has(key)) {
+          mappedSeen.add(key);
+          result.mappedHeaders.push({ source: headerName, target: String(target) });
+        }
+        continue;
+      }
+      if (!headerName) continue;
+      const hasAny = rows.some(r => String(r[i] ?? '').trim() !== '');
+      if (hasAny && !result.unmappedHeaders.includes(headerName)) {
+        result.unmappedHeaders.push(headerName);
+      }
     }
-    const rawTs = String(draft.timestamp || '').trim();
-    if (!draft.email) {
-      result.skippedNoEmail += 1;
-      result.decisions.push({
-        rowIndex: sheetRowNumber,
-        email: '',
-        timestampRaw: rawTs,
-        timestampNormalized: normalizeTimestamp(rawTs),
-        dedupeKey: '',
-        outcome: 'skipped-no-email',
-        reason: 'email cell was blank or unparseable',
-      });
-      continue;
-    }
-    draft.email = String(draft.email).trim();
-    const tsIso = normalizeTimestamp(rawTs);
-    draft.timestamp = tsIso;
-    const key = dedupeKey(draft.email, tsIso);
-    if (knownKeys.has(key)) {
-      result.alreadyKnown += 1;
+
+    for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+      const r = rows[rowIdx];
+      const sheetRowNumber = rowIdx + 2; // +1 for header, +1 for 1-based
+      if (r.every(v => !v)) continue;
+      const draft: Partial<Advisor> = {};
+      for (let i = 0; i < headers.length && i < r.length; i++) {
+        const target = colRouting[i];
+        if (!target) continue;
+        draft[target] = String(r[i] ?? '').trim() as Advisor[typeof target];
+      }
+      const rawTs = String(draft.timestamp || '').trim();
+      if (!draft.email) {
+        result.skippedNoEmail += 1;
+        result.decisions.push({
+          rowIndex: sheetRowNumber,
+          email: '',
+          timestampRaw: rawTs,
+          timestampNormalized: normalizeTimestamp(rawTs),
+          dedupeKey: '',
+          outcome: 'skipped-no-email',
+          reason: `[${sheetId.slice(0, 8)}…] email cell was blank or unparseable`,
+        });
+        continue;
+      }
+      draft.email = String(draft.email).trim();
+      const tsIso = normalizeTimestamp(rawTs);
+      draft.timestamp = tsIso;
+      const key = dedupeKey(draft.email, tsIso);
+      if (knownKeys.has(key)) {
+        result.alreadyKnown += 1;
+        result.decisions.push({
+          rowIndex: sheetRowNumber,
+          email: draft.email,
+          timestampRaw: rawTs,
+          timestampNormalized: tsIso,
+          dedupeKey: key,
+          outcome: 'duplicate',
+          reason: `[${sheetId.slice(0, 8)}…] matched existing advisor by email + date`,
+        });
+        continue;
+      }
+      knownKeys.add(key);
+
+      const isPre2026 = !!tsIso && tsIso < COHORT_3_START;
+      draft.pipeline_status = isPre2026 ? 'Archived' : 'New';
+      if (isPre2026) result.archived += 1;
+      draft.updated_at = new Date().toISOString().slice(0, 10);
+      draft.updated_by = opts.userEmail || 'form-import';
+      newRows.push(draft);
       result.decisions.push({
         rowIndex: sheetRowNumber,
         email: draft.email,
         timestampRaw: rawTs,
         timestampNormalized: tsIso,
         dedupeKey: key,
-        outcome: 'duplicate',
-        reason: 'matched an existing advisor by email + date',
+        outcome: isPre2026 ? 'archived-pre-2026' : 'imported',
+        reason: `[${sheetId.slice(0, 8)}…]`,
       });
-      continue;
     }
-    knownKeys.add(key);
-
-    const isPre2026 = !!tsIso && tsIso < COHORT_3_START;
-    draft.pipeline_status = isPre2026 ? 'Archived' : 'New';
-    if (isPre2026) result.archived += 1;
-    draft.updated_at = new Date().toISOString().slice(0, 10);
-    draft.updated_by = opts.userEmail || 'form-import';
-    newRows.push(draft);
-    result.decisions.push({
-      rowIndex: sheetRowNumber,
-      email: draft.email,
-      timestampRaw: rawTs,
-      timestampNormalized: tsIso,
-      dedupeKey: key,
-      outcome: isPre2026 ? 'archived-pre-2026' : 'imported',
-    });
   }
 
   if (newRows.length === 0) return result;

@@ -25,7 +25,7 @@ import {
 import { useAuth } from '../../services/auth';
 import { ACCOUNT_MANAGERS, getUserByEmail, isAdmin, isLeadership } from '../../config/team';
 import { useModuleData } from '../../data/useModuleData';
-import { getSheetId, getTab } from '../../config/sheets';
+import { getSheetId, getSheetIds, getTab } from '../../config/sheets';
 import {
   Badge,
   Button,
@@ -800,16 +800,16 @@ export function AdvisorsPage() {
       else console.info('[advisors] auto-poll skipped: headers not loaded yet');
       return;
     }
-    const formSheetId = getSheetId('advisorsFormResponses');
+    const formSheetIds = getSheetIds('advisorsFormResponses');
     const formTab = getTab('advisorsFormResponses', 'responses');
-    if (!formSheetId) {
+    if (formSheetIds.length === 0) {
       if (!silent) toast.error('Set VITE_SHEET_ADVISORS_FORM_RESPONSES in your environment to enable form import.');
       return;
     }
     if (!silent) setImporting(true);
     try {
       const result = await importNewFormResponses({
-        formSheetId,
+        formSheetIds,
         formTabName: formTab,
         destSheetId: s.sheetId,
         destTabName: tabAdvisors,
