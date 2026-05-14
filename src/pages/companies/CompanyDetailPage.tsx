@@ -27,6 +27,7 @@ import type { Company, Contact, Assignment, PR, Payment, ConferenceTrackerRow as
 import type { Advisor } from '../../types/advisor';
 import { keepCompaniesSection } from '../../lib/sheets/sections';
 import { canonicalCohortName } from '../../config/cohort3Aliases';
+import { fuzzyNorm } from '../../lib/normalize';
 import { getProfileManagers, displayName } from '../../config/team';
 import { derivePRFields } from '../../lib/procurement/compute';
 import { INTERVENTION_TYPES, CORE_PILLARS, pillarFor, canonicalAssignmentKey } from '../../config/interventions';
@@ -83,6 +84,56 @@ const norm = (s?: string) => (s || '').trim().toLowerCase();
 const dateOnly = (s?: string) => (s ? s.split('T')[0].split(' ')[0] : '');
 const fmtUsd = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
+// Source Data rows from the Selection workbook use whatever field names
+// the team's form pushed in — sometimes `contactName`, sometimes
+// `contact_name`, sometimes `Contact Name`. Walk a few candidate keys
+// and pick the first non-empty value so the Contacts card actually
+// fills in for the ~60 waitlist applicants whose master row doesn't
+// exist yet.
+function pickField(row: SelectionRow | undefined, ...keys: string[]): string {
+  if (!row) return '';
+  for (const k of keys) {
+    const v = (row[k] as string | undefined) || '';
+    if (v && String(v).trim()) return String(v).trim();
+  }
+  return '';
+}
+
+function applicantContact(applicant: SelectionRow | undefined): {
+  name: string;
+  title: string;
+  email: string;
+  phone: string;
+  companyEmail: string;
+  companyPhone: string;
+  website: string;
+} | null {
+  if (!applicant) return null;
+  const name = pickField(applicant,
+    'contactName', 'contact_name', 'Contact Name', 'pocName', 'poc_name',
+    'fullName', 'full_name', 'representativeName', 'representative_name',
+    'applicantName', 'applicant_name', 'name_of_contact', 'ceoName',
+  );
+  const title = pickField(applicant,
+    'contactTitle', 'contact_title', 'Contact Title', 'pocTitle', 'poc_title',
+    'position', 'jobTitle', 'job_title', 'role',
+  );
+  const email = pickField(applicant,
+    'contactEmail', 'contact_email', 'Contact Email', 'pocEmail', 'poc_email',
+    'emailAddress', 'email_address', 'contactEmailAddress',
+  );
+  const phone = pickField(applicant,
+    'contactPhone', 'contact_phone', 'Contact Phone', 'pocPhone', 'poc_phone',
+    'phoneNumber', 'phone_number', 'mobile', 'mobileNumber',
+  );
+  const companyEmail = pickField(applicant, 'email', 'company_email', 'Company Email', 'companyEmail', 'businessEmail');
+  const companyPhone = pickField(applicant, 'phone', 'company_phone', 'Company Phone', 'companyPhone', 'businessPhone');
+  const website = pickField(applicant, 'website', 'companyWebsite', 'company_website', 'Website', 'url');
+  // Only return a contact card if at least *something* is populated.
+  if (!name && !email && !phone && !companyEmail && !companyPhone && !website) return null;
+  return { name, title, email, phone, companyEmail, companyPhone, website };
+}
+
 export function CompanyDetailPage() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -138,8 +189,6 @@ export function CompanyDetailPage() {
   // company_id (contacts, reviews, assignments, preDecisions, comments,
   // activity) returns ZERO rows, making the profile look empty.
   const masterRow = useMemo(() => {
-    // Short-circuit early: no URL id → nothing to look up. Avoids three
-    // wasted O(n) scans of companies.rows for an unreachable route.
     const trimmedId = (id || '').trim();
     if (!trimmedId) return undefined;
     // 1. Exact company_id match (the common path).
@@ -159,28 +208,70 @@ export function CompanyDetailPage() {
     const byName = companies.rows.find(
       r => (r.company_name || '').toLowerCase().trim() === idLower
     );
-    return byName;
+    if (byName) return byName;
+    // 4. Fuzzy-name match (handles "Inc.", trailing notes, suffix variants).
+    const idFuzzy = fuzzyNorm(trimmedId);
+    if (idFuzzy) {
+      const byFuzzy = companies.rows.find(
+        r => fuzzyNorm(r.company_name || '') === idFuzzy
+      );
+      if (byFuzzy) return byFuzzy;
+    }
+    return undefined;
   }, [companies.rows, id]);
 
-  // Find applicant data: first by numeric route id (legacy applicant
-  // links), then by canonical-cohort match against the master row's
-  // name. The cohort allocation seed creates master rows whose
-  // company_name resolves to a Cohort 3 canonical, but the applicant
-  // row lives under that same canonical (or one of its aliases) in
-  // Source Data — by id alone we miss it, leaving the Overview tab
-  // empty even though Source Data has sector / employees / revenue.
+  // Find applicant data (Source Data row from the Selection workbook).
+  //
+  // Lookup strategy — most specific first:
+  //   1. Source Data id equals route id (waitlist links pass r.id directly).
+  //   2. Legacy "A-NNNN" route id — strip prefix + leading zeros, match r.id.
+  //   3. Canonical-cohort match against the master row's name (for the 41).
+  //   4. Fuzzy-name match against the master row's name (handles master rows
+  //      whose name doesn't appear in COHORT3_ALIASES, or whose Source Data
+  //      counterpart has a slightly different spelling — without this,
+  //      Overview / contacts / scoring sections all silently render empty).
+  //   5. Fuzzy-name match against the route id itself (URL might be a name).
   const applicant = useMemo(() => {
-    const byId = sourceData.rows.find(r => r.id === id);
-    if (byId) return byId;
-    const masterCanon = canonicalCohortName(masterRow?.company_name || '');
-    if (!masterCanon) return undefined;
-    return sourceData.rows.find(r => {
-      const name = r.name || r.companyName || r.company_name || '';
-      const canon = canonicalCohortName(name);
-      return canon === masterCanon;
-    });
+    const trimmedId = (id || '').trim();
+    if (!trimmedId && !masterRow) return undefined;
+
+    // 1. Source Data id equals route id.
+    if (trimmedId) {
+      const byExactId = sourceData.rows.find(r => r.id === trimmedId);
+      if (byExactId) return byExactId;
+      // 2. "A-0042" style → "42".
+      const m = /^A-0*(\d+)$/i.exec(trimmedId);
+      if (m) {
+        const byPaddedId = sourceData.rows.find(r => r.id === m[1]);
+        if (byPaddedId) return byPaddedId;
+      }
+    }
+
+    const candidateName = masterRow?.company_name || trimmedId;
+
+    // 3. Canonical-cohort match.
+    const masterCanon = canonicalCohortName(candidateName);
+    if (masterCanon) {
+      const byCanon = sourceData.rows.find(r => {
+        const name = r.name || r.companyName || r.company_name || '';
+        return canonicalCohortName(name) === masterCanon;
+      });
+      if (byCanon) return byCanon;
+    }
+
+    // 4. Fuzzy-name match against the master row's name.
+    const masterFuzzy = fuzzyNorm(candidateName);
+    if (masterFuzzy) {
+      const byFuzzy = sourceData.rows.find(r => {
+        const name = r.name || r.companyName || r.company_name || '';
+        return fuzzyNorm(name) === masterFuzzy;
+      });
+      if (byFuzzy) return byFuzzy;
+    }
+
+    return undefined;
   }, [sourceData.rows, id, masterRow?.company_name]);
-  const applicantName = applicant?.name || applicant?.companyName || masterRow?.company_name || '';
+  const applicantName = applicant?.name || applicant?.companyName || applicant?.company_name || masterRow?.company_name || '';
   // suppress unused-var warning when applicantName isn't used downstream
   void applicantName;
 
@@ -189,17 +280,18 @@ export function CompanyDetailPage() {
     if (!applicant && !masterRow) return undefined;
     if (!applicant) return masterRow;
     // Applicant exists — build a view that uses applicant data as base, then overlays Master.
+    const apv = (...keys: string[]) => pickField(applicant as SelectionRow, ...keys);
     const base: Company = {
       company_id: masterRow?.company_id || `A-${(applicant.id || '').padStart(4, '0')}`,
       company_name: applicantName,
-      legal_name: masterRow?.legal_name || applicantName,
-      city: applicant.city || masterRow?.city || '',
-      governorate: masterRow?.governorate || '',
-      sector: masterRow?.sector || applicant.businessType || '',
-      employee_count: applicant.totalEmployees || masterRow?.employee_count || '',
-      revenue_bracket: masterRow?.revenue_bracket || '',
-      international_revenue_pct: applicant.revenueInternational || masterRow?.international_revenue_pct || '',
-      readiness_score: applicant.readinessScore || masterRow?.readiness_score || '',
+      legal_name: masterRow?.legal_name || apv('legalName', 'legal_name', 'Legal Name') || applicantName,
+      city: masterRow?.city || apv('city', 'City') || '',
+      governorate: masterRow?.governorate || apv('governorate', 'Governorate', 'region', 'Region') || '',
+      sector: masterRow?.sector || apv('businessType', 'sector', 'Sector', 'industry', 'Industry') || '',
+      employee_count: masterRow?.employee_count || apv('totalEmployees', 'numEmployees', 'employee_count', 'Total Employees', 'team_size', 'teamSize') || '',
+      revenue_bracket: masterRow?.revenue_bracket || apv('revenueBracket', 'revenue_bracket', 'Revenue Bracket') || '',
+      international_revenue_pct: masterRow?.international_revenue_pct || apv('revenueInternational', 'international_revenue_pct', 'internationalRevenue') || '',
+      readiness_score: masterRow?.readiness_score || apv('readinessScore', 'readiness_score', 'Readiness Score') || '',
       fund_code: masterRow?.fund_code || '',
       cohort: masterRow?.cohort || 'E3',
       status: masterRow?.status || 'Applicant',
@@ -819,6 +911,7 @@ function OverviewTab({
   needs?: SelectionRow;
 }) {
   const dirty = Object.keys(draft).some(k => draft[k] !== company[k]);
+  const applicantPoc = useMemo(() => applicantContact(applicant), [applicant]);
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -878,30 +971,37 @@ function OverviewTab({
         <Card>
           <CardHeader
             title="Contacts"
-            subtitle={contacts.length > 0 ? `${contacts.length} linked` : applicant ? 'From application' : undefined}
+            subtitle={contacts.length > 0 ? `${contacts.length} linked` : applicantPoc ? 'From application' : undefined}
           />
-          {contacts.length === 0 && applicant?.contactName ? (
+          {contacts.length === 0 && applicantPoc ? (
             <ul className="space-y-3">
               <li className="rounded-lg border border-dashed border-slate-300 p-3 dark:border-navy-700">
                 <div className="flex items-start justify-between gap-2">
-                  <div className="text-sm font-semibold text-navy-500 dark:text-white">{applicant.contactName}</div>
+                  <div className="text-sm font-semibold text-navy-500 dark:text-white">
+                    {applicantPoc.name || '(unnamed POC)'}
+                  </div>
                   <Badge tone="neutral">Applicant</Badge>
                 </div>
-                {applicant.contactTitle && <div className="text-xs text-slate-500">{applicant.contactTitle}</div>}
-                {applicant.contactEmail && (
-                  <a href={`mailto:${applicant.contactEmail}`} className="mt-1 block text-xs text-brand-teal hover:underline">
-                    {applicant.contactEmail}
+                {applicantPoc.title && <div className="text-xs text-slate-500">{applicantPoc.title}</div>}
+                {applicantPoc.email && (
+                  <a href={`mailto:${applicantPoc.email}`} className="mt-1 block text-xs text-brand-teal hover:underline">
+                    {applicantPoc.email}
                   </a>
                 )}
-                {applicant.contactPhone && <div className="text-xs text-slate-600 dark:text-slate-300">{applicant.contactPhone}</div>}
-                {(applicant.email || applicant.phone || applicant.website) && (
+                {applicantPoc.phone && <div className="text-xs text-slate-600 dark:text-slate-300">{applicantPoc.phone}</div>}
+                {(applicantPoc.companyEmail || applicantPoc.companyPhone || applicantPoc.website) && (
                   <div className="mt-2 border-t border-slate-200 pt-2 text-xs text-slate-500 dark:border-navy-700">
                     <div className="font-semibold uppercase tracking-wider">Company</div>
-                    {applicant.email && <div>{applicant.email}</div>}
-                    {applicant.phone && <div>{applicant.phone}</div>}
-                    {applicant.website && (
-                      <a href={applicant.website.startsWith('http') ? applicant.website : `https://${applicant.website}`} target="_blank" rel="noopener noreferrer" className="text-brand-teal hover:underline">
-                        {applicant.website}
+                    {applicantPoc.companyEmail && <div>{applicantPoc.companyEmail}</div>}
+                    {applicantPoc.companyPhone && <div>{applicantPoc.companyPhone}</div>}
+                    {applicantPoc.website && (
+                      <a
+                        href={applicantPoc.website.startsWith('http') ? applicantPoc.website : `https://${applicantPoc.website}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-brand-teal hover:underline"
+                      >
+                        {applicantPoc.website}
                       </a>
                     )}
                   </div>
