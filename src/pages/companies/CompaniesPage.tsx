@@ -173,7 +173,7 @@ export function CompaniesPage() {
   // canonical (strict OR loose match). Diagnostic surfaces unmatched
   // canonicals so the user can see which selected names are missing
   // aliases — without this you can't tell why the count drifts.
-  const { waitlist, matchedCanonicals, unmatchedCanonicals } = useMemo(() => {
+  const { waitlist, unmatchedCanonicals, arabicWaitlist } = useMemo(() => {
     const seen = new Set<string>();
     const wl: Company[] = [];
     const matched = new Set<string>();
@@ -193,10 +193,14 @@ export function CompaniesPage() {
     const unmatched = COHORT3_ALIASES
       .filter(e => !matched.has(e.canonical))
       .map(e => e.canonical);
-    return { waitlist: wl, matchedCanonicals: matched, unmatchedCanonicals: unmatched };
+    // Source Data rows still in waitlist that contain Arabic letters
+    // are the most likely cohort matches the alias list is missing —
+    // surface them next to the unmatched canonicals so we can pair
+    // visually.
+    const ARABIC_RX = /[؀-ۿ]/;
+    const ar = wl.filter(c => ARABIC_RX.test(c.company_name || ''));
+    return { waitlist: wl, unmatchedCanonicals: unmatched, arabicWaitlist: ar };
   }, [sourceData.rows]);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  void matchedCanonicals;
 
   // Mine scope = subset of cohort whose AM is the signed-in user.
   const mine = useMemo(
@@ -463,16 +467,41 @@ export function CompaniesPage() {
               </div>
               <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">
                 These canonicals from <code>cohort3Aliases.ts</code> have no Source Data row that resolved to them (strict + loose matching tried).
-                Their applicants are likely sitting in the waitlist below under a spelling not in the alias list — inflating the count from {COHORT3_ALIASES.length - unmatchedCanonicals.length + waitlist.length} to {waitlist.length}.
-                Add the Source Data spelling as an alias to fix.
+                Their applicants are most likely sitting below under a spelling not in the alias list — inflating the waitlist count.
+                Pair each canonical with its Source Data name, then add it as an alias.
               </p>
-              <ul className="mt-2 flex flex-wrap gap-1.5">
-                {unmatchedCanonicals.map(n => (
-                  <li key={n} className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-2xs font-semibold text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
-                    {n}
-                  </li>
-                ))}
-              </ul>
+              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Unmatched canonical (cohort 3)</div>
+                  <ul className="mt-1 flex flex-wrap gap-1.5">
+                    {unmatchedCanonicals.map(n => (
+                      <li key={n} className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-2xs font-semibold text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
+                        {n}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                    Waitlist rows with Arabic in the name ({arabicWaitlist.length}) — most likely cohort matches
+                  </div>
+                  {arabicWaitlist.length === 0 ? (
+                    <p className="mt-1 text-2xs text-slate-500">None — paste the Arabic Source Data name for each unmatched canonical and I'll add it as an alias.</p>
+                  ) : (
+                    <ul className="mt-1 flex flex-wrap gap-1.5">
+                      {arabicWaitlist.map(c => (
+                        <li
+                          key={c.company_id}
+                          className="rounded-full border border-slate-300 bg-white px-2 py-0.5 text-2xs font-semibold text-slate-700 dark:border-navy-700 dark:bg-navy-900 dark:text-slate-200"
+                          dir="auto"
+                        >
+                          {c.company_name}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </Card>
