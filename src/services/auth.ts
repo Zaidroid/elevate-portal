@@ -185,6 +185,15 @@ class AuthService {
   /**
    * Sign in using OAuth2 popup flow.
    * This opens a Google consent popup (no One Tap / FedCM issues).
+   *
+   * We pass `prompt: 'consent'` so the consent screen is always shown
+   * on explicit sign-in. Without it, Google issues a token using
+   * whatever scope subset the user previously consented to — meaning
+   * a user who once consented to a smaller scope set (e.g. only
+   * profile/email) gets re-signed in WITHOUT spreadsheets access and
+   * every sheet read 403s with ACCESS_TOKEN_SCOPE_INSUFFICIENT. The
+   * `prompt: 'consent'` flag forces Google to re-display the consent
+   * screen so the user can grant the missing scopes.
    */
   public signIn() {
     if (!this.tokenClient) {
@@ -192,8 +201,7 @@ class AuthService {
       this.notifyListeners();
       return;
     }
-    // Show Google OAuth consent popup
-    this.tokenClient.requestAccessToken({ prompt: '' });
+    this.tokenClient.requestAccessToken({ prompt: 'consent' });
   }
 
   /**
